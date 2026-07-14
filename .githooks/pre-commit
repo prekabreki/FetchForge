@@ -1,0 +1,15 @@
+#!/bin/sh
+# init-workspace pre-commit: keep .memories/README.md in sync with memory frontmatter.
+# Fires only when this commit touches .memories/ (excluding the generated index), so
+# unrelated commits stay fast. Regenerates the index and stages it.
+changed=$(git diff --cached --name-only -- .memories/ ':(exclude).memories/README.md')
+if [ -n "$changed" ]; then
+  repo_root=$(git rev-parse --show-toplevel)
+  if command -v python >/dev/null 2>&1; then
+    python "$repo_root/tools/memory-index.py" || exit 1
+  else
+    echo "init-workspace pre-commit: python not found; skipping .memories index refresh." >&2
+    exit 0
+  fi
+  git add "$repo_root/.memories/README.md"
+fi

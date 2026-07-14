@@ -1,0 +1,2978 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="dlpr-token" content="__DLPR_TOKEN__">
+<title>FetchForge — YouTube Downloader & H.265 Converter</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #111318;
+    --surface: #1a1d25;
+    --surface2: #22262f;
+    --border: #2d3240;
+    --border2: #3a3f50;
+    --accent: #e8a023;
+    --accent2: #ef5350;
+    --accent3: #4dd0a0;
+    --accent4: #64b5f6;
+    --text: #e8e4df;
+    --text2: #8a8696;
+    --muted: #5e5b6a;
+    --mono: 'JetBrains Mono', monospace;
+    --sans: 'Outfit', sans-serif;
+    --radius: 10px;
+    --radius-sm: 7px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.6;
+    min-height: 100vh;
+  }
+
+  .container {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 36px 28px 70px;
+  }
+
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  header {
+    margin-bottom: 32px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid var(--border);
+    animation: fadeUp 0.4s ease both;
+  }
+
+  .header-brand {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+  }
+
+  .channel-logo {
+    width: 80px;
+    height: 80px;
+    border-radius: 50%;
+    border: 2px solid var(--border2);
+    flex-shrink: 0;
+    object-fit: cover;
+  }
+
+  .logo {
+    font-family: var(--sans);
+    font-weight: 800;
+    font-size: 28px;
+    letter-spacing: -0.5px;
+    color: var(--accent);
+    line-height: 1.2;
+    white-space: nowrap;
+  }
+
+  .logo span {
+    /* colored words inherit logo size — no override */
+  }
+
+  .hero-blurb {
+    font-size: 14px;
+    color: var(--text2);
+    line-height: 1.6;
+    margin-top: -12px;
+    margin-bottom: 28px;
+    max-width: 680px;
+  }
+  .hero-blurb strong { color: var(--text); font-weight: 600; }
+
+  .header-status {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text2);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    padding: 4px 12px;
+    border-radius: 16px;
+    transition: border-color 0.2s;
+  }
+
+  .status-pill:hover {
+    border-color: var(--border2);
+  }
+
+  .dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--accent3);
+    box-shadow: 0 0 6px rgba(77,208,160,0.5);
+    animation: pulse 2.5s infinite;
+  }
+  .dot.warn { background: var(--accent2); box-shadow: 0 0 6px rgba(239,83,80,0.5); animation: none; }
+
+  @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:0.3;} }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 14px;
+    transition: border-color 0.2s ease;
+    animation: fadeUp 0.4s ease both;
+  }
+
+  .card:nth-child(2) { animation-delay: 0.03s; }
+  .card:nth-child(3) { animation-delay: 0.06s; }
+  .card:nth-child(4) { animation-delay: 0.09s; }
+  .card:nth-child(5) { animation-delay: 0.12s; }
+  .card:nth-child(6) { animation-delay: 0.15s; }
+  .card:nth-child(7) { animation-delay: 0.18s; }
+
+  .card:hover {
+    border-color: var(--border2);
+  }
+
+  .card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 20px;
+    background: rgba(255,255,255,0.02);
+    border-bottom: 1px solid var(--border);
+    border-radius: var(--radius) var(--radius) 0 0;
+  }
+
+  .card-title {
+    font-family: var(--sans);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text2);
+    letter-spacing: 0.5px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .card-num {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--accent);
+    background: rgba(232,160,35,0.1);
+    border: 1px solid rgba(232,160,35,0.2);
+    padding: 2px 8px;
+    border-radius: 4px;
+    letter-spacing: 0.5px;
+  }
+
+  .card-body { padding: 20px; }
+
+  .input-group { display: flex; gap: 8px; }
+
+  input[type="url"], input[type="text"] {
+    flex: 1;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 13px;
+    padding: 11px 14px;
+    border-radius: var(--radius-sm);
+    outline: none;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+
+  input[type="url"]:focus, input[type="text"]:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(232,160,35,0.15);
+  }
+  input[type="file"] { display: none; }
+
+  .btn {
+    font-family: var(--sans);
+    font-weight: 600;
+    font-size: 13px;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    border: none;
+    cursor: pointer;
+    padding: 11px 22px;
+    border-radius: var(--radius-sm);
+    transition: all 0.15s ease;
+    white-space: nowrap;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .btn::after { display: none; }
+
+  .btn-primary { background: var(--accent); color: #111; }
+  .btn-primary:hover { background: #f0b429; transform: translateY(-1px); box-shadow: 0 4px 16px rgba(232,160,35,0.25); }
+  .btn-success { background: var(--accent3); color: #111; }
+  .btn-success:hover { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(77,208,160,0.25); }
+  .btn-danger { background: var(--accent2); color: #fff; }
+  .btn-danger:hover { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(239,83,80,0.25); }
+  .btn-outline { background: transparent; color: var(--text2); border: 1px solid var(--border2); }
+  .btn-outline:hover { border-color: var(--accent); color: var(--accent); transform: translateY(-1px); }
+  .btn:disabled { opacity: 0.3; cursor: not-allowed; transform: none !important; box-shadow: none !important; }
+  .btn-sm { padding: 7px 14px; font-size: 11px; }
+  .btn:active:not(:disabled) { transform: translateY(0px) scale(0.98); }
+
+  .cookies-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+
+  .cookies-paste-row { margin-top: 14px; padding-top: 14px; border-top: 1px dashed var(--border); }
+  .cookies-paste-row textarea {
+    width: 100%;
+    min-height: 70px;
+    box-sizing: border-box;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 10px 12px;
+    resize: vertical;
+  }
+  .cookies-paste-row textarea:focus { outline: none; border-color: var(--accent); }
+  .cookies-paste-actions { display: flex; align-items: center; gap: 12px; margin-top: 8px; flex-wrap: wrap; }
+  .cookies-paste-hint { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+
+  .badge {
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: 14px;
+  }
+  .badge-ok { background: rgba(77,208,160,0.12); color: var(--accent3); border: 1px solid rgba(77,208,160,0.25); }
+  .badge-warn { background: rgba(239,83,80,0.1); color: var(--accent2); border: 1px solid rgba(239,83,80,0.2); }
+
+  .video-info {
+    display: none;
+    gap: 18px;
+    margin-top: 18px;
+    padding-top: 18px;
+    border-top: 1px solid var(--border);
+  }
+  .video-info.visible { display: flex; }
+
+  .thumb {
+    width: 190px;
+    flex-shrink: 0;
+    aspect-ratio: 16/9;
+    object-fit: cover;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    transition: transform 0.2s ease;
+  }
+  .thumb:hover { transform: scale(1.03); }
+
+  .video-meta { flex: 1; min-width: 0; }
+
+  .video-title {
+    font-family: var(--sans);
+    font-size: 17px;
+    font-weight: 700;
+    line-height: 1.3;
+    color: var(--text);
+    margin-bottom: 6px;
+  }
+
+  .meta-line { font-size: 13px; color: var(--text2); margin-bottom: 3px; }
+
+  .format-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+    margin-top: 16px;
+  }
+
+  .field { display: flex; flex-direction: column; gap: 5px; }
+
+  .field-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 1.5px;
+    color: var(--muted);
+    text-transform: uppercase;
+  }
+
+  select {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 12px;
+    padding: 9px 30px 9px 12px;
+    border-radius: var(--radius-sm);
+    outline: none;
+    cursor: pointer;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%235e5b6a'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    width: 100%;
+    transition: border-color 0.2s, box-shadow 0.2s;
+  }
+  select:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(232,160,35,0.15); }
+  select:hover { border-color: var(--border2); }
+
+  /* Preset cards */
+  .preset-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+
+  .preset-card {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    padding: 14px 16px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    display: block;
+    position: relative;
+    border-radius: var(--radius-sm);
+  }
+
+  .preset-card:hover { border-color: var(--border2); transform: translateY(-1px); }
+  .preset-card.selected { border-color: var(--accent); background: rgba(232,160,35,0.06); box-shadow: 0 0 0 1px var(--accent); }
+  .preset-card input[type="radio"] { position: absolute; opacity: 0; width: 0; height: 0; }
+
+  .preset-name {
+    font-family: var(--sans);
+    font-weight: 700;
+    font-size: 15px;
+    color: var(--text);
+    margin-bottom: 4px;
+  }
+  .preset-card.selected .preset-name { color: var(--accent); }
+
+  .preset-desc { font-size: 13px; color: var(--text2); line-height: 1.5; margin-bottom: 8px; }
+
+  .preset-tags { display: flex; gap: 6px; flex-wrap: wrap; }
+
+  .preset-tag {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--muted);
+    background: var(--surface);
+    padding: 3px 8px;
+    border-radius: 4px;
+  }
+  .preset-card.selected .preset-tag { background: rgba(232,160,35,0.1); color: var(--accent); }
+
+  /* Advanced */
+  .advanced-toggle {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 12px;
+    user-select: none;
+  }
+  .advanced-toggle:hover { color: var(--text2); }
+
+  .advanced-section { display: none; }
+  .advanced-section.open { display: block; }
+
+  .adv-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    padding: 14px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    margin-bottom: 12px;
+  }
+
+  .adv-note { font-size: 13px; color: var(--muted); margin-bottom: 14px; }
+
+  /* Toggle */
+  .toggle-row { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+
+  .toggle { position: relative; width: 42px; height: 24px; flex-shrink: 0; }
+  .toggle input { opacity: 0; width: 0; height: 0; }
+
+  .slider {
+    position: absolute; inset: 0;
+    background: var(--border2);
+    cursor: pointer; transition: 0.25s ease; border-radius: 12px;
+  }
+  .slider:before {
+    content: '';
+    position: absolute;
+    height: 18px; width: 18px;
+    left: 3px; bottom: 3px;
+    background: var(--surface);
+    transition: 0.25s ease; border-radius: 50%;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+  }
+  input:checked + .slider { background: var(--accent); }
+  input:checked + .slider:before { transform: translateX(18px); background: #111; }
+
+  .toggle-label { font-size: 14px; color: var(--text2); }
+
+  /* Progress */
+  .progress-section { display: none; margin-bottom: 16px; }
+  .progress-section.visible { display: block; }
+
+  /* Charts */
+  .chart-panel {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 10px 6px;
+    min-width: 0;
+  }
+  .chart-lbl {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 1.5px;
+    color: var(--muted);
+    text-transform: uppercase;
+    margin-bottom: 4px;
+  }
+
+  /* F1: Phase row + indicator dot */
+  .phase-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+    border-radius: 4px;
+  }
+  .phase-dot {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: var(--muted);
+    transition: background 0.3s ease, box-shadow 0.3s ease;
+  }
+  .phase-dot.idle       { background: var(--muted); box-shadow: none; animation: none; }
+  .phase-dot.downloading { background: var(--accent3); box-shadow: 0 0 8px rgba(78,205,196,0.6); animation: phasePulse 1.5s ease infinite; }
+  .phase-dot.converting  { background: var(--accent); box-shadow: 0 0 8px rgba(124,92,252,0.6); animation: phasePulse 1.5s ease infinite; }
+  .phase-dot.done        { background: #68d391; box-shadow: 0 0 8px rgba(104,211,145,0.6); animation: none; }
+  .phase-dot.error       { background: var(--accent2); box-shadow: 0 0 8px rgba(240,98,146,0.5); animation: none; }
+  @keyframes phasePulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.5; transform: scale(0.8); }
+  }
+
+  .phase-label {
+    font-family: var(--sans);
+    font-weight: 700;
+    font-size: 15px;
+    letter-spacing: 0;
+    color: var(--accent);
+    margin-bottom: 0;
+    transition: color 0.3s ease;
+  }
+  .phase-file {
+    font-size: 12px;
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-bottom: 10px;
+    max-width: 100%;
+  }
+
+  /* F3: Phase transition animation */
+  @keyframes phaseFlash {
+    0% { opacity: 0.3; transform: translateX(12px); }
+    100% { opacity: 1; transform: translateX(0); }
+  }
+  .phase-label.transitioning { animation: phaseFlash 0.35s ease-out; }
+  @keyframes phaseGlow {
+    0% { box-shadow: inset 0 0 0 1px rgba(124,92,252,0.3); }
+    100% { box-shadow: inset 0 0 0 1px transparent; }
+  }
+  .phase-row.glow { animation: phaseGlow 0.6s ease-out; }
+
+  .bar-bg {
+    height: 8px;
+    background: var(--surface2);
+    margin-bottom: 10px;
+    overflow: hidden;
+    border-radius: 4px;
+  }
+
+  .bar-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #d4891a, var(--accent), #f0c050);
+    background-size: 200% 100%;
+    animation: shimmer 2.5s ease infinite;
+    width: 0%;
+    transition: width 0.4s ease, background 0.6s ease, box-shadow 0.6s ease;
+    border-radius: 4px;
+    box-shadow: 0 0 10px rgba(232,160,35,0.35);
+  }
+
+  /* F4: Phase-aware bar colors */
+  .bar-fill.phase-downloading {
+    background: linear-gradient(90deg, #2a9d8f, var(--accent3), #6ee7c0);
+    background-size: 200% 100%;
+    box-shadow: 0 0 10px rgba(78,205,196,0.35);
+  }
+  .bar-fill.phase-converting {
+    background: linear-gradient(90deg, #6c4ce0, var(--accent), #b794f4);
+    background-size: 200% 100%;
+    box-shadow: 0 0 10px rgba(124,92,252,0.35);
+  }
+  .bar-fill.phase-done {
+    background: linear-gradient(90deg, #48bb78, #68d391, #9ae6b4);
+    background-size: 200% 100%;
+    box-shadow: 0 0 12px rgba(104,211,145,0.4);
+  }
+  .bar-fill.phase-error {
+    background: linear-gradient(90deg, #c53030, var(--accent2), #fc8181);
+    background-size: 200% 100%;
+    box-shadow: 0 0 10px rgba(240,98,146,0.35);
+  }
+
+  @keyframes shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+  }
+
+  .bar-indeterminate .bar-fill {
+    width: 30% !important;
+    animation: slide 1.5s infinite ease-in-out, shimmer 2.5s ease infinite;
+  }
+
+  @keyframes slide { 0%{transform:translateX(-200%)} 100%{transform:translateX(500%)} }
+
+  /* F2: Encode settings pills */
+  .encode-pill {
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: 14px;
+    background: rgba(124,92,252,0.08);
+    color: var(--accent);
+    border: 1px solid rgba(124,92,252,0.18);
+    animation: pillFadeIn 0.4s ease both;
+    white-space: nowrap;
+  }
+  .encode-pill .pill-key { color: var(--muted); margin-right: 3px; }
+  .encode-pill:nth-child(2) { animation-delay: 0.05s; }
+  .encode-pill:nth-child(3) { animation-delay: 0.1s; }
+  .encode-pill:nth-child(4) { animation-delay: 0.15s; }
+  .encode-pill:nth-child(5) { animation-delay: 0.2s; }
+  @keyframes pillFadeIn {
+    from { opacity: 0; transform: translateY(4px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  /* F5: Celebration */
+  @keyframes celebrationRise {
+    0%   { opacity: 1; transform: translateY(0) translateX(0) scale(1); }
+    100% { opacity: 0; transform: translateY(-60px) translateX(var(--drift, 0px)) scale(0.3); }
+  }
+  .confetti-particle {
+    position: absolute;
+    width: 5px; height: 5px;
+    border-radius: 50%;
+    animation: celebrationRise 1.4s ease-out forwards;
+    pointer-events: none;
+  }
+  @keyframes cardGlow {
+    0%  { box-shadow: 0 2px 12px rgba(124,92,252,0.06), 0 1px 3px rgba(0,0,0,0.04); }
+    30% { box-shadow: 0 0 24px 4px rgba(104,211,145,0.3), 0 2px 12px rgba(124,92,252,0.06); }
+    100%{ box-shadow: 0 2px 12px rgba(124,92,252,0.06), 0 1px 3px rgba(0,0,0,0.04); }
+  }
+  .card.celebrating { animation: cardGlow 1.5s ease-out; }
+  @keyframes barRainbow {
+    0%  { filter: hue-rotate(0deg) brightness(1.1); }
+    50% { filter: hue-rotate(90deg) brightness(1.2); }
+    100%{ filter: hue-rotate(0deg) brightness(1); }
+  }
+  .bar-fill.celebrating { animation: barRainbow 1.2s ease, shimmer 2.5s ease infinite; }
+
+  .progress-stats {
+    display: flex; gap: 24px;
+    font-size: 13px; color: var(--text2);
+    margin-bottom: 16px; flex-wrap: wrap;
+  }
+  .progress-stats strong { color: var(--text); font-weight: 600; }
+
+  /* Live size tracker */
+  .size-tracker {
+    display: none;
+    margin-top: 2px;
+    margin-bottom: 10px;
+    padding: 8px 12px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 12px;
+    color: var(--text2);
+  }
+  .size-tracker.visible { display: block; }
+  .size-tracker-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 6px;
+  }
+  .size-tracker-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .size-tracker-pct {
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 700;
+    transition: color 0.3s ease;
+  }
+  .size-tracker-bar {
+    height: 6px;
+    background: var(--bg);
+    border-radius: 3px;
+    overflow: hidden;
+    position: relative;
+    margin-bottom: 5px;
+  }
+  .size-tracker-fill {
+    height: 100%;
+    border-radius: 3px;
+    transition: width 0.5s ease, background 0.5s ease;
+    width: 0%;
+  }
+  .size-tracker-mark {
+    position: absolute;
+    top: -2px;
+    bottom: -2px;
+    width: 2px;
+    background: var(--text);
+    border-radius: 1px;
+    opacity: 0.4;
+  }
+  .size-tracker-values {
+    display: flex;
+    justify-content: space-between;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .st-green  { color: #48bb78; }
+  .st-teal   { color: #38b2ac; }
+  .st-orange { color: #ed8936; }
+  .st-red    { color: #e53e3e; }
+  .st-fill-green  { background: linear-gradient(90deg, #48bb78, #68d391); }
+  .st-fill-teal   { background: linear-gradient(90deg, #38b2ac, #4ecdc4); }
+  .st-fill-orange { background: linear-gradient(90deg, #ed8936, #f6ad55); }
+  .st-fill-red    { background: linear-gradient(90deg, #e53e3e, #fc8181); }
+
+  .log-box {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text2);
+    padding: 12px 14px;
+    min-height: 150px;
+    max-height: 320px;
+    resize: vertical;
+    overflow-y: auto;
+    line-height: 1.8;
+  }
+  .log-error { color: var(--accent2); font-weight: 500; }
+  .log-done { color: var(--accent3); font-weight: 500; }
+  .log-info { color: var(--accent4); }
+
+  .action-row {
+    display: flex; gap: 12px;
+    align-items: center; margin-top: 18px; flex-wrap: wrap;
+  }
+
+  .shutdown-row {
+    display: flex; align-items: center; gap: 10px;
+    margin-top: 10px; padding: 10px 14px;
+    background: rgba(239,83,80,0.05);
+    border: 1px solid rgba(239,83,80,0.12);
+    border-radius: var(--radius-sm);
+  }
+  .shutdown-row input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent2); cursor: pointer; }
+  .shutdown-row label { font-size: 13px; color: var(--text2); cursor: pointer; }
+
+  .idle-msg { font-size: 14px; color: var(--muted); margin-bottom: 14px; }
+
+  .hidden { display: none !important; }
+
+  .update-log { font-family: var(--mono); font-size: 13px; color: var(--text2); margin-top: 8px; min-height: 20px; }
+
+  ::-webkit-scrollbar { width: 5px; }
+  ::-webkit-scrollbar-track { background: var(--bg); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+
+  .history-panel { margin-top: 10px; }
+
+  .history-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 2px;
+    color: var(--muted);
+    text-transform: uppercase;
+    margin-bottom: 8px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .history-header:hover { color: var(--text2); }
+
+  .history-header-right { display: flex; align-items: center; gap: 12px; }
+
+  .history-clear {
+    font-size: 10px;
+    color: var(--accent2);
+    cursor: pointer;
+    letter-spacing: 1px;
+  }
+  .history-clear:hover { color: #f77; }
+
+  .history-list {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    max-height: 220px;
+    overflow-y: auto;
+  }
+
+  .history-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    transition: background 0.1s;
+  }
+  .history-item:last-child { border-bottom: none; }
+  .history-item:hover { background: rgba(232,160,35,0.05); }
+
+  .history-thumb {
+    width: 56px;
+    height: 32px;
+    object-fit: cover;
+    flex-shrink: 0;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+  }
+  .history-thumb-blank {
+    width: 56px;
+    height: 32px;
+    background: var(--border);
+    flex-shrink: 0;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+  }
+
+  .history-meta { flex: 1; min-width: 0; }
+
+  .history-title {
+    font-size: 13px;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-bottom: 2px;
+  }
+
+  .history-sub {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--muted);
+  }
+
+  /* Shutdown countdown overlay */
+  .shutdown-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(10,11,15,0.82);
+    backdrop-filter: blur(3px);
+    animation: fadeUp 0.25s ease both;
+  }
+  .shutdown-overlay-card {
+    background: var(--surface);
+    border: 1px solid rgba(239,83,80,0.4);
+    border-radius: var(--radius);
+    box-shadow: 0 12px 48px rgba(0,0,0,0.5), 0 0 0 1px rgba(239,83,80,0.15);
+    padding: 32px 40px;
+    text-align: center;
+    max-width: 440px;
+    width: 90%;
+  }
+  .shutdown-overlay-title {
+    font-family: var(--sans);
+    font-weight: 800;
+    font-size: 20px;
+    color: var(--accent2);
+    margin-bottom: 6px;
+    letter-spacing: -0.3px;
+  }
+  .shutdown-overlay-count {
+    font-family: var(--mono);
+    font-weight: 700;
+    font-size: 42px;
+    color: var(--text);
+    margin: 10px 0 6px;
+    letter-spacing: 1px;
+  }
+  .shutdown-overlay-sub {
+    font-size: 13px;
+    color: var(--text2);
+    margin-bottom: 22px;
+  }
+  .shutdown-overlay-card .btn { width: 100%; padding: 15px 22px; font-size: 15px; }
+
+  /* Failure summary panel (sticky above progress) */
+  .failure-panel {
+    position: sticky;
+    top: 8px;
+    z-index: 50;
+    display: none;
+    background: var(--surface);
+    border: 1px solid var(--accent2);
+    border-radius: var(--radius);
+    margin-bottom: 14px;
+    box-shadow: 0 4px 16px rgba(239,83,80,0.12);
+    animation: fadeUp 0.3s ease both;
+  }
+  .failure-panel.visible { display: block; }
+  .failure-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .failure-panel-title {
+    font-family: var(--sans);
+    font-weight: 700;
+    font-size: 14px;
+    color: var(--accent2);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .failure-panel-dismiss {
+    font-family: var(--mono);
+    font-size: 16px;
+    line-height: 1;
+    color: var(--text2);
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 4px;
+    user-select: none;
+  }
+  .failure-panel-dismiss:hover { color: var(--accent2); background: rgba(239,83,80,0.08); }
+  .failure-panel-list {
+    list-style: none;
+    margin: 0;
+    padding: 6px 0;
+    max-height: 220px;
+    overflow-y: auto;
+  }
+  .failure-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 7px 16px;
+    font-size: 13px;
+    border-bottom: 1px solid var(--border);
+  }
+  .failure-item:last-child { border-bottom: none; }
+  .failure-item-icon { flex-shrink: 0; font-size: 13px; line-height: 1.5; }
+  .failure-item.transient .failure-item-icon { color: #f6ad55; }
+  .failure-item.permanent .failure-item-icon { color: var(--accent2); }
+  .failure-item-body { flex: 1; min-width: 0; }
+  .failure-item-title {
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .failure-item-reason {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text2);
+    margin-top: 2px;
+  }
+  .failure-item.transient .failure-item-cat { color: #f6ad55; }
+  .failure-item.permanent .failure-item-cat { color: var(--accent2); }
+  .failure-item-cat {
+    font-family: var(--mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    font-weight: 700;
+  }
+
+  /* Captured-cookies confirmation state */
+  .cookies-paste-row textarea.captured {
+    border-color: var(--accent3) !important;
+    background: rgba(77,208,160,0.06);
+    color: var(--accent3);
+    font-weight: 700;
+  }
+  .cookies-method-header {
+    font-size: 12px;
+    color: var(--text2);
+    margin-bottom: 12px;
+    line-height: 1.5;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <header>
+    <div class="header-brand">
+      <div class="logo">
+        <div><span style="color:#76b900">Fetch</span><span style="color:#f3f3f3">Forge</span></div>
+        <div><span style="color:#f3f3f3">You</span><span style="color:#cc0000">Tube</span> Downloader</div>
+      </div>
+      <img id="channel-logo" class="channel-logo" src="" alt="" style="display:none;">
+    </div>
+    <div class="header-status">
+      <div class="status-pill"><span class="dot"></span><span id="ytdlp-version-label">yt-dlp: checking...</span></div>
+      <div class="status-pill"><span class="dot warn" id="cookie-dot"></span><span id="cookie-header">cookies: checking</span></div>
+      <div class="status-pill"><span class="dot" id="app-version-dot" style="background:var(--muted)"></span><span id="app-version-label">v —</span></div>
+    </div>
+  </header>
+
+  <div class="hero-blurb">
+    Download YouTube videos and playlists, then convert to <strong>H.265/HEVC</strong> using NVIDIA NVENC hardware encoding.
+    Supports single videos, full playlists with pipeline mode, and local file conversion. Smart auto-analysis picks optimal CQ, maxrate, and preset from the source.
+    <br>Requires <strong>ffmpeg</strong> and an <strong>NVIDIA GPU</strong> — the H.265 encode uses hardware NVENC.
+  </div>
+
+  <!-- #01 AUTHENTICATION -->
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title"><span class="card-num">#01</span> Authentication</span>
+    </div>
+    <div class="card-body">
+      <div class="cookies-method-header">Use either method — paste is convenient on shared machines where you don't want files left behind.</div>
+      <div class="cookies-row">
+        <span class="badge" id="cookie-badge">Checking...</span>
+        <button class="btn btn-outline btn-sm" onclick="document.getElementById('cookie-file').click()">Load cookies.txt</button>
+        <input type="file" id="cookie-file" accept=".txt" onchange="uploadCookies(this)">
+        <span style="font-size:12px;color:var(--muted);">In Cookie-Editor, use Export → download to get the file</span>
+      </div>
+
+      <div class="cookies-paste-row">
+        <div class="cookies-paste-hint">Or paste cookies (Cookie-Editor → Export → Netscape). Pasted text is masked and never displayed.</div>
+        <textarea id="cookie-paste" placeholder="Click here, then Ctrl+V to paste cookies (text is captured silently — not displayed)" autocomplete="off" spellcheck="false" onpaste="handleCookiePaste(event)"></textarea>
+        <div class="cookies-paste-actions">
+          <button class="btn btn-primary btn-sm" onclick="savePastedCookies()">Save & Verify</button>
+          <button class="btn btn-outline btn-sm" onclick="clearPastedCookies()">Clear field</button>
+          <span class="badge" id="cookie-paste-status" style="display:none;"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- #02 VIDEO URL -->
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title"><span class="card-num">#02</span> Video URL</span>
+    </div>
+    <div class="card-body">
+      <div class="input-group">
+        <input type="url" id="url-input" placeholder="https://www.youtube.com/watch?v=..." />
+        <button class="btn btn-primary" id="fetch-btn" onclick="fetchInfo()">Fetch Info</button>
+      </div>
+
+      <div id="history-panel" class="history-panel hidden">
+        <div class="history-header" onclick="toggleHistory()">
+          <span><span id="history-arrow">&#9656;</span> <span id="history-toggle-label">Recent</span></span>
+          <div class="history-header-right">
+            <span class="history-clear" onclick="event.stopPropagation(); clearHistory()">&#10005; Clear</span>
+          </div>
+        </div>
+        <div id="history-list" class="history-list hidden"></div>
+      </div>
+
+      <div id="video-info" class="video-info">
+        <img id="thumb" class="thumb" src="" alt="">
+        <div class="video-meta">
+          <div class="video-title" id="video-title"></div>
+          <div class="meta-line" id="video-uploader"></div>
+          <div class="meta-line" id="video-duration"></div>
+          <div class="format-row">
+            <div class="field" id="video-format-field">
+              <div class="field-label">Video Stream</div>
+              <select id="video-format"></select>
+            </div>
+            <div class="field">
+              <div class="field-label">Audio Stream</div>
+              <select id="audio-format"></select>
+            </div>
+          </div>
+          <div style="margin-top:10px;">
+            <button class="btn btn-outline" onclick="addToQueue()" id="queue-add-btn" style="display:none;">➕ Add to Queue</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Download queue -->
+      <div id="dl-queue-section" style="display:none; margin-top:14px;">
+        <div style="font-family:var(--mono);font-size:10px;letter-spacing:2px;color:var(--muted);margin-bottom:8px;">
+          JOB QUEUE — <span id="dl-queue-count">0</span> item(s)
+          <span style="float:right;cursor:pointer;color:var(--accent2);" onclick="clearDlQueue()">✕ Clear</span>
+        </div>
+        <div id="dl-queue-items" style="
+          background:var(--bg);
+          border:1px solid var(--border);
+          max-height:200px;
+          overflow-y:auto;
+          font-family:var(--mono);
+          font-size:11px;
+          color:var(--text2);
+          border-radius:var(--radius-sm);
+        "></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- #03 CONVERSION -->
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title"><span class="card-num">#03</span> Conversion</span>
+    </div>
+    <div class="card-body">
+
+      <div id="convert-toggle-row" class="toggle-row">
+        <label class="toggle">
+          <input type="checkbox" id="convert-toggle" checked onchange="toggleConvert()">
+          <span class="slider"></span>
+        </label>
+        <span class="toggle-label">Convert to H.265 / MP4 after download</span>
+      </div>
+
+      <div class="field" style="margin-bottom:16px;">
+        <div class="field-label">Output Directory</div>
+        <div class="input-group" style="display:flex;gap:6px;">
+          <input type="text" id="output-dir" placeholder="Default: downloads/converted (YouTube) or source/converted (local)" style="flex:1;" />
+          <button type="button" class="btn" style="white-space:nowrap;padding:0 14px;" onclick="browseOutputDir()">📁 Browse</button>
+        </div>
+      </div>
+
+      <!-- Mode: Video → H.265, or Audio extract -->
+      <div class="preset-grid" style="margin-bottom:14px;">
+        <label class="preset-card selected" data-mode="video" onclick="selectMode('video')" style="padding:14px;">
+          <input type="radio" name="convmode" checked>
+          <div class="preset-name" style="margin-bottom:0;">🎬 Video → H.265</div>
+        </label>
+        <label class="preset-card" data-mode="audio" onclick="selectMode('audio')" style="padding:14px;">
+          <input type="radio" name="convmode">
+          <div class="preset-name" style="margin-bottom:0;">🎵 Audio extract</div>
+        </label>
+      </div>
+
+      <div id="conv-settings">
+        <div class="preset-grid" id="video-presets">
+
+          <label class="preset-card selected" data-preset="auto" onclick="selectPreset(this,'0','','uhq')">
+            <input type="radio" name="qpreset" checked>
+            <div class="preset-name">Excellent (Slow)</div>
+            <div class="preset-desc">Analyzes source codec, bitrate, and resolution. Derives CQ and maxrate from source. Uses uhq tune for maximum quality-per-bit.</div>
+            <div class="preset-tags">
+              <span class="preset-tag">CQ auto</span>
+              <span class="preset-tag">uhq tune</span>
+              <span class="preset-tag">~1.5× speed</span>
+            </div>
+          </label>
+
+          <label class="preset-card" data-preset="quality" onclick="selectPreset(this,'0','','hq')">
+            <input type="radio" name="qpreset">
+            <div class="preset-name">Great (Fast)</div>
+            <div class="preset-desc">Fast encode for NLE editing. hq tune with hardware AQ — excellent quality at 4–6× speed. Output capped at source bitrate so files stay at or below source size.</div>
+            <div class="preset-tags">
+              <span class="preset-tag">CQ auto</span>
+              <span class="preset-tag">hq tune</span>
+              <span class="preset-tag">4–6× speed</span>
+            </div>
+          </label>
+
+        </div>
+
+        <div class="preset-grid" id="audio-presets" style="display:none;">
+
+          <label class="preset-card selected" data-audio-preset="wav" onclick="selectAudioPreset(this,'wav')">
+            <input type="radio" name="apreset" checked>
+            <div class="preset-name">WAV</div>
+            <div class="preset-desc">Lossless PCM 16-bit, preserves source sample rate. Ideal for editing or further processing. Auto-selected when source is ≥160 kbps.</div>
+            <div class="preset-tags">
+              <span class="preset-tag">PCM s16le</span>
+              <span class="preset-tag">uncompressed</span>
+              <span class="preset-tag">large files</span>
+            </div>
+          </label>
+
+          <label class="preset-card" data-audio-preset="mp3" onclick="selectAudioPreset(this,'mp3')">
+            <input type="radio" name="apreset">
+            <div class="preset-name">MP3 320</div>
+            <div class="preset-desc">320 kbps CBR — universally compatible, good balance of quality and size. Auto-selected when source is &lt;160 kbps (no benefit to lossless from a low-bitrate source).</div>
+            <div class="preset-tags">
+              <span class="preset-tag">320 kbps</span>
+              <span class="preset-tag">libmp3lame</span>
+              <span class="preset-tag">small files</span>
+            </div>
+          </label>
+
+        </div>
+
+        <div id="video-only-options">
+        <div class="advanced-toggle" onclick="toggleAdvanced()">
+          <span id="adv-arrow">▶</span> Advanced settings
+        </div>
+
+        <div class="advanced-section" id="advanced-section">
+          <div class="adv-grid" style="grid-template-columns: 1fr 1fr;">
+            <div class="field">
+              <div class="field-label">Quality (CQ) — 0 = Auto</div>
+              <select id="cq-select">
+                <option value="0" selected>0 — Auto (recommended)</option>
+                <option value="18">18 — Near-lossless</option>
+                <option value="20">20 — High quality</option>
+                <option value="22">22</option>
+                <option value="24">24</option>
+                <option value="26">26 — Balanced</option>
+                <option value="28">28</option>
+                <option value="30">30</option>
+                <option value="32">32 — Compact</option>
+                <option value="34">34 — Smallest</option>
+              </select>
+            </div>
+            <div class="field">
+              <div class="field-label">Max Bitrate Ceiling (optional)</div>
+              <select id="maxrate">
+                <option value="" selected>Auto (from source)</option>
+                <option value="4M">4 Mbps</option>
+                <option value="6M">6 Mbps</option>
+                <option value="8M">8 Mbps</option>
+                <option value="10M">10 Mbps</option>
+                <option value="12M">12 Mbps</option>
+                <option value="15M">15 Mbps</option>
+                <option value="20M">20 Mbps</option>
+                <option value="25M">25 Mbps</option>
+              </select>
+            </div>
+          </div>
+          <div class="adv-note">
+            CQ controls perceptual quality (lower = better, larger file). NVENC preset (p2/p4) and 10-bit output are chosen automatically from source analysis. Set a max bitrate ceiling to hard-cap output size on high-bitrate sources.
+          </div>
+        </div>
+
+        <div class="shutdown-row" style="background:rgba(232,160,35,0.04);border-color:rgba(232,160,35,0.12);margin-bottom:8px;">
+          <input type="checkbox" id="pipeline-check" style="accent-color:var(--accent);">
+          <label for="pipeline-check" style="color:var(--text2);">Pipeline mode — download next video while encoding current one (playlists only)</label>
+        </div>
+
+        <div class="shutdown-row" style="background:rgba(232,160,35,0.04);border-color:rgba(232,160,35,0.12);margin-bottom:8px;">
+          <input type="checkbox" id="download-only-check" style="accent-color:var(--accent);" onchange="toggleDownloadOnly()">
+          <label for="download-only-check" style="color:var(--text2);">Download file only — skip conversion, keep MKV in cache</label>
+        </div>
+        </div><!-- /video-only-options -->
+
+        <div class="shutdown-row" style="background:rgba(77,208,160,0.04);border-color:rgba(77,208,160,0.12);margin-bottom:8px;">
+          <input type="checkbox" id="delete-cache-check" style="accent-color:var(--accent3);" checked>
+          <label for="delete-cache-check" style="color:var(--text2);">Delete cache after conversion — remove source MKV once MP4 is done</label>
+        </div>
+
+        <div class="shutdown-row">
+          <input type="checkbox" id="shutdown-check">
+          <label for="shutdown-check">Shut down PC when complete — 60 second delay with cancel window</label>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- #04 LOCAL CONVERSION -->
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title"><span class="card-num">#04</span> Local Conversion</span>
+    </div>
+    <div class="card-body">
+
+      <!-- Browse buttons -->
+      <div style="display:flex;gap:8px;margin-bottom:12px;">
+        <button class="btn btn-outline" style="flex:1;padding:14px 12px;" onclick="browseLocalFiles()">📄 Browse Files</button>
+        <button class="btn btn-outline" style="flex:1;padding:14px 12px;" onclick="browseLocalFolder()">📁 Browse Folder</button>
+      </div>
+
+      <!-- Folder path input -->
+      <div class="input-group" style="margin-bottom:12px;">
+        <input type="text" id="local-folder" placeholder="Or paste a folder path, e.g. E:\Videos\MyFolder" />
+        <button class="btn btn-outline" onclick="scanFolder()">Scan</button>
+      </div>
+
+      <!-- File list -->
+      <div id="local-file-list" style="display:none; margin-bottom:12px;">
+        <div style="font-family:var(--mono);font-size:10px;letter-spacing:2px;color:var(--muted);margin-bottom:8px;">
+          FILES QUEUED — <span id="local-file-count">0</span> file(s)
+          <span style="float:right;cursor:pointer;color:var(--accent2);" onclick="clearLocalFiles()">✕ Clear</span>
+        </div>
+        <div id="local-file-items" style="
+          background:var(--bg);
+          border:1px solid var(--border);
+          max-height:160px;
+          overflow-y:auto;
+          font-family:var(--mono);
+          font-size:11px;
+          color:var(--text2);
+        "></div>
+      </div>
+
+      <div class="action-row" style="gap:8px;">
+        <button class="btn btn-outline" onclick="addLocalToQueue()">➕ Add to Queue</button>
+        <button class="btn btn-success" id="local-convert-btn" onclick="startLocalConvert()">▶ Convert Now</button>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- FAILURE SUMMARY (sticky, survives the session) -->
+  <div id="failure-panel" class="failure-panel">
+    <div class="failure-panel-header">
+      <span class="failure-panel-title">⚠ <span id="failure-panel-count">0</span> item(s) failed</span>
+      <span class="failure-panel-dismiss" onclick="dismissFailurePanel()" title="Dismiss">&#10005;</span>
+    </div>
+    <ul id="failure-panel-list" class="failure-panel-list"></ul>
+  </div>
+
+  <!-- #05 PROGRESS -->
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title"><span class="card-num">#05</span> Progress</span>
+    </div>
+    <div class="card-body">
+
+      <div id="progress-section" class="progress-section">
+
+        <div id="overall-section" style="display:none;margin-bottom:12px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+            <span style="font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;">Job</span>
+            <strong id="stat-overall" style="font-size:13px;">—</strong>
+          </div>
+          <div class="bar-bg" id="overall-bar-bg">
+            <div class="bar-fill" id="overall-bar-fill"></div>
+          </div>
+        </div>
+
+        <div class="phase-row" id="phase-row">
+          <span class="phase-dot idle" id="phase-dot"></span>
+          <div class="phase-label" id="phase-label">—</div>
+        </div>
+        <div class="phase-file" id="phase-file"></div>
+        <div class="bar-bg" id="bar-bg">
+          <div class="bar-fill" id="bar-fill"></div>
+        </div>
+        <div id="celebration-container" style="position:relative;height:0;overflow:visible;pointer-events:none;"></div>
+        <div class="progress-stats">
+          <div>Progress <strong id="stat-pct">—</strong></div>
+          <div>Size <strong id="stat-size">—</strong></div>
+          <div>Speed <strong id="stat-speed">—</strong></div>
+          <div>ETA <strong id="stat-eta">—</strong></div>
+          <div>Elapsed <strong id="stat-elapsed">—</strong></div>
+        </div>
+
+        <div id="encode-params-row" style="display:none;margin-top:2px;margin-bottom:10px;">
+          <div id="encode-params-pills" style="display:flex;gap:6px;flex-wrap:wrap;"></div>
+        </div>
+
+        <div id="size-tracker" class="size-tracker">
+          <div class="size-tracker-header">
+            <span class="size-tracker-label">Output vs Source</span>
+            <span class="size-tracker-pct" id="st-pct">—</span>
+          </div>
+          <div class="size-tracker-bar">
+            <div class="size-tracker-fill" id="st-fill"></div>
+            <div class="size-tracker-mark" id="st-mark" style="left:50%"></div>
+          </div>
+          <div class="size-tracker-values">
+            <span id="st-output">0 MB</span>
+            <span id="st-source">/ — MB</span>
+          </div>
+        </div>
+
+        <div id="size-info-row" style="display:none;margin-top:10px;padding:8px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;font-size:13px;color:var(--text2);">
+          <span id="size-info-text">—</span>
+        </div>
+
+        <div id="dl-status-row" style="display:none;margin-top:8px;padding:6px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;font-size:12px;color:var(--muted);">
+          <span style="text-transform:uppercase;letter-spacing:.05em;margin-right:6px;">DL</span>
+          <strong id="dl-status-label">—</strong>
+          <span id="dl-status-pct" style="margin-left:8px;"></span>
+          <span id="dl-status-speed" style="margin-left:8px;"></span>
+          <span id="dl-status-eta" style="margin-left:8px;color:var(--muted);">ETA —</span>
+        </div>
+
+        <div id="charts-row" style="display:none;margin-top:12px;grid-template-columns:1fr 1fr;gap:10px;">
+          <div class="chart-panel">
+            <div class="chart-lbl">Download <span style="opacity:.6;font-size:9px;">MiB/s</span></div>
+            <canvas id="chart-dl" style="width:100%;height:90px;display:block;"></canvas>
+          </div>
+          <div class="chart-panel">
+            <div class="chart-lbl">Encode <span style="opacity:.6;font-size:9px;">speed ×</span></div>
+            <canvas id="chart-enc" style="width:100%;height:90px;display:block;"></canvas>
+          </div>
+        </div>
+
+      </div>
+
+      <div class="idle-msg" id="idle-msg">Waiting for job. Fetch a video or load local files and press Start.</div>
+
+      <div class="log-box" id="log-box"></div>
+
+      <div class="action-row">
+        <button class="btn btn-success" id="start-btn" onclick="startDownload()">▶ Start Jobs</button>
+        <button class="btn btn-danger hidden" id="cancel-btn" onclick="cancelJob()">✕ Cancel</button>
+      </div>
+
+    </div>
+  </div>
+
+<script>
+const API = 'http://localhost:8765';
+
+let currentCQ = '0';
+let currentMaxrate = '';
+let currentTuneMode = 'uhq';
+let currentMode = 'video';        // 'video' (H.265) or 'audio' (WAV/MP3)
+let currentAudioPreset = 'wav';   // 'wav' or 'mp3'
+let currentVideoDuration = 0;     // duration (secs) of the last /video-info result; 0 for playlists/unknown
+let _lastAudioFormats = [];       // last fetched audio format list, for auto-preset
+let videoEncodeStart = null;
+// Smart encode-ETA state (EMA of progress rate). Reset per video.
+const ETA_TAU = 25;         // seconds — smoothing time constant ("rock-steady")
+const ETA_WARMUP_PCT = 5;   // show "Estimating…" until this %
+let etaEmaRate = null;      // EMA of pct-per-second
+let etaLastPct = 0;
+let etaLastT = 0;           // Date.now() ms of last progress tick (0 = none yet)
+
+// ---- CHARTS ----
+class SparkChart {
+  constructor(canvasId, color, unit) {
+    this.canvas = document.getElementById(canvasId);
+    this.ctx = this.canvas.getContext('2d');
+    this.color = color;
+    this.unit = unit;
+    this.data = [];
+    this.markers = [];
+    this.N = 120;
+    this.peak = 0;
+    this.current = 0;
+  }
+  _sync() {
+    const w = this.canvas.offsetWidth, h = this.canvas.offsetHeight;
+    if (w > 0 && h > 0 && (this.canvas.width !== w || this.canvas.height !== h)) {
+      this.canvas.width = w; this.canvas.height = h;
+    }
+    return this.canvas.width > 0 && this.canvas.height > 0;
+  }
+  push(val) {
+    if (val == null || !isFinite(val) || val < 0) return;
+    this.data.push(val);
+    if (this.data.length > this.N) this.data.shift();
+    this.current = val;
+    if (val > this.peak) this.peak = val;
+    this.draw();
+  }
+  addMarker(label, color) {
+    this.markers.push({ index: this.data.length, label: label, color: color });
+  }
+  reset() {
+    this.data = []; this.markers = []; this.peak = 0; this.current = 0;
+    if (this._sync()) this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+  }
+  draw() {
+    if (!this._sync()) return;
+    const ctx = this.ctx, W = this.canvas.width, H = this.canvas.height;
+    const PT = 6, PB = 20, PL = 6, PR = 6;
+    const plotW = W - PL - PR, plotH = H - PT - PB;
+    ctx.clearRect(0, 0, W, H);
+
+    // Gridlines
+    ctx.setLineDash([2, 4]);
+    ctx.strokeStyle = 'rgba(154,144,176,0.12)';
+    ctx.lineWidth = 1;
+    for (const frac of [0.25, 0.5, 0.75]) {
+      const gy = PT + plotH * (1 - frac);
+      ctx.beginPath(); ctx.moveTo(PL, gy); ctx.lineTo(PL + plotW, gy); ctx.stroke();
+    }
+    ctx.setLineDash([]);
+
+    if (this.data.length < 2) {
+      ctx.setLineDash([3, 3]);
+      ctx.strokeStyle = 'rgba(154,144,176,0.3)';
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(PL, PT + plotH); ctx.lineTo(PL + plotW, PT + plotH); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = 'rgba(154,144,176,0.5)';
+      ctx.font = '11px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('—', W / 2, H - 5);
+      return;
+    }
+
+    const maxVal = Math.max(...this.data, 0.001);
+    const step = plotW / (this.N - 1);
+    const xOff = (this.N - this.data.length) * step;
+    const xOf = i => PL + xOff + i * step;
+    const yOf = v => PT + plotH - (v / maxVal) * plotH;
+
+    const r = parseInt(this.color.slice(1,3),16);
+    const g = parseInt(this.color.slice(3,5),16);
+    const b = parseInt(this.color.slice(5,7),16);
+    const grad = ctx.createLinearGradient(0, PT, 0, PT + plotH);
+    grad.addColorStop(0, `rgba(${r},${g},${b},0.35)`);
+    grad.addColorStop(1, `rgba(${r},${g},${b},0.02)`);
+
+    ctx.beginPath();
+    this.data.forEach((v, i) => { const x = xOf(i), y = yOf(v); i === 0 ? ctx.moveTo(x,y) : ctx.lineTo(x,y); });
+    ctx.lineTo(xOf(this.data.length-1), PT+plotH);
+    ctx.lineTo(xOf(0), PT+plotH);
+    ctx.closePath();
+    ctx.fillStyle = grad;
+    ctx.fill();
+
+    ctx.beginPath();
+    this.data.forEach((v, i) => { const x = xOf(i), y = yOf(v); i === 0 ? ctx.moveTo(x,y) : ctx.lineTo(x,y); });
+    ctx.strokeStyle = this.color;
+    ctx.lineWidth = 1.5;
+    ctx.lineJoin = 'round';
+    ctx.stroke();
+
+    // Phase markers
+    this.markers.forEach(m => {
+      if (m.index >= this.data.length) return;
+      const mx = xOf(m.index);
+      ctx.strokeStyle = m.color || 'rgba(124,92,252,0.4)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath(); ctx.moveTo(mx, PT); ctx.lineTo(mx, PT + plotH); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = m.color || 'rgba(124,92,252,0.4)';
+      ctx.font = '9px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(m.label || '', mx, PT + 8);
+    });
+
+    ctx.font = '11px monospace';
+    ctx.fillStyle = '#6b6089';
+    ctx.textAlign = 'left';
+    ctx.fillText(this.current.toFixed(1) + ' ' + this.unit, PL, H - 5);
+    ctx.fillStyle = '#9a90b0';
+    ctx.textAlign = 'right';
+    ctx.fillText('↑ ' + this.peak.toFixed(1), W - PR, H - 5);
+  }
+}
+
+function parseDownloadSpeed(s) {
+  if (!s) return null;
+  const m = s.match(/([\d.]+)\s*(G|M|K)iB\/s/i);
+  if (!m) return null;
+  const v = parseFloat(m[1]), u = m[2].toUpperCase();
+  return u === 'G' ? v * 1024 : u === 'K' ? v / 1024 : v;
+}
+function parseEncodeSpeed(s) {
+  if (!s) return null;
+  const m = s.match(/^([\d.]+)x$/i);
+  return m ? parseFloat(m[1]) : null;
+}
+
+const chartDl  = new SparkChart('chart-dl',  '#4ecdc4', 'MiB/s');
+const chartEnc = new SparkChart('chart-enc', '#7c5cfc', '×');
+
+// ---- PHASE STATE (F1, F4) ----
+let _currentPhase = 'idle';
+let _lastPhaseText = '';
+
+function setPhaseState(phase) {
+  const changed = _currentPhase !== phase;
+  _currentPhase = phase;
+
+  // F1: indicator dot
+  document.getElementById('phase-dot').className = 'phase-dot ' + phase;
+
+  // F1: label color
+  const colors = { idle: 'var(--muted)', downloading: 'var(--accent3)', converting: 'var(--accent)', done: '#68d391', error: 'var(--accent2)' };
+  document.getElementById('phase-label').style.color = colors[phase] || 'var(--accent)';
+
+  // F4: bar gradient
+  const bar = document.getElementById('bar-fill');
+  bar.classList.remove('phase-downloading', 'phase-converting', 'phase-done', 'phase-error');
+  if (phase !== 'idle') bar.classList.add('phase-' + phase);
+
+  return changed;
+}
+
+// ---- ENCODE BADGES (F2) ----
+function showEncodeParams(logMsg) {
+  const match = logMsg.match(/Encode params:\s*(.+)/);
+  if (!match) return;
+  const pairs = match[1].match(/\S+=\S+/g);
+  if (!pairs || pairs.length === 0) return;
+  const container = document.getElementById('encode-params-pills');
+  container.innerHTML = '';
+  pairs.forEach(function(pair) {
+    const eq = pair.indexOf('=');
+    const key = pair.slice(0, eq);
+    const val = pair.slice(eq + 1);
+    const pill = document.createElement('span');
+    pill.className = 'encode-pill';
+    pill.innerHTML = '<span class="pill-key">' + key + '</span>' + val;
+    container.appendChild(pill);
+  });
+  document.getElementById('encode-params-row').style.display = '';
+}
+
+// ---- CELEBRATION (F5) ----
+function celebrate() {
+  const container = document.getElementById('celebration-container');
+  container.innerHTML = '';
+  const colors = ['#68d391', '#4ecdc4', '#f6e05e', '#fc8181', '#b794f4', '#63b3ed'];
+  for (let i = 0; i < 24; i++) {
+    const p = document.createElement('div');
+    p.className = 'confetti-particle';
+    p.style.left = (Math.random() * 100).toFixed(1) + '%';
+    p.style.bottom = '0';
+    p.style.background = colors[Math.floor(Math.random() * colors.length)];
+    p.style.animationDelay = (Math.random() * 0.4).toFixed(2) + 's';
+    p.style.animationDuration = (1.0 + Math.random() * 0.6).toFixed(2) + 's';
+    p.style.setProperty('--drift', (Math.random() * 40 - 20).toFixed(0) + 'px');
+    container.appendChild(p);
+  }
+  const card = container.closest('.card');
+  card.classList.add('celebrating');
+  const barFill = document.getElementById('bar-fill');
+  barFill.classList.add('celebrating');
+  setTimeout(function() {
+    container.innerHTML = '';
+    card.classList.remove('celebrating');
+    barFill.classList.remove('celebrating');
+  }, 2000);
+}
+
+// ---- SIZE TRACKER ----
+let _sourceBytes = 0;
+
+function resetSizeTracker() {
+  _sourceBytes = 0;
+  var el = document.getElementById('size-tracker');
+  el.classList.remove('visible');
+  document.getElementById('st-fill').style.width = '0%';
+  document.getElementById('st-pct').textContent = '—';
+  document.getElementById('st-output').textContent = '0 MB';
+  document.getElementById('st-source').textContent = '/ — MB';
+}
+
+function initSizeTracker(sourceBytes) {
+  _sourceBytes = sourceBytes;
+  if (_sourceBytes <= 0) return;
+  var el = document.getElementById('size-tracker');
+  el.classList.add('visible');
+  document.getElementById('st-source').textContent = '/ ' + (_sourceBytes / 1024 / 1024).toFixed(0) + ' MB';
+  document.getElementById('st-output').textContent = '0 MB';
+  document.getElementById('st-fill').style.width = '0%';
+  document.getElementById('st-fill').className = 'size-tracker-fill st-fill-green';
+  document.getElementById('st-pct').textContent = '0%';
+  document.getElementById('st-pct').className = 'size-tracker-pct st-green';
+  // Position the 100% marker
+  document.getElementById('st-mark').style.left = '50%';
+}
+
+function updateSizeTracker(outputBytes) {
+  if (_sourceBytes <= 0 || outputBytes <= 0) return;
+  var ratio = outputBytes / _sourceBytes;
+  var pct = (ratio * 100).toFixed(1);
+  var outMB = (outputBytes / 1024 / 1024).toFixed(0);
+
+  // Color tiers
+  var tier;
+  if (ratio < 0.85)      tier = 'green';
+  else if (ratio < 1.05)  tier = 'teal';
+  else if (ratio < 1.30)  tier = 'orange';
+  else                     tier = 'red';
+
+  document.getElementById('st-output').textContent = outMB + ' MB';
+  document.getElementById('st-pct').textContent = pct + '%';
+  document.getElementById('st-pct').className = 'size-tracker-pct st-' + tier;
+
+  // Bar: 100% of source = 50% of bar width, so output can visually exceed source
+  var barPct = Math.min(ratio * 50, 100);
+  var fill = document.getElementById('st-fill');
+  fill.style.width = barPct.toFixed(1) + '%';
+  fill.className = 'size-tracker-fill st-fill-' + tier;
+}
+
+// ---- ELAPSED TIMER (F7) ----
+let _elapsedInterval = null;
+function startElapsedTimer() {
+  stopElapsedTimer();
+  const el = document.getElementById('stat-elapsed');
+  _elapsedInterval = setInterval(function() {
+    if (!videoEncodeStart) return;
+    const secs = Math.floor((Date.now() - videoEncodeStart) / 1000);
+    const h = Math.floor(secs / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    const s = secs % 60;
+    el.textContent = [h, m, s].map(function(x) { return String(x).padStart(2, '0'); }).join(':');
+  }, 1000);
+}
+function stopElapsedTimer() {
+  if (_elapsedInterval) { clearInterval(_elapsedInterval); _elapsedInterval = null; }
+}
+
+// ---- WAKE LOCK ----
+// Prevents Chrome from freezing this tab during long overnight jobs.
+let _wakeLock = null;
+
+async function acquireWakeLock() {
+  if (!('wakeLock' in navigator)) return;
+  try {
+    _wakeLock = await navigator.wakeLock.request('screen');
+    _wakeLock.addEventListener('release', () => { _wakeLock = null; });
+  } catch {}
+}
+
+function releaseWakeLock() {
+  if (_wakeLock) { _wakeLock.release(); _wakeLock = null; }
+}
+
+// Re-acquire on tab re-focus (wake locks are released when tab loses visibility)
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && _wakeLock === null && _jobRunning) {
+    acquireWakeLock();
+  }
+});
+
+// Warn before closing tab during a job, or with unsaved pasted cookies (Issue #14).
+window.addEventListener('beforeunload', (e) => {
+  if (_jobRunning || (typeof _pendingCookies === 'string' && _pendingCookies.trim())) {
+    e.preventDefault();
+    // Modern browsers show a generic prompt; the returnValue must be set.
+    e.returnValue = 'You have unsaved pasted cookies. Save before reloading?';
+    return e.returnValue;
+  }
+});
+
+let _jobRunning = false;
+
+// ---- CANCEL STATE (Issue #5) ----
+let cancelled = false;            // set by cancelJob(); halts the whole run, no retries
+let _currentController = null;    // AbortController for the in-flight SSE fetch
+let _lastErrorMsg = '';           // last 'error' SSE msg for the current item
+
+function fmtEta(secs) {
+  if (!isFinite(secs) || secs <= 0) return '—';
+  secs = Math.round(secs);
+  if (secs < 60) return secs + 's';
+  return Math.floor(secs / 60) + 'm ' + (secs % 60) + 's';
+}
+
+function autoSelectPreset() {
+  // Video: Smart Auto is always the right default — server analyses the source.
+  // Audio: pick WAV vs MP3 based on best available source bitrate.
+  const card = document.querySelector('#video-presets .preset-card[data-preset="auto"]');
+  if (card) {
+    document.querySelectorAll('#video-presets .preset-card').forEach(c => c.classList.remove('selected'));
+    card.classList.add('selected');
+    currentCQ = '0';
+    currentMaxrate = '';
+    currentTuneMode = 'uhq';
+    setSelectVal('cq-select', '0');
+    setSelectVal('maxrate', '');
+  }
+  autoSelectAudioPreset();
+}
+
+function autoSelectAudioPreset() {
+  // ≥160 kbps source warrants lossless WAV; below that, MP3 320 is the better default.
+  const bestAbr = (_lastAudioFormats || []).reduce((m, f) => Math.max(m, f.abr || 0), 0);
+  const target = bestAbr >= 160 ? 'wav' : 'mp3';
+  const card = document.querySelector(`#audio-presets [data-audio-preset="${target}"]`);
+  if (!card) return;
+  document.querySelectorAll('#audio-presets .preset-card').forEach(c => c.classList.remove('selected'));
+  card.classList.add('selected');
+  currentAudioPreset = target;
+}
+
+function selectPreset(el, cq, maxrate, tuneMode) {
+  document.querySelectorAll('#video-presets .preset-card').forEach(c => c.classList.remove('selected'));
+  el.classList.add('selected');
+  currentCQ = cq;
+  currentMaxrate = maxrate;
+  currentTuneMode = tuneMode || 'uhq';
+  setSelectVal('cq-select', cq);
+  setSelectVal('maxrate', maxrate);
+}
+
+function selectAudioPreset(el, preset) {
+  document.querySelectorAll('#audio-presets .preset-card').forEach(c => c.classList.remove('selected'));
+  el.classList.add('selected');
+  currentAudioPreset = preset;
+}
+
+function selectMode(mode) {
+  currentMode = mode;
+  document.querySelectorAll('.preset-card[data-mode]').forEach(c => {
+    c.classList.toggle('selected', c.dataset.mode === mode);
+  });
+  const isAudio = mode === 'audio';
+  document.getElementById('video-presets').style.display = isAudio ? 'none' : '';
+  document.getElementById('audio-presets').style.display = isAudio ? '' : 'none';
+  document.getElementById('video-only-options').style.display = isAudio ? 'none' : '';
+  document.getElementById('convert-toggle-row').style.display = isAudio ? 'none' : '';
+  const vfField = document.getElementById('video-format-field');
+  if (vfField) vfField.style.display = isAudio ? 'none' : '';
+}
+
+async function browseOutputDir() {
+  try {
+    const r = await fetch(`${API}/browse-folder`);
+    const data = await r.json();
+    if (data.path) document.getElementById('output-dir').value = data.path;
+  } catch (e) {}
+}
+
+function setSelectVal(id, val) {
+  const sel = document.getElementById(id);
+  for (const opt of sel.options) if (opt.value === val) { sel.value = val; break; }
+}
+
+function toggleAdvanced() {
+  const sec = document.getElementById('advanced-section');
+  const arr = document.getElementById('adv-arrow');
+  sec.classList.toggle('open');
+  arr.textContent = sec.classList.contains('open') ? '▼' : '▶';
+}
+
+function toggleConvert() {
+  const on = document.getElementById('convert-toggle').checked;
+  document.getElementById('conv-settings').style.display = on ? '' : 'none';
+  document.getElementById('download-only-check').checked = !on;
+  document.getElementById('delete-cache-check').disabled = !on;
+}
+
+function toggleDownloadOnly() {
+  const downloadOnly = document.getElementById('download-only-check').checked;
+  document.getElementById('convert-toggle').checked = !downloadOnly;
+  document.getElementById('conv-settings').style.display = downloadOnly ? 'none' : '';
+  document.getElementById('delete-cache-check').disabled = downloadOnly;
+}
+
+checkCookies();
+fetchVersion();
+fetchAppVersion();
+loadHistory();
+updateYtdlp();
+loadChannelLogo();
+
+// ---- HEARTBEAT ----
+// Ping the server while this tab is open. When the tab closes the pings stop
+// and the server self-exits after its grace window — so the hidden server
+// process doesn't linger after you're done. Ping every 5s vs the server's
+// ~30s timeout, so a brief stall or refresh never trips it.
+function _heartbeat() { fetch(`${API}/heartbeat`).catch(() => {}); }
+_heartbeat();
+setInterval(_heartbeat, 5000);
+
+// ---- HISTORY ----
+let _historyItems = [];
+let _historyOpen = false;
+
+async function loadHistory() {
+  try {
+    const r = await fetch(`${API}/history`);
+    _historyItems = await r.json();
+    renderHistory();
+  } catch {}
+}
+
+function renderHistory() {
+  const panel = document.getElementById('history-panel');
+  const list = document.getElementById('history-list');
+  if (!_historyItems || _historyItems.length === 0) {
+    panel.classList.add('hidden');
+    _historyOpen = false;
+    return;
+  }
+  panel.classList.remove('hidden');
+  document.getElementById('history-toggle-label').textContent = 'Recent (' + _historyItems.length + ')';
+  list.innerHTML = _historyItems.map((item, i) => {
+    const thumb = item.thumbnail
+      ? `<img class="history-thumb" src="${item.thumbnail}" alt="">`
+      : `<div class="history-thumb-blank"></div>`;
+    const sub = (item.is_playlist ? `Playlist \u00b7 ${item.count} videos \u00b7 ` : '') + (item.added ? item.added.replace('T', ' ') : '');
+    return `<div class="history-item" onclick="loadFromHistory(${i})">${thumb}<div class="history-meta"><div class="history-title">${item.title || item.url}</div><div class="history-sub">${sub}</div></div></div>`;
+  }).join('');
+}
+
+function toggleHistory() {
+  _historyOpen = !_historyOpen;
+  document.getElementById('history-list').classList.toggle('hidden', !_historyOpen);
+  document.getElementById('history-arrow').textContent = _historyOpen ? '\u25be' : '\u25b6';
+  document.getElementById('history-toggle-label').textContent = 'Recent (' + _historyItems.length + ')';
+}
+
+function loadFromHistory(idx) {
+  const item = _historyItems[idx];
+  if (!item) return;
+  document.getElementById('url-input').value = item.url;
+  fetchInfo();
+}
+
+async function saveToHistory(info, url) {
+  const form = new FormData();
+  form.append('url', url);
+  form.append('title', info.title || '');
+  form.append('thumbnail', info.thumbnail || '');
+  form.append('is_playlist', info.is_playlist ? 'true' : 'false');
+  form.append('count', String(info.count || 1));
+  try {
+    await fetch(`${API}/history`, { method: 'POST', body: form });
+    await loadHistory();
+    // Keep panel open if it was open
+    if (_historyOpen) {
+      const list = document.getElementById('history-list');
+      list.classList.remove('hidden');
+    }
+  } catch {}
+}
+
+async function clearHistory() {
+  try {
+    await fetch(`${API}/history`, { method: 'DELETE' });
+    _historyItems = [];
+    _historyOpen = false;
+    renderHistory();
+  } catch {}
+}
+
+function loadChannelLogo() {
+  const img = document.getElementById('channel-logo');
+  img.src = 'https://yt3.googleusercontent.com/wgn0tWnbhuvuDVMJZ-LBzOZpL0YwLVhwAVKIeWSwv9IpB91IvStBUQg_HSWg8sLWpqsYp7sa=s176-c-k-c0x00ffffff-no-rj';
+  img.onload = () => { img.style.display = ''; };
+}
+
+async function fetchVersion() {
+  try {
+    const r = await fetch(`${API}/ytdlp-version`);
+    const d = await r.json();
+    document.getElementById('ytdlp-version-label').textContent = 'yt-dlp: ' + d.version;
+  } catch {
+    document.getElementById('ytdlp-version-label').textContent = 'yt-dlp: unknown';
+  }
+}
+
+async function fetchAppVersion() {
+  try {
+    const r = await fetch(`${API}/version`);
+    const d = await r.json();
+    document.getElementById('app-version-label').textContent = 'v ' + d.version;
+    document.getElementById('app-version-dot').style.background = '';
+    document.getElementById('app-version-dot').className = 'dot';
+  } catch {
+    document.getElementById('app-version-label').textContent = 'v —';
+  }
+}
+
+async function checkCookies() {
+  try {
+    const r = await fetch(`${API}/check-cookies`);
+    const d = await r.json();
+    const badge = document.getElementById('cookie-badge');
+    const hdr = document.getElementById('cookie-header');
+    const dot = document.getElementById('cookie-dot');
+    if (d.exists && d.valid) {
+      const yt = d.youtube_cookies || 0;
+      badge.textContent = `✓ cookies loaded (${d.cookies}, ${yt} YouTube)`;
+      badge.className = 'badge badge-ok';
+      hdr.textContent = 'cookies: ✓';
+      dot.className = 'dot';
+    } else if (d.exists) {
+      badge.textContent = `⚠ cookies.txt invalid: ${d.reason || 'parse error'}`;
+      badge.className = 'badge badge-warn';
+      hdr.textContent = 'cookies: invalid';
+      dot.className = 'dot warn';
+    } else {
+      badge.textContent = '✗ No cookies — throttling likely';
+      badge.className = 'badge badge-warn';
+      hdr.textContent = 'cookies: missing';
+      dot.className = 'dot warn';
+    }
+  } catch(e) {
+    document.getElementById('cookie-badge').textContent = 'Server not reachable';
+  }
+}
+
+async function uploadCookies(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const form = new FormData();
+  form.append('file', file);
+  await fetch(`${API}/upload-cookies`, { method: 'POST', body: form });
+  checkCookies();
+  log('Cookies uploaded.', 'info');
+}
+
+let _pendingCookies = '';
+
+function handleCookiePaste(e) {
+  e.preventDefault();
+  const text = (e.clipboardData || window.clipboardData).getData('text') || '';
+  _pendingCookies = text;
+  const lines = text.split('\n').filter(l => l.trim() && !l.trim().startsWith('#')).length;
+  const ta = document.getElementById('cookie-paste');
+  // Unambiguous captured state: green border + checkmark + bold text.
+  ta.value = `✓ Captured ${lines} cookies — click Save and Verify to commit`;
+  ta.classList.add('captured');
+  const status = document.getElementById('cookie-paste-status');
+  status.textContent = `✓ ${lines} captured — ready to save`;
+  status.className = 'badge badge-ok';
+  status.style.display = '';
+}
+
+function clearPastedCookies() {
+  _pendingCookies = '';
+  const ta = document.getElementById('cookie-paste');
+  ta.value = '';
+  ta.classList.remove('captured');
+  const status = document.getElementById('cookie-paste-status');
+  status.style.display = 'none';
+}
+
+async function savePastedCookies() {
+  const ta = document.getElementById('cookie-paste');
+  const status = document.getElementById('cookie-paste-status');
+  const text = _pendingCookies;
+  if (!text.trim()) {
+    status.textContent = '⚠ paste cookies first';
+    status.className = 'badge badge-warn';
+    status.style.display = '';
+    return;
+  }
+  status.textContent = 'Saving…';
+  status.className = 'badge';
+  status.style.display = '';
+  try {
+    const form = new FormData();
+    form.append('text', text);
+    const r = await fetch(`${API}/paste-cookies`, { method: 'POST', body: form });
+    const d = await r.json();
+    if (d.valid) {
+      const yt = d.youtube_cookies || 0;
+      status.textContent = `✓ valid — ${d.cookies} cookies (${yt} YouTube)`;
+      status.className = 'badge badge-ok';
+      _pendingCookies = '';
+      ta.value = '';
+      ta.classList.remove('captured');
+      log(`Cookies pasted: ${d.cookies} entries, ${yt} YouTube.`, 'info');
+      checkCookies();
+    } else {
+      status.textContent = `✗ ${d.reason || 'invalid'}`;
+      status.className = 'badge badge-warn';
+    }
+  } catch (e) {
+    status.textContent = '✗ save failed';
+    status.className = 'badge badge-warn';
+  }
+}
+
+async function updateYtdlp() {
+  try {
+    const r = await fetch(`${API}/update-ytdlp`, { method: 'POST' });
+    const d = await r.json();
+    if (d.output) log('yt-dlp: ' + d.output);
+    fetchVersion();
+  } catch {}
+}
+
+function formatDuration(secs) {
+  const h = Math.floor(secs/3600), m = Math.floor((secs%3600)/60), s = Math.floor(secs%60);
+  return [h,m,s].map(x=>String(x).padStart(2,'0')).join(':');
+}
+
+async function fetchInfo() {
+  const url = document.getElementById('url-input').value.trim();
+  if (!url) return;
+  const btn = document.getElementById('fetch-btn');
+  btn.disabled = true; btn.textContent = 'Fetching...';
+  log('Fetching video info...', 'info');
+  try {
+    const r = await fetch(`${API}/video-info?url=${encodeURIComponent(url)}`);
+    if (!r.ok) { const d = await r.json(); log('Error: ' + d.error, 'error'); return; }
+    const info = await r.json();
+    document.getElementById('thumb').src = info.thumbnail || '';
+    document.getElementById('video-title').textContent = info.is_playlist
+      ? 'Playlist: ' + info.title + ' (' + info.count + ' videos)'
+      : info.title;
+    document.getElementById('video-uploader').textContent = info.uploader ? 'by ' + info.uploader : '';
+    document.getElementById('video-duration').textContent = info.is_playlist
+      ? 'Formats shown from first video - all videos will use the same selection'
+      : (info.duration ? 'Duration: ' + formatDuration(info.duration) : '');
+    // Playlists resolve durations per-video server-side; a single /video-info
+    // duration isn't representative, so only stamp it for single videos.
+    currentVideoDuration = info.is_playlist ? 0 : (info.duration || 0);
+    const vSel = document.getElementById('video-format');
+    vSel.innerHTML = '';
+    info.video_formats.forEach(f => {
+      const o = document.createElement('option');
+      o.value = f.id; o.textContent = `[${f.id}] ${f.label}`;
+      o.dataset.filesize = f.filesize || 0;
+      vSel.appendChild(o);
+    });
+    const aSel = document.getElementById('audio-format');
+    aSel.innerHTML = '';
+    info.audio_formats.forEach(f => {
+      const o = document.createElement('option');
+      o.value = f.id; o.textContent = `[${f.id}] ${f.label}`;
+      o.dataset.filesize = f.filesize || 0;
+      o.dataset.abr = f.abr || 0;
+      aSel.appendChild(o);
+    });
+    _lastAudioFormats = info.audio_formats || [];
+    document.getElementById('video-info').classList.add('visible');
+    document.getElementById('queue-add-btn').style.display = '';
+    autoSelectPreset();
+    log('Loaded: ' + info.title, 'info');
+    saveToHistory(info, url);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Fetch Info';
+  }
+}
+
+function getSelectedExpectedSize() {
+  const vSel = document.getElementById('video-format');
+  const aSel = document.getElementById('audio-format');
+  const aSize = parseInt(aSel.selectedOptions[0]?.dataset.filesize || '0', 10);
+  // In audio mode the video stream isn't downloaded — don't count it toward expected size.
+  if (currentMode === 'audio') return aSize;
+  const vSize = parseInt(vSel.selectedOptions[0]?.dataset.filesize || '0', 10);
+  return vSize + aSize;
+}
+
+// Returns true on success, false on error.
+// Dispatches to /download (youtube) or /convert-local (local) based on item.type.
+async function runOneItem(item, opts) {
+  let endpoint, form;
+
+  if (item.type === 'local') {
+    endpoint = `${API}/convert-local`;
+    form = new FormData();
+    form.append('files', JSON.stringify([item.path]));
+    form.append('cq', opts.cq);
+    form.append('maxrate', opts.maxrate);
+    form.append('shutdown', 'false');
+    form.append('output_dir', opts.outputDir);
+    form.append('tune_mode', opts.tuneMode);
+    form.append('mode', opts.mode);
+    form.append('audio_preset', opts.audioPreset);
+  } else {
+    endpoint = `${API}/download`;
+    form = new FormData();
+    form.append('url', item.url);
+    form.append('video_format', item.video_format || '');
+    form.append('audio_format', item.audio_format);
+    form.append('convert', opts.convert);
+    form.append('cq', opts.cq);
+    form.append('maxrate', opts.maxrate);
+    form.append('pipeline', opts.pipeline);
+    form.append('delete_cache', opts.deleteCacheVal);
+    form.append('shutdown', 'false');
+    form.append('output_dir', opts.outputDir);
+    form.append('tune_mode', opts.tuneMode);
+    form.append('expected_size', String(item.expected_size || 0));
+    form.append('mode', opts.mode);
+    form.append('audio_preset', opts.audioPreset);
+  }
+
+  let gotError = false;
+  let gotCancelled = false;
+  // Fresh AbortController per item so cancelJob() can abort the in-flight stream.
+  const controller = new AbortController();
+  _currentController = controller;
+
+  try {
+    const r = await fetch(endpoint, { method: 'POST', body: form, signal: controller.signal });
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const raw = line.slice(6).trim();
+        if (!raw) continue;
+        try {
+          const msg = JSON.parse(raw);
+          if (msg.type === 'error') gotError = true;
+          else if (msg.type === 'cancelled') gotCancelled = true;
+          handleMsg(msg);
+        } catch {}
+      }
+    }
+  } catch (e) {
+    // An aborted fetch (user hit Cancel) is terminal, not a retryable error.
+    if (e && e.name === 'AbortError') gotCancelled = true;
+    else throw e;
+  } finally {
+    if (_currentController === controller) _currentController = null;
+  }
+
+  // Treat a server-side 'cancelled' event or a client abort as terminal-no-retry.
+  if (gotCancelled || cancelled) return { ok: false, cancelled: true };
+  return { ok: !gotError, cancelled: false };
+}
+
+// Map a queued youtube item to the server's per-item batch payload.
+function toItemPayload(it) {
+  return {
+    url: it.url,
+    video_format: it.video_format || '',
+    audio_format: it.audio_format,
+    expected_size: it.expected_size || 0,
+    output_dir: it.output_dir || document.getElementById('output-dir').value.trim(),
+    tune_mode: it.tune_mode || currentTuneMode,
+    title: it.title || it.url,
+    duration: it.duration || 0,
+  };
+}
+
+// Batch: POST a contiguous run of youtube items as one pipelined /download.
+// The SSE read loop mirrors runOneItem, but also maps item_done/item_failed
+// (by 1-based idx, submission order) back to the original items so the
+// caller can retry only the ones that actually failed (#28).
+// Returns { results: Array<{item, ok, cancelled, error}> } in submission order.
+async function runBatch(items, opts) {
+  const form = new FormData();
+  // url/audio_format are required form fields on /download; the server ignores
+  // them in batch mode but they must be present. Seed from the first item.
+  form.append('url', items[0].url);
+  form.append('audio_format', items[0].audio_format || '');
+  form.append('items', JSON.stringify(items.map(toItemPayload)));
+  form.append('convert', opts.convert);
+  form.append('cq', opts.cq);
+  form.append('maxrate', opts.maxrate);
+  form.append('pipeline', 'true');
+  form.append('delete_cache', opts.deleteCacheVal);
+  form.append('shutdown', 'false');
+  form.append('output_dir', opts.outputDir);
+  form.append('tune_mode', opts.tuneMode);
+  form.append('mode', opts.mode);
+  form.append('audio_preset', opts.audioPreset);
+
+  let gotCancelled = false;
+  const outcome = new Map(); // idx (1-based) -> { ok, error? }
+  const controller = new AbortController();
+  _currentController = controller;
+
+  try {
+    const r = await fetch(`${API}/download`, { method: 'POST', body: form, signal: controller.signal });
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const raw = line.slice(6).trim();
+        if (!raw) continue;
+        try {
+          const msg = JSON.parse(raw);
+          if (msg.type === 'item_done') outcome.set(msg.idx, { ok: true });
+          else if (msg.type === 'item_failed') outcome.set(msg.idx, { ok: false, error: msg.msg || 'failed' });
+          else if (msg.type === 'cancelled') gotCancelled = true;
+          handleMsg(msg);
+        } catch {}
+      }
+    }
+  } catch (e) {
+    if (e && e.name === 'AbortError') gotCancelled = true;
+    else throw e;
+  } finally {
+    if (_currentController === controller) _currentController = null;
+  }
+
+  // Build results in submission order. An item with no outcome (e.g. the
+  // stream died mid-run, or the encoder consecutive-failure abort cap left an
+  // already-downloaded item with neither event) counts as failed so it retries
+  // rather than being silently dropped.
+  const results = items.map((item, i) => {
+    const o = outcome.get(i + 1);
+    if (gotCancelled || cancelled) return { item, ok: false, cancelled: true };
+    return { item, ok: !!(o && o.ok), cancelled: false, error: o ? o.error : 'no result' };
+  });
+  return { results };
+}
+
+const MAX_RETRY_ROUNDS = 3;
+
+async function startDownload() {
+  // If no queue, seed it from the current URL
+  if (dlQueue.length === 0) {
+    const url = document.getElementById('url-input').value.trim();
+    const vf = document.getElementById('video-format').value;
+    const af = document.getElementById('audio-format').value;
+    if (!url) { log('Enter a URL first, or add items to the queue.', 'error'); return; }
+    const needVideo = currentMode !== 'audio';
+    if ((needVideo && !vf) || !af) { log('Fetch video info and select formats first.', 'error'); return; }
+    dlQueue.push({
+      type: 'youtube', url, title: url,
+      video_format: needVideo ? vf : '', audio_format: af,
+      expected_size: getSelectedExpectedSize(),
+      output_dir: document.getElementById('output-dir').value.trim(),
+      tune_mode: currentTuneMode,
+      duration: currentVideoDuration || 0,
+    });
+    renderDlQueue();
+  }
+
+  const opts = {
+    cq: document.getElementById('cq-select').value,
+    maxrate: document.getElementById('maxrate').value,
+    convert: document.getElementById('convert-toggle').checked ? 'true' : 'false',
+    pipeline: document.getElementById('pipeline-check').checked ? 'true' : 'false',
+    deleteCacheVal: document.getElementById('delete-cache-check').checked ? 'true' : 'false',
+    shutdownVal: document.getElementById('shutdown-check').checked ? 'true' : 'false',
+    outputDir: document.getElementById('output-dir').value.trim(),
+    tuneMode: currentTuneMode,
+    mode: currentMode,
+    audioPreset: currentAudioPreset,
+  };
+
+  _jobRunning = true;
+  cancelled = false;            // fresh run — clear any prior cancel state
+  _currentController = null;
+  acquireWakeLock();
+
+  document.getElementById('start-btn').classList.add('hidden');
+  document.getElementById('cancel-btn').classList.remove('hidden');
+  document.getElementById('idle-msg').classList.add('hidden');
+  document.getElementById('progress-section').classList.add('visible');
+  document.getElementById('dl-status-row').style.display = 'none';
+  document.getElementById('size-info-row').style.display = 'none';
+  document.getElementById('charts-row').style.display = 'grid';
+  document.getElementById('encode-params-row').style.display = 'none';
+  document.getElementById('stat-elapsed').textContent = '—';
+  etaEmaRate = null; etaLastPct = 0; etaLastT = 0;
+  chartDl.reset();
+  chartEnc.reset();
+  resetSizeTracker();
+  setPhaseState('idle');
+  _lastPhaseText = '';
+
+  let completed = 0;
+  let retryQueue = [];  // items that failed and need retrying
+
+  // Main loop: drain dlQueue live — new items added mid-job are picked up
+  while (dlQueue.length > 0 || retryQueue.length > 0) {
+    // User cancelled — stop without starting the next item or any retries.
+    if (cancelled) break;
+
+    // If main queue is drained but retries remain, swap them in after a pause
+    if (dlQueue.length === 0 && retryQueue.length > 0) {
+      if (retryQueue[0]._retries >= MAX_RETRY_ROUNDS - 1) {
+        // Max retries exhausted
+        log(`✕ ${retryQueue.length} item(s) failed after ${MAX_RETRY_ROUNDS - 1} retries:`, 'error');
+        retryQueue.forEach(p => {
+          log(`  • ${p.title || p.url}`, 'error');
+          recordFailure(p, p._lastError || '', true);
+        });
+        break;
+      }
+      const round = retryQueue[0]._retries + 1;
+      const waitSecs = 15 * round;
+      log(`── Retry round ${round}/${MAX_RETRY_ROUNDS - 1}: ${retryQueue.length} item(s) — waiting ${waitSecs}s ──`, 'info');
+      // Interruptible wait so Cancel takes effect during the backoff.
+      for (let waited = 0; waited < waitSecs * 1000 && !cancelled; waited += 250) {
+        await new Promise(r => setTimeout(r, 250));
+      }
+      if (cancelled) break;
+      // Move retries back into main queue (new items added during wait go first)
+      dlQueue.push(...retryQueue);
+      retryQueue = [];
+      renderDlQueue();
+    }
+
+    // Batch mode: when pipelining video conversions, gather the maximal run of
+    // consecutive youtube items at the front of the queue and send them as one
+    // pipelined /download so download(N+1) overlaps encode(N) across the run.
+    // Per-item retry (#28): only the items that actually failed are requeued.
+    const canBatch = opts.pipeline === 'true' && opts.convert === 'true' && opts.mode !== 'audio';
+    if (canBatch && dlQueue.length >= 2 && dlQueue[0].type === 'youtube' && dlQueue[1].type === 'youtube') {
+      const batchItems = [];
+      while (dlQueue.length > 0 && dlQueue[0].type === 'youtube') {
+        batchItems.push(dlQueue.shift());
+      }
+      renderDlQueue();
+      completed += batchItems.length;
+      const totalVisible = completed + dlQueue.length + retryQueue.length;
+      document.getElementById('overall-section').style.display = '';
+      document.getElementById('stat-overall').textContent = completed + ' / ' + totalVisible;
+      log(`── Batch of ${batchItems.length} video(s) — pipelined ──`, 'info');
+      opts.shutdown = 'false';
+      const { results } = await runBatch(batchItems, opts);
+      if (results.some(r => r.cancelled) || cancelled) { cancelled = true; break; }
+      let anyFailed = false;
+      for (const r of results) {
+        if (r.ok) continue;
+        anyFailed = true;
+        r.item._lastError = r.error;
+        r.item._retries = (r.item._retries || 0) + 1;
+        if (r.item._retries < MAX_RETRY_ROUNDS) {
+          log(`⚠ Failed: ${r.item.title || r.item.url} — will retry after remaining items.`, 'error');
+          recordFailure(r.item, r.error, false);
+          retryQueue.push(r.item);
+        } else {
+          log(`✕ Failed: ${r.item.title || r.item.url} — max retries exhausted.`, 'error');
+          recordFailure(r.item, r.error, true);
+        }
+      }
+      if (!anyFailed) {
+        document.getElementById('overall-bar-fill').style.width = (completed / totalVisible * 100).toFixed(1) + '%';
+      }
+      continue;
+    }
+
+    // Pop next item from front of queue
+    const item = dlQueue.shift();
+    renderDlQueue();
+    completed++;
+
+    const totalVisible = completed + dlQueue.length + retryQueue.length;
+    const showOverall = totalVisible > 1 || completed > 1;
+    if (showOverall) {
+      document.getElementById('overall-section').style.display = '';
+      document.getElementById('stat-overall').textContent = completed + ' / ' + totalVisible;
+      document.getElementById('overall-bar-fill').style.width = ((completed - 1) / totalVisible * 100).toFixed(1) + '%';
+    } else {
+      document.getElementById('overall-section').style.display = 'none';
+    }
+
+    const label = item.title || item.url;
+    const retryTag = item._retries ? ` (retry ${item._retries})` : '';
+    if (showOverall || item._retries) {
+      log(`── ${completed}/${totalVisible}: ${label}${retryTag}`, 'info');
+    }
+
+    // Never send shutdown to server mid-queue — handled client-side after all items complete
+    opts.shutdown = 'false';
+
+    _lastErrorMsg = '';
+    const result = await runOneItem(item, opts);
+
+    // Cancelled (client abort or server 'cancelled' event): terminal, no retry, stop the run.
+    if (result.cancelled || cancelled) {
+      cancelled = true;
+      break;
+    }
+
+    if (!result.ok) {
+      item._lastError = _lastErrorMsg;
+      item._retries = (item._retries || 0) + 1;
+      if (item._retries < MAX_RETRY_ROUNDS) {
+        log(`⚠ Failed: ${label} — will retry after remaining items.`, 'error');
+        recordFailure(item, _lastErrorMsg, false);  // transient (mid-retry)
+        retryQueue.push(item);
+      } else {
+        log(`✕ Failed: ${label} — max retries exhausted.`, 'error');
+        recordFailure(item, _lastErrorMsg, true);    // permanent
+      }
+    }
+
+    if (showOverall && result.ok) {
+      document.getElementById('overall-bar-fill').style.width = (completed / totalVisible * 100).toFixed(1) + '%';
+    }
+  }
+
+  const allDone = !cancelled && dlQueue.length === 0 && retryQueue.length === 0;
+
+  if (allDone) {
+    document.getElementById('overall-bar-fill').style.width = '100%';
+  }
+
+  _jobRunning = false;
+  releaseWakeLock();
+  stopElapsedTimer();
+  document.getElementById('start-btn').classList.remove('hidden');
+  document.getElementById('cancel-btn').classList.add('hidden');
+
+  // Shutdown: queue is fully drained, nothing was added during final item
+  if (allDone && opts.shutdownVal === 'true') {
+    const proceed = await runShutdownCountdown(60);
+    if (proceed) {
+      log('Countdown elapsed — shutting down.', 'info');
+      const token = document.querySelector('meta[name="dlpr-token"]')?.content;
+      try {
+        await fetch(`${API}/shutdown-now`, { method: 'POST', headers: { 'X-DLPR-Token': token } });
+      } catch {}
+    } else {
+      log('Shutdown cancelled by user.', 'info');
+    }
+  }
+}
+
+// Issue #6 — visible, cancellable shutdown countdown overlay.
+// Resolves true if the countdown runs out, false if the user cancels.
+function runShutdownCountdown(seconds) {
+  return new Promise((resolve) => {
+    log(`All jobs complete — shutting down in ${seconds} seconds.`, 'info');
+
+    const overlay = document.createElement('div');
+    overlay.className = 'shutdown-overlay';
+    overlay.id = 'shutdown-overlay';
+    overlay.innerHTML =
+      '<div class="shutdown-overlay-card">' +
+        '<div class="shutdown-overlay-title">Shutting down PC</div>' +
+        '<div class="shutdown-overlay-count" id="shutdown-overlay-count">0:00</div>' +
+        '<div class="shutdown-overlay-sub">All jobs are complete. The PC will power off when the timer reaches zero.</div>' +
+        '<button class="btn btn-danger" id="shutdown-cancel-btn">✕ Cancel Shutdown</button>' +
+      '</div>';
+    document.body.appendChild(overlay);
+
+    let remaining = seconds;
+    let timer = null;
+    const countEl = document.getElementById('shutdown-overlay-count');
+
+    function fmt(s) {
+      const m = Math.floor(s / 60);
+      return m + ':' + String(s % 60).padStart(2, '0');
+    }
+    function teardown() {
+      if (timer) { clearInterval(timer); timer = null; }
+      const el = document.getElementById('shutdown-overlay');
+      if (el && el.parentNode) el.parentNode.removeChild(el);
+    }
+
+    countEl.textContent = fmt(remaining);
+    document.getElementById('shutdown-cancel-btn').onclick = function () {
+      teardown();
+      resolve(false);
+    };
+
+    timer = setInterval(function () {
+      remaining -= 1;
+      if (remaining <= 0) {
+        teardown();
+        resolve(true);
+        return;
+      }
+      countEl.textContent = fmt(remaining);
+    }, 1000);
+  });
+}
+
+function handleMsg(msg) {
+  const barBg = document.getElementById('bar-bg');
+  if (msg.type === 'video_start') {
+    const overallSec = document.getElementById('overall-section');
+    videoEncodeStart = Date.now();
+    etaEmaRate = null; etaLastPct = 0; etaLastT = 0;
+    setPhaseState('idle');
+    document.getElementById('encode-params-row').style.display = 'none';
+    document.getElementById('stat-elapsed').textContent = '00:00:00';
+    resetSizeTracker();
+    startElapsedTimer();
+    if (msg.total > 1) {
+      overallSec.style.display = '';
+      document.getElementById('stat-overall').textContent = msg.current + ' / ' + msg.total;
+      const pct = ((msg.current - 1) / msg.total * 100).toFixed(1);
+      document.getElementById('overall-bar-fill').style.width = pct + '%';
+    } else {
+      overallSec.style.display = 'none';
+    }
+
+  } else if (msg.type === 'phase') {
+    if (!videoEncodeStart) { videoEncodeStart = Date.now(); etaEmaRate = null; etaLastPct = 0; etaLastT = 0; }
+    const colonIdx = msg.msg.indexOf(': ');
+    var phLabel;
+    if (colonIdx !== -1) {
+      phLabel = msg.msg.slice(0, colonIdx);
+      document.getElementById('phase-label').textContent = phLabel;
+      document.getElementById('phase-file').textContent = msg.msg.slice(colonIdx + 2);
+    } else {
+      phLabel = msg.msg;
+      document.getElementById('phase-label').textContent = phLabel;
+      document.getElementById('phase-file').textContent = '';
+    }
+    document.getElementById('bar-fill').style.width = '0%';
+    barBg.classList.add('bar-indeterminate');
+    document.getElementById('stat-pct').textContent = '—';
+    document.getElementById('stat-eta').textContent = '—';
+
+    // F1: detect phase from label text
+    var newPhase = /download/i.test(phLabel) ? 'downloading' : 'converting';
+    var phaseChanged = setPhaseState(newPhase);
+
+    // F3: phase transition animation
+    if (phLabel !== _lastPhaseText) {
+      var labelEl = document.getElementById('phase-label');
+      var rowEl = document.getElementById('phase-row');
+      labelEl.classList.remove('transitioning');
+      rowEl.classList.remove('glow');
+      void labelEl.offsetWidth;  // force reflow
+      labelEl.classList.add('transitioning');
+      rowEl.classList.add('glow');
+      _lastPhaseText = phLabel;
+    }
+
+    // F6: chart phase markers
+    if (phaseChanged) {
+      var markerLabel = newPhase === 'downloading' ? 'DL' : 'ENC';
+      var markerColor = newPhase === 'downloading' ? 'rgba(78,205,196,0.5)' : 'rgba(124,92,252,0.5)';
+      chartDl.addMarker(markerLabel, markerColor);
+      chartEnc.addMarker(markerLabel, markerColor);
+    }
+
+  } else if (msg.type === 'progress') {
+    barBg.classList.remove('bar-indeterminate');
+    document.getElementById('bar-fill').style.width = msg.pct.toFixed(1) + '%';
+    document.getElementById('stat-pct').textContent = msg.pct.toFixed(1) + '%';
+    if (msg.overall != null) {
+      document.getElementById('overall-bar-fill').style.width = msg.overall.toFixed(1) + '%';
+    }
+    if (msg.size) document.getElementById('stat-size').textContent = msg.size;
+    if (msg.speed) document.getElementById('stat-speed').textContent = msg.speed;
+    if (videoEncodeStart) {
+      var now = Date.now();
+      if (etaLastT) {
+        var dt = (now - etaLastT) / 1000;
+        if (dt > 0) {
+          var instRate = (msg.pct - etaLastPct) / dt;   // pct per second
+          if (instRate > 0 && isFinite(instRate)) {
+            var alpha = 1 - Math.exp(-dt / ETA_TAU);
+            etaEmaRate = (etaEmaRate == null) ? instRate
+                                              : alpha * instRate + (1 - alpha) * etaEmaRate;
+          }
+        }
+      }
+      etaLastPct = msg.pct;
+      etaLastT = now;
+
+      if (msg.pct >= ETA_WARMUP_PCT && etaEmaRate && etaEmaRate > 0) {
+        document.getElementById('stat-eta').textContent = fmtEta((100 - msg.pct) / etaEmaRate);
+      } else {
+        document.getElementById('stat-eta').textContent = 'Estimating…';
+      }
+    }
+    if (msg.speed) {
+      var encSpd = parseEncodeSpeed(msg.speed);
+      var dlSpd  = parseDownloadSpeed(msg.speed);
+      if (encSpd !== null) chartEnc.push(encSpd);
+      else if (dlSpd !== null) chartDl.push(dlSpd);
+    }
+    if (msg.output_bytes) updateSizeTracker(msg.output_bytes);
+
+  } else if (msg.type === 'size_info') {
+    var sign = msg.bloat_pct >= 0 ? '+' : '';
+    var color = msg.bloat_pct > 20 ? '#fc8181' : msg.bloat_pct > 0 ? '#f6ad55' : '#68d391';
+    var row = document.getElementById('size-info-row');
+    document.getElementById('size-info-text').innerHTML =
+      'Source: <strong>' + msg.source_mb.toFixed(0) + ' MB</strong>' +
+      ' &rarr; Output: <strong>' + msg.output_mb.toFixed(0) + ' MB</strong>' +
+      ' <span style="color:' + color + '">(' + sign + msg.bloat_pct.toFixed(1) + '%)</span>';
+    row.style.display = '';
+
+  } else if (msg.type === 'source_size') {
+    initSizeTracker(msg.bytes);
+
+  } else if (msg.type === 'dl_progress') {
+    var dlRow = document.getElementById('dl-status-row');
+    dlRow.style.display = '';
+    document.getElementById('dl-status-label').textContent = 'DL ' + msg.idx + '/' + msg.total + ' — ' + msg.size;
+    document.getElementById('dl-status-pct').textContent = msg.pct.toFixed(1) + '%';
+    document.getElementById('dl-status-speed').textContent = msg.speed;
+    document.getElementById('dl-status-eta').textContent = 'ETA ' + msg.eta;
+    chartDl.push(parseDownloadSpeed(msg.speed));
+
+  } else if (msg.type === 'log') {
+    log(msg.msg);
+    if (msg.msg.indexOf('Encode params:') !== -1) showEncodeParams(msg.msg);
+
+  } else if (msg.type === 'error') {
+    _lastErrorMsg = msg.msg || '';
+    log('ERROR: ' + msg.msg, 'error');
+    document.getElementById('phase-label').textContent = '✕ Failed';
+    document.getElementById('phase-file').textContent = '';
+    barBg.classList.remove('bar-indeterminate');
+    setPhaseState('error');
+    stopElapsedTimer();
+
+  } else if (msg.type === 'cancelled') {
+    // Server confirmed the job was cancelled by the user — distinct from an error.
+    cancelled = true;
+    log(msg.msg || 'Cancelled by user.', 'info');
+    document.getElementById('phase-label').textContent = '✕ Cancelled';
+    document.getElementById('phase-file').textContent = '';
+    barBg.classList.remove('bar-indeterminate');
+    setPhaseState('error');
+    stopElapsedTimer();
+
+  } else if (msg.type === 'done') {
+    document.getElementById('phase-label').textContent = '✓ Complete';
+    document.getElementById('phase-file').textContent = '';
+    document.getElementById('bar-fill').style.width = '100%';
+    document.getElementById('stat-pct').textContent = '100%';
+    document.getElementById('overall-bar-fill').style.width = '100%';
+    document.getElementById('dl-status-row').style.display = 'none';
+    barBg.classList.remove('bar-indeterminate');
+    setPhaseState('done');
+    stopElapsedTimer();
+    celebrate();
+    log(msg.msg, 'done');
+
+  } else if (msg.type === 'shutdown') {
+    log('⚠ ' + msg.msg, 'info');
+  }
+}
+
+const LOG_MAX_NODES = 500;
+let _logBuffer = [];        // pending lines, flushed in a rAF
+let _logFlushScheduled = false;
+
+function log(msg, type='') {
+  _logBuffer.push({ msg, type });
+  if (_logFlushScheduled) return;
+  _logFlushScheduled = true;
+  requestAnimationFrame(_flushLog);
+}
+
+function _flushLog() {
+  _logFlushScheduled = false;
+  const box = document.getElementById('log-box');
+  if (!box) { _logBuffer = []; return; }
+
+  // (1) Only auto-scroll if the user was already pinned to the bottom.
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 4;
+
+  const batch = _logBuffer;
+  _logBuffer = [];
+  const frag = document.createDocumentFragment();
+  for (const { msg, type } of batch) {
+    const line = document.createElement('div');
+    if (type === 'error') line.className = 'log-error';
+    else if (type === 'done') line.className = 'log-done';
+    else if (type === 'info') line.className = 'log-info';
+    line.textContent = msg;
+    frag.appendChild(line);
+  }
+  box.appendChild(frag);
+
+  // (2) Cap node count — trim oldest lines beyond the limit.
+  while (box.childNodes.length > LOG_MAX_NODES) {
+    box.removeChild(box.firstChild);
+  }
+
+  // (1) Auto-scroll only if the user hadn't scrolled up.
+  if (atBottom) box.scrollTop = box.scrollHeight;
+}
+
+// ---- FAILURE SUMMARY PANEL (Issue #10) ----
+// Accumulates failed items for the whole session; survives later completions.
+// Each entry: { title, reason, category, permanent }.
+let _failures = [];
+
+function categorizeFailure(msg) {
+  const m = (msg || '').toLowerCase();
+  if (/cookie|sign in|login required|consent|age.?restrict|not a bot|confirm you/.test(m))
+    return 'cookies expired';
+  if (/yt-dlp|extractor|unable to extract|nsig|player|json|parse|unavailable|private video|removed/.test(m))
+    return 'yt-dlp parse error';
+  if (/ffmpeg|nvenc|encode|initializeencoder|invalid param|hevc/.test(m))
+    return 'ffmpeg crash';
+  if (/network|timeout|timed out|connection|resolve host|temporary failure|http error|10054|reset/.test(m))
+    return 'network';
+  return 'other';
+}
+
+function recordFailure(item, reason, permanent) {
+  const title = (item && (item.title || item.url || item.path)) || 'Unknown item';
+  // Promote an existing transient entry to permanent rather than duplicating.
+  const existing = _failures.find(f => (f.title === title));
+  if (existing) {
+    existing.reason = reason || existing.reason;
+    existing.category = categorizeFailure(reason || existing.reason);
+    if (permanent) existing.permanent = true;
+  } else {
+    _failures.push({
+      title,
+      reason: reason || '(no detail)',
+      category: categorizeFailure(reason),
+      permanent: !!permanent,
+    });
+  }
+  renderFailurePanel();
+}
+
+function renderFailurePanel() {
+  const panel = document.getElementById('failure-panel');
+  const list = document.getElementById('failure-panel-list');
+  const count = document.getElementById('failure-panel-count');
+  if (!panel) return;
+  if (_failures.length === 0) { panel.classList.remove('visible'); return; }
+  panel.classList.add('visible');
+  count.textContent = _failures.length;
+  list.innerHTML = _failures.map(f => {
+    const cls = f.permanent ? 'permanent' : 'transient';
+    const icon = f.permanent ? '✕' : '⚠';
+    const reason = (f.reason || '').replace(/\s+/g, ' ').slice(0, 160);
+    return '<li class="failure-item ' + cls + '">' +
+      '<span class="failure-item-icon">' + icon + '</span>' +
+      '<span class="failure-item-body">' +
+        '<span class="failure-item-title" title="' + escapeAttr(f.title) + '">' + escapeHtml(f.title) + '</span>' +
+        '<span class="failure-item-reason"><span class="failure-item-cat">' + escapeHtml(f.category) + '</span> · ' + escapeHtml(reason) + '</span>' +
+      '</span>' +
+    '</li>';
+  }).join('');
+}
+
+function dismissFailurePanel() {
+  _failures = [];
+  renderFailurePanel();
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+function escapeAttr(s) {
+  return escapeHtml(s).replace(/"/g, '&quot;');
+}
+
+// ---- JOB QUEUE ----
+let dlQueue = []; // array of {url, title, video_format, audio_format}
+
+function addToQueue() {
+  const url = document.getElementById('url-input').value.trim();
+  const vf = document.getElementById('video-format').value;
+  const af = document.getElementById('audio-format').value;
+  const title = document.getElementById('video-title').textContent || url;
+  const needVideo = currentMode !== 'audio';
+  if (!url || (needVideo && !vf) || !af) { log('Fetch video info and select formats first.', 'error'); return; }
+  if (dlQueue.find(x => x.type === 'youtube' && x.url === url)) { log('Already in queue.', 'info'); return; }
+  dlQueue.push({
+    type: 'youtube', url, title,
+    video_format: needVideo ? vf : '', audio_format: af,
+    expected_size: getSelectedExpectedSize(),
+    output_dir: document.getElementById('output-dir').value.trim(),
+    tune_mode: currentTuneMode,
+    duration: currentVideoDuration || 0,   // captured from /video-info
+  });
+  log('Queued: ' + title, 'info');
+  renderDlQueue();
+  // Clear URL input for next entry
+  document.getElementById('url-input').value = '';
+  document.getElementById('video-info').classList.remove('visible');
+  document.getElementById('queue-add-btn').style.display = 'none';
+  currentVideoDuration = 0; // stale until the next /video-info fetch
+}
+
+function renderDlQueue() {
+  const sec = document.getElementById('dl-queue-section');
+  const items = document.getElementById('dl-queue-items');
+  const count = document.getElementById('dl-queue-count');
+  if (dlQueue.length === 0) { sec.style.display = 'none'; return; }
+  sec.style.display = 'block';
+  count.textContent = dlQueue.length;
+  items.innerHTML = dlQueue.map((q, i) => {
+    const tag = q.type === 'local'
+      ? '<span style="background:var(--accent3);color:#111;font-size:9px;padding:1px 5px;border-radius:3px;margin-right:6px;">ENC</span>'
+      : '<span style="background:var(--accent);color:#111;font-size:9px;padding:1px 5px;border-radius:3px;margin-right:6px;">DL</span>';
+    const fmtLabel = q.video_format ? `${q.video_format}+${q.audio_format}` : `audio:${q.audio_format}`;
+    const detail = q.type === 'local'
+      ? `<span style="color:var(--muted);margin:0 12px;flex-shrink:0;font-size:10px;">${q.size_gb} GB</span>`
+      : `<span style="color:var(--muted);margin:0 12px;flex-shrink:0;font-size:10px;">${fmtLabel}${q.expected_size > 0 ? ' \u00b7 ' + (q.expected_size / 1024**3).toFixed(1) + 'GB' : ''}</span>`;
+    const tip = q.type === 'local' ? q.path : q.url;
+    const tuneCtl = q.type === 'youtube'
+      ? `<select onchange="dlQueue[${i}].tune_mode=this.value" style="font-size:10px;margin:0 6px;">
+           <option value="uhq"${q.tune_mode !== 'hq' ? ' selected' : ''}>Excellent (Slow)</option>
+           <option value="hq"${q.tune_mode === 'hq' ? ' selected' : ''}>Great (Fast)</option>
+         </select>`
+      : '';
+    const dirCtl = q.type === 'youtube'
+      ? `<input value="${escapeAttr(q.output_dir || '')}" placeholder="(default out)"
+           onchange="dlQueue[${i}].output_dir=this.value.trim()"
+           style="font-size:10px;width:120px;margin-right:6px;">`
+      : '';
+    return `<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 10px;border-bottom:1px solid var(--border);">
+      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${tip}">${tag}${q.title}</span>
+      ${detail}
+      ${tuneCtl}
+      ${dirCtl}
+      <span style="color:var(--accent2);cursor:pointer;flex-shrink:0;" onclick="removeDlQueue(${i})">&#10005;</span>
+    </div>`;
+  }).join('');
+}
+
+function removeDlQueue(idx) {
+  dlQueue.splice(idx, 1);
+  renderDlQueue();
+}
+
+function clearDlQueue() {
+  dlQueue = [];
+  renderDlQueue();
+}
+
+// ---- LOCAL CONVERSION ----
+let localFiles = []; // array of {name, path, size_gb}
+
+function probeAndSelectPreset() {
+  // Smart Auto analyses the source on the server — just ensure it's selected
+  autoSelectPreset();
+}
+
+async function browseLocalFiles() {
+  const r = await fetch(`${API}/browse-files`);
+  const d = await r.json();
+  if (!d.files || d.files.length === 0) return;
+  d.files.forEach(f => {
+    if (!localFiles.find(x => x.path === f.path)) localFiles.push(f);
+  });
+  log(`Added ${d.files.length} file(s)`, 'info');
+  renderLocalFiles();
+  probeAndSelectPreset();
+}
+
+async function browseLocalFolder() {
+  const r = await fetch(`${API}/browse-source-folder`);
+  const d = await r.json();
+  if (!d.path) return;
+  document.getElementById('local-folder').value = d.path;
+  await scanFolder();
+}
+
+async function scanFolder() {
+  const folder = document.getElementById('local-folder').value.trim();
+  if (!folder) return;
+  const form = new FormData();
+  form.append('folder', folder);
+  const r = await fetch(`${API}/scan-folder`, { method: 'POST', body: form });
+  const d = await r.json();
+  if (d.error) { log('Error: ' + d.error, 'error'); return; }
+  d.files.forEach(f => {
+    if (!localFiles.find(x => x.path === f.path)) localFiles.push(f);
+  });
+  log(`Scanned: ${d.files.length} file(s) found in ${d.folder}`, 'info');
+  renderLocalFiles();
+  probeAndSelectPreset();
+}
+
+function renderLocalFiles() {
+  const list = document.getElementById('local-file-list');
+  const items = document.getElementById('local-file-items');
+  const count = document.getElementById('local-file-count');
+  if (localFiles.length === 0) { list.style.display = 'none'; return; }
+  list.style.display = 'block';
+  count.textContent = localFiles.length;
+  items.innerHTML = localFiles.map((f, i) => `
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:5px 10px;border-bottom:1px solid var(--border);">
+      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${f.path}">${f.name}</span>
+      <span style="color:var(--muted);margin:0 12px;flex-shrink:0;">${f.size_gb} GB</span>
+      <span style="color:var(--accent2);cursor:pointer;flex-shrink:0;" onclick="removeLocalFile(${i})">✕</span>
+    </div>
+  `).join('');
+}
+
+function removeLocalFile(idx) {
+  localFiles.splice(idx, 1);
+  renderLocalFiles();
+}
+
+function clearLocalFiles() {
+  localFiles = [];
+  renderLocalFiles();
+}
+
+function addLocalToQueue() {
+  if (localFiles.length === 0) { log('No files loaded. Browse files or scan a folder first.', 'error'); return; }
+  let added = 0;
+  localFiles.forEach(f => {
+    if (!dlQueue.find(x => x.type === 'local' && x.path === f.path)) {
+      dlQueue.push({ type: 'local', title: f.name, path: f.path, size_gb: f.size_gb });
+      added++;
+    }
+  });
+  log(`Added ${added} local file(s) to queue.`, 'info');
+  renderDlQueue();
+  // Clear local file list — they're in the queue now
+  localFiles = [];
+  renderLocalFiles();
+}
+
+async function startLocalConvert() {
+  if (localFiles.length === 0) { log('No files loaded. Browse files or scan a folder first.', 'error'); return; }
+  // Add to queue and start immediately
+  addLocalToQueue();
+  startDownload();
+}
+
+async function cancelJob() {
+  // (1) Mark the whole run cancelled so the queue/retry loops stop.
+  cancelled = true;
+  // (2) Abort the in-flight SSE fetch/reader so runOneItem unwinds immediately.
+  if (_currentController) { try { _currentController.abort(); } catch {} }
+  // (3) Terminate server-side ffmpeg/yt-dlp.
+  try { await fetch(`${API}/cancel`, { method: 'POST' }); } catch {}
+  log('Cancelled.', 'error');
+  document.getElementById('start-btn').classList.remove('hidden');
+  document.getElementById('cancel-btn').classList.add('hidden');
+  document.getElementById('phase-label').textContent = '✕ Cancelled';
+  setPhaseState('error');
+  stopElapsedTimer();
+}
+</script>
+</body>
+</html>

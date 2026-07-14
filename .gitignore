@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+.pytest_cache/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Bundled binaries — rebuilt from upstream, do not track
+_internal/
+yt-dlp.exe
+
+# Sensitive — YouTube auth cookies, never commit
+cookies.txt
+
+# Runtime artifacts (preserved locally, not pushed)
+history.json
+logs/
+downloads/
+
+# Agent-workflow scratch (briefs, reports, review packages)
+.superpowers/
+
+# IDE
+.vscode/
+.idea/
+
+# OS junk
+Thumbs.db
+.DS_Store

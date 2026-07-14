@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fetchforge"
+description = "Download YouTube videos and transcode to H.265/HEVC with NVIDIA NVENC — a localhost web app."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "prekabreki", email = "prekabreki@users.noreply.github.com" }]
+dynamic = ["version"]
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "python-multipart",
+    "yt-dlp[default]",
+]
+
+[project.scripts]
+fetchforge = "fetchforge.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/prekabreki/FetchForge"
+
+[tool.setuptools]
+packages = ["fetchforge"]
+
+[tool.setuptools.dynamic]
+version = { attr = "fetchforge.__version__" }
+
+[tool.setuptools.package-data]
+fetchforge = ["index.html"]

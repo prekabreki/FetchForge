@@ -1,0 +1,2 @@
+# Managed by init-workspace: the git hook must stay LF or its #!/bin/sh shebang breaks on checkout.
+.githooks/pre-commit text eol=lf
