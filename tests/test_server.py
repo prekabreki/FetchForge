@@ -2,11 +2,57 @@
 Run: .venv/bin/python -m unittest discover -s tests -v
 (Use the venv python — server.py resolves yt-dlp/ffmpeg at import time.)"""
 import json
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from fetchforge import server
 from yt_dlp.utils import sanitize_filename
+
+
+class TestStaleCookieDetection(unittest.TestCase):
+    """Issue #9: yt-dlp's rotated-cookie warning must flip cookies off for the run."""
+
+    def setUp(self):
+        server._cookies_disabled = False
+
+    def tearDown(self):
+        server._cookies_disabled = False
+
+    def test_flags_and_drops_cookies_on_rotation_warning(self):
+        with tempfile.TemporaryDirectory() as d:
+            ck = Path(d) / "cookies.txt"
+            ck.write_text("x")
+            with mock.patch.object(server, "COOKIES_PATH", ck):
+                self.assertEqual(server.cookie_args(), ["--cookies", str(ck)])
+                line = ("WARNING: [youtube] The provided YouTube account cookies are "
+                        "no longer valid. They have likely been rotated in the browser.")
+                msg = server._maybe_flag_stale_cookies(line)
+                self.assertIsNotNone(msg)
+                self.assertTrue(server._cookies_disabled)
+                self.assertEqual(server.cookie_args(), [])            # dropped for the run
+                self.assertIsNone(server._maybe_flag_stale_cookies(line))  # one-shot
+
+    def test_benign_line_does_not_flag(self):
+        with tempfile.TemporaryDirectory() as d:
+            ck = Path(d) / "cookies.txt"
+            ck.write_text("x")
+            with mock.patch.object(server, "COOKIES_PATH", ck):
+                self.assertIsNone(server._maybe_flag_stale_cookies("[download]  50% of 10MiB"))
+                self.assertFalse(server._cookies_disabled)
+
+    def test_no_flag_when_no_cookies_loaded(self):
+        with tempfile.TemporaryDirectory() as d:
+            ck = Path(d) / "cookies.txt"   # never created
+            with mock.patch.object(server, "COOKIES_PATH", ck):
+                self.assertIsNone(server._maybe_flag_stale_cookies("cookies are no longer valid"))
+                self.assertFalse(server._cookies_disabled)
+
+    def test_sse_cookie_warning_shape(self):
+        s = server.sse_cookie_warning("hi")
+        self.assertTrue(s.startswith("data: ") and s.endswith("\n\n"))
+        self.assertEqual(json.loads(s[6:].strip()), {"type": "cookie_warning", "msg": "hi"})
 
 
 class TestUrlValidation(unittest.TestCase):

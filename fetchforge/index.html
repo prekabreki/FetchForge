@@ -2687,6 +2687,17 @@ function handleMsg(msg) {
     celebrate();
     log(msg.msg, 'done');
 
+  } else if (msg.type === 'cookie_warning') {
+    // Server detected the loaded cookies were rotated/invalidated and dropped
+    // them for the rest of the run. Surface it and mark the badge stale.
+    log('⚠ ' + msg.msg, 'error');
+    const badge = document.getElementById('cookie-badge');
+    if (badge) { badge.textContent = '⚠ cookies stale — running without them'; badge.className = 'badge badge-warn'; }
+    const dot = document.getElementById('cookie-dot');
+    if (dot) dot.className = 'dot warn';
+    const hdr = document.getElementById('cookie-header');
+    if (hdr) hdr.textContent = 'cookies: stale';
+
   } else if (msg.type === 'shutdown') {
     log('⚠ ' + msg.msg, 'info');
   }

@@ -357,8 +357,37 @@ async def _save_history_entry(entry: dict):
 # Windows illegal chars + tilde + control chars
 ILLEGAL_RE = re.compile(r'[<>:"/\\|?*~\x00-\x1f]')
 
+# Set when yt-dlp reports the loaded cookies have been rotated/invalidated. Once
+# that happens the cookies are dead, and passing them is strictly worse than
+# passing none (forces a degraded client + hard format failures), so we drop them
+# for the rest of the run. Persists across the client's retry rounds; reset when
+# the user loads fresh cookies (upload/paste), which deserve a new chance.
+_cookies_disabled = False
+
+# yt-dlp's stale-cookie warning, e.g. "The provided YouTube account cookies are no
+# longer valid. They have likely been rotated in the browser as a security measure."
+_STALE_COOKIE_MARKERS = ("no longer valid", "have likely been rotated")
+
 def cookie_args() -> list:
+    if _cookies_disabled:
+        return []
     return ["--cookies", str(COOKIES_PATH)] if COOKIES_PATH.exists() else []
+
+
+def _maybe_flag_stale_cookies(line: str) -> Optional[str]:
+    """If a yt-dlp output line signals rotated/invalid cookies, disable cookies for
+    the rest of the run and return a one-time user-facing warning to emit; else None."""
+    global _cookies_disabled
+    if _cookies_disabled or not COOKIES_PATH.exists():
+        return None
+    low = line.lower()
+    if "cookie" in low and any(m in low for m in _STALE_COOKIE_MARKERS):
+        _cookies_disabled = True
+        return ("Your cookies appear stale (rotated/invalidated by the browser). "
+                "Continuing this run without cookies — public videos still download. "
+                "For private/age-restricted videos, re-export cookies from a fresh "
+                "private window and reload them.")
+    return None
 
 
 def is_http_url(url: str) -> bool:
@@ -444,6 +473,9 @@ def sse_log(msg: str) -> str:
 
 def sse_error(msg: str) -> str:
     return _sse({"type": "error", "msg": msg})
+
+def sse_cookie_warning(msg: str) -> str:
+    return _sse({"type": "cookie_warning", "msg": msg})
 
 def sse_cancelled(msg: str = "Cancelled by user.") -> str:
     return _sse({"type": "cancelled", "msg": msg})
@@ -899,8 +931,10 @@ async def index():
 
 @app.post("/upload-cookies")
 async def upload_cookies(file: UploadFile = File(...)):
+    global _cookies_disabled
     content = await file.read()
     await asyncio.to_thread(COOKIES_PATH.write_bytes, content)
+    _cookies_disabled = False    # fresh cookies deserve a new chance
     return {"status": "ok", "message": "cookies.txt saved"}
 
 
@@ -933,6 +967,7 @@ def _validate_cookies_text(text: str) -> dict:
 
 @app.post("/paste-cookies")
 async def paste_cookies(text: str = Form(...)):
+    global _cookies_disabled
     result = _validate_cookies_text(text)
     if not result.get("valid"):
         return result
@@ -941,6 +976,7 @@ async def paste_cookies(text: str = Form(...)):
     if not any("netscape http cookie file" in l.lower() for l in body.splitlines()[:5]):
         body = "# Netscape HTTP Cookie File\n" + body
     await asyncio.to_thread(COOKIES_PATH.write_text, body, encoding="utf-8")
+    _cookies_disabled = False    # fresh cookies deserve a new chance
     return result
 
 
@@ -1448,6 +1484,9 @@ async def download(
                                 proc.terminate()
                                 break
                             line = raw.decode(errors="replace").rstrip()
+                            _cw = _maybe_flag_stale_cookies(line)
+                            if _cw:
+                                await msg_q.put(sse_cookie_warning(_cw))
                             m = re.search(
                                 r"\[download\]\s+([\d.]+)%\s+of\s+(\S+)\s+at\s+(.+?)\s+ETA\s+(\S+)",
                                 line
@@ -1733,6 +1772,9 @@ async def download(
                         proc.terminate()
                         break
                     line = raw.decode(errors="replace").rstrip()
+                    _cw = _maybe_flag_stale_cookies(line)
+                    if _cw:
+                        yield sse_cookie_warning(_cw)
                     m = re.search(
                         r"\[download\]\s+([\d.]+)%\s+of\s+([\S]+)\s+at\s+([\S]+)\s+ETA\s+([\S]+)",
                         line
