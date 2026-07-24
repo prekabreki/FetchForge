@@ -209,6 +209,120 @@ class TestEncodeParams(unittest.TestCase):
         self.assertEqual(p["profile"], "main10")
         self.assertTrue(p["hdr"] and p["ten_bit"])
 
+    def test_output_height_drives_bitrate_math(self):
+        p = self._p(height=1080, fps=30.0, video_bitrate_kbps=100000, codec="h264")
+        self.assertEqual(p["cq"], 26)
+        self.assertEqual(p["maxrate"], "7M")
+
+
+class TestDecodeFilterArgs(unittest.TestCase):
+    """_decode_filter_args filter-chain unit tests (issue #18)."""
+
+    def setUp(self):
+        self._lib = server.HAS_LIBPLACEBO
+        self._cuda = server.HAS_SCALE_CUDA
+
+    def tearDown(self):
+        server.HAS_LIBPLACEBO = self._lib
+        server.HAS_SCALE_CUDA = self._cuda
+
+    @staticmethod
+    def _vf(args):
+        return args[args.index("-vf") + 1]
+
+    # -- passthrough (target_height=0, byte-identical) --
+
+    def test_passthrough_gpu(self):
+        server.HAS_LIBPLACEBO = False
+        server.HAS_SCALE_CUDA = True
+        a = server._decode_filter_args(Path("in.mkv"), "yuv420p", "h264_cuvid")
+        vf = self._vf(a)
+        self.assertEqual(vf, "scale_cuda=format=yuv420p")
+        self.assertIn("-hwaccel_output_format", a)
+
+    def test_passthrough_cpu(self):
+        server.HAS_LIBPLACEBO = False
+        server.HAS_SCALE_CUDA = False
+        a = server._decode_filter_args(Path("in.mkv"), "yuv420p", None)
+        vf = self._vf(a)
+        self.assertEqual(vf, "format=yuv420p")
+        self.assertNotIn("-hwaccel_output_format", a)
+
+    def test_passthrough_hdr_10bit_gpu(self):
+        server.HAS_LIBPLACEBO = False
+        server.HAS_SCALE_CUDA = True
+        a = server._decode_filter_args(Path("in.mkv"), "yuv420p10le", "hevc_cuvid")
+        self.assertIn("yuv420p10le", self._vf(a))
+
+    # -- scaling: libplacebo path --
+
+    def test_downscale_libplacebo(self):
+        server.HAS_LIBPLACEBO = True
+        server.HAS_SCALE_CUDA = False
+        a = server._decode_filter_args(Path("in.mkv"), "yuv420p", None, target_height=720)
+        vf = self._vf(a)
+        self.assertIn("libplacebo=", vf)
+        self.assertIn("w=-2:h=720", vf)
+        self.assertIn("upscaler=ewa_lanczos", vf)
+        self.assertIn("downscaler=ewa_lanczos", vf)
+        self.assertIn("tonemapping=none", vf)
+
+    def test_upscale_libplacebo(self):
+        server.HAS_LIBPLACEBO = True
+        server.HAS_SCALE_CUDA = False
+        a = server._decode_filter_args(Path("in.mkv"), "yuv420p", "h264_cuvid", target_height=2160)
+        vf = self._vf(a)
+        self.assertIn("h=2160", vf)
+
+    def test_hdr_10bit_preserved_libplacebo(self):
+        server.HAS_LIBPLACEBO = True
+        server.HAS_SCALE_CUDA = False
+        a = server._decode_filter_args(Path("in.mkv"), "yuv420p10le", None, target_height=1080)
+        vf = self._vf(a)
+        self.assertIn("yuv420p10le", vf)
+        self.assertIn("tonemapping=none", vf)
+
+    def test_libplacebo_preferred_over_scale_cuda(self):
+        server.HAS_LIBPLACEBO = True
+        server.HAS_SCALE_CUDA = True
+        a = server._decode_filter_args(Path("in.mkv"), "yuv420p", "h264_cuvid", target_height=1080)
+        self.assertIn("libplacebo=", self._vf(a))
+        self.assertNotIn("scale_cuda", self._vf(a))
+
+    # -- scaling: scale_cuda path --
+
+    def test_downscale_cuda(self):
+        server.HAS_LIBPLACEBO = False
+        server.HAS_SCALE_CUDA = True
+        a = server._decode_filter_args(Path("in.mkv"), "yuv420p", "h264_cuvid", target_height=720)
+        vf = self._vf(a)
+        self.assertEqual(vf, "scale_cuda=format=yuv420p:w=-2:h=720")
+        self.assertIn("-hwaccel_output_format", a)
+
+    def test_upscale_cuda(self):
+        server.HAS_LIBPLACEBO = False
+        server.HAS_SCALE_CUDA = True
+        a = server._decode_filter_args(Path("in.mkv"), "yuv420p10le", None, target_height=2160)
+        self.assertIn("h=2160", self._vf(a))
+        self.assertIn("yuv420p10le", self._vf(a))
+
+    # -- scaling: CPU fallback --
+
+    def test_downscale_cpu(self):
+        server.HAS_LIBPLACEBO = False
+        server.HAS_SCALE_CUDA = False
+        a = server._decode_filter_args(Path("in.mkv"), "yuv420p", None, target_height=720)
+        vf = self._vf(a)
+        self.assertEqual(vf, "scale=w=-2:h=720:flags=lanczos,format=yuv420p")
+
+    def test_upscale_cpu(self):
+        server.HAS_LIBPLACEBO = False
+        server.HAS_SCALE_CUDA = False
+        a = server._decode_filter_args(Path("in.mkv"), "yuv420p10le", None, target_height=2160)
+        vf = self._vf(a)
+        self.assertIn("h=2160", vf)
+        self.assertIn("yuv420p10le", vf)
+
 
 class TestFfmpegArgs(unittest.TestCase):
     PARAMS = {"cq": 24, "preset": "p2", "maxrate": "7M", "bufsize": "14M",
@@ -228,6 +342,12 @@ class TestFfmpegArgs(unittest.TestCase):
         self.assertNotIn("-bf", a)
         self.assertNotIn("-spatial_aq", a)
         self.assertEqual(a[a.index("-preset") + 1], "p4")   # uhq rejects p2 → p4
+
+    def test_passthrough_target_height_zero_omits_scale_dims(self):
+        a = server.build_video_ffmpeg_args(Path("in.mkv"), Path("out.mp4"), self.PARAMS, "hq", "vp9")
+        vf = a[a.index("-vf") + 1]
+        self.assertNotIn("h=", vf)
+        self.assertNotIn("w=", vf)
 
 
 class TestSseBuilders(unittest.TestCase):
