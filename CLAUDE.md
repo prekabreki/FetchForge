@@ -303,3 +303,33 @@ Work is not complete until `git push` succeeds.
 3. Update issue status -- close finished work, un-claim what you did not finish.
 4. `git pull --rebase` then `git push`; confirm `git status` is clean.
 <!-- init-workspace:end -->
+
+<!-- foreman:start (managed by foreman-init — edits inside will be overwritten) -->
+## Foreman pipeline
+
+This repo is onboarded to the foreman two-tier pipeline: Opus (CC) plans,
+reviews diffs, and merges; DeepSeek executors execute promoted issues in
+background sessions. GitHub labels are the bus. Config: `.foreman.local`
+(gitignored). Full rules of engagement: `REFERENCE.md` in the petur-skills
+plugin's `foreman-init` skill (locate via the plugin, not a saved path).
+
+- **Labels:** `scoped` → (human promotes) → `ready-for-agent` → `in-progress`
+  → PR → merged, or `needs-replan` (+ sticky `bounced`) / `needs-human`
+  (intent questions only).
+- **Skills:** `gh-issues-writing` (scope), `foreman-dispatch` (launch wave +
+  open the wave monitor), `foreman-status` (review REAL diffs, merge, bounce,
+  escalate, report).
+- **Wave monitor:** dispatch opens a read-only local dashboard
+  (`foreman_view.py`, ships with the dispatch skill) at `http://127.0.0.1:8377/`
+  showing per-executor liveness, log tails, and PR state. It has no merge/kill
+  authority and holds no state — reconciliation is still `foreman-status`.
+- **Session-open habit:** if a wave was dispatched last session, run
+  `foreman-status` before anything else.
+- **Rules that never bend:** executors never merge; Opus never merges without
+  reading the diff; danger-zone PRs require independent verification; hand-
+  fixing an executor PR is scope creep — bounce it instead. The human gates on
+  intent (issue promotion) and drift (the status report), never on code.
+- **Branches/dirs:** executor branches are `foreman/issue-<N>`, worktrees under
+  `.foreman-worktrees/`, per-issue artifacts at repo root as
+  `foreman-issue-<N>.{log,pid,meta}` — all local-excluded, never commit them.
+<!-- foreman:end -->
