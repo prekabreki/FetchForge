@@ -231,6 +231,16 @@ def get_ytdlp() -> str:
     return _resolve_tool("yt-dlp", PKG_DIR / "yt-dlp.exe")
 
 
+def _ytdlp_in_this_env(ytdlp_path: str) -> bool:
+    """True when the resolved yt-dlp lives inside the running interpreter's
+    environment (venv / pip install) — i.e. `pip install -U` against
+    sys.executable will actually upgrade the copy the app uses."""
+    try:
+        return Path(ytdlp_path).resolve().is_relative_to(Path(sys.prefix).resolve())
+    except (OSError, ValueError):
+        return False
+
+
 def _resolve_node_args() -> list:
     """yt-dlp's JS runtime for solving challenges. Resolve node from PATH;
     fall back to the canonical Windows install location it always used."""
@@ -243,21 +253,19 @@ def _resolve_node_args() -> list:
 NODE_ARGS = _resolve_node_args()
 COOKIES_PATH = STATE_DIR / "cookies.txt"
 
-# Intermediate webm/mkv — cleared weekly. Override with BOP_CACHE_DIR.
-if os.getenv("BOP_CACHE_DIR"):
-    CACHE_DIR = Path(os.environ["BOP_CACHE_DIR"])
+# Intermediate webm/mkv — cleared weekly. Override with FETCHFORGE_CACHE_DIR
+# (the legacy BOP_CACHE_DIR is still honored so existing overrides don't break).
+_cache_override = os.getenv("FETCHFORGE_CACHE_DIR") or os.getenv("BOP_CACHE_DIR")
+if _cache_override:
+    CACHE_DIR = Path(_cache_override)
 elif IS_WINDOWS:
     CACHE_DIR = Path(r"E:/Cache/ytdlp") if Path(r"E:/").exists() else Path(r"C:/cache/ytdlp")
 else:
-    CACHE_DIR = Path(os.getenv("XDG_CACHE_HOME", Path.home() / ".cache")) / "bop-convert" / "ytdlp"
+    CACHE_DIR = Path(os.getenv("XDG_CACHE_HOME", Path.home() / ".cache")) / "fetchforge" / "ytdlp"
 OUTPUT_DIR = STATE_DIR / "downloads"    # final converted mp4s
 CONVERTED_DIR = OUTPUT_DIR / "converted"
-CACHE_DIR.mkdir(parents=True, exist_ok=True)
-OUTPUT_DIR.mkdir(exist_ok=True)
-CONVERTED_DIR.mkdir(exist_ok=True)
 HISTORY_PATH = STATE_DIR / "history.json"
 LOGS_DIR = STATE_DIR / "logs"
-LOGS_DIR.mkdir(exist_ok=True)
 from fetchforge import __version__ as APP_VERSION
 
 
@@ -287,7 +295,14 @@ def _setup_logging() -> None:
         logging.getLogger(name).addHandler(file_handler)
 
 
-_setup_logging()
+def _ensure_runtime_dirs() -> None:
+    """Create the writable runtime dirs (cache, downloads, logs). Called from
+    run_server() — NOT at import time — so a bare `import fetchforge.server`
+    (tests, third parties) has no filesystem side effects in the importer's cwd."""
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    CONVERTED_DIR.mkdir(exist_ok=True)
+    LOGS_DIR.mkdir(exist_ok=True)
 
 
 def _poweroff():
@@ -987,12 +1002,34 @@ async def ytdlp_version():
 
 @app.post("/update-ytdlp")
 async def update_ytdlp():
+    """Update yt-dlp using the mechanism that matches how it was installed.
+
+    yt-dlp's own `-U` self-updater refuses for pip / package-manager installs, so
+    it's only correct for the Windows bundled standalone exe. For the normal
+    pip-dependency case we upgrade via pip against this interpreter; a system
+    binary we don't own can't be updated in place, so we say so."""
+    ytdlp = get_ytdlp()
+    bundled = PKG_DIR / "yt-dlp.exe"
+    if IS_WINDOWS and str(bundled) == ytdlp:
+        cmd = [ytdlp, "-U"]
+    elif _ytdlp_in_this_env(ytdlp):
+        cmd = [sys.executable, "-m", "pip", "install", "-U", "yt-dlp[default]"]
+    else:
+        return {"output": (
+            "yt-dlp here is a system/package-managed binary at {}.\n"
+            "FetchForge can't update it in place — update it with your OS package "
+            "manager (e.g. `sudo dnf upgrade yt-dlp` or `sudo apt upgrade yt-dlp`), "
+            "or run FetchForge from a virtualenv where yt-dlp is a pip dependency."
+        ).format(ytdlp)}
     proc = await asyncio.create_subprocess_exec(
-        str(get_ytdlp()), "-U",
+        *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
     )
     stdout, _ = await proc.communicate()
+    # get_ytdlp() is cached to a path; a pip upgrade replaces the package in place,
+    # so the path stays valid and /ytdlp-version (a fresh subprocess) reports the
+    # new version without a server restart.
     return {"output": stdout.decode(errors="replace").strip()}
 
 
@@ -2177,6 +2214,8 @@ async def shutdown_now(request: Request):
 
 def run_server(open_browser: bool = True) -> None:
     global _uvicorn_server
+    _ensure_runtime_dirs()   # create cache/downloads/logs before anything writes to them
+    _setup_logging()         # deferred here (not import time) so a bare import is side-effect-free
     logger.info("Starting FetchForge at http://localhost:8765")
     if open_browser:
         import threading, webbrowser
