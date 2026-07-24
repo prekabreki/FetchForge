@@ -215,8 +215,9 @@ class TestEncodeParams(unittest.TestCase):
         self.assertEqual(p["maxrate"], "7M")
 
     def test_target_res_720_to_1080_uses_output_height(self):
+        # Upscale (720→1080): floor caps CQ at 24; maxrate stays above 3M floor.
         p = self._p(height=720, target_res=1080, video_bitrate_kbps=100000, codec="h264")
-        self.assertEqual(p["cq"], 26)
+        self.assertEqual(p["cq"], 24)
         self.assertEqual(p["maxrate"], "7M")
 
     def test_target_res_2160_to_1080_uses_output_not_source(self):
@@ -236,6 +237,38 @@ class TestEncodeParams(unittest.TestCase):
         p = self._p(height=720, target_res=0, video_bitrate_kbps=100000, codec="h264")
         self.assertEqual(p["cq"], 28)
         self.assertEqual(p["maxrate"], "4M")
+
+    # ── Quality floor for sharpen/upscale (issue #29) ──────────────────────
+
+    def test_upscale_hq_enforces_floor(self):
+        """hq 720p→1080p upscale: cq≤24, maxrate≥3M, preset p4."""
+        with self.subTest("cq floor"):
+            p = self._p(height=720, target_res=1080, video_bitrate_kbps=2000, codec="h264", nvenc_tune="hq")
+            self.assertLessEqual(p["cq"], 24)
+        with self.subTest("maxrate >= 3M"):
+            p = self._p(height=720, target_res=1080, video_bitrate_kbps=2000, codec="h264", nvenc_tune="hq")
+            self.assertGreaterEqual(int(p["maxrate"].rstrip("M")), 3)
+        with self.subTest("preset p4"):
+            p = self._p(height=720, target_res=1080, fps=60.0, video_bitrate_kbps=2000, codec="h264", nvenc_tune="hq")
+            self.assertEqual(p["preset"], "p4")
+
+    def test_source_cap_below_3m_raised_to_3m(self):
+        """hq source-cap reduces maxrate to 2M → floor raises to 3M."""
+        p = self._p(height=720, fps=30.0, video_bitrate_kbps=1000, codec="h264",
+                     nvenc_tune="hq", sharpen=True)
+        self.assertGreaterEqual(int(p["maxrate"].rstrip("M")), 3)
+
+    def test_hdr_upscale_stays_10bit(self):
+        """HDR upscale is still yuv420p10le/main10 — floor does not force 8-bit."""
+        p = self._p(height=720, target_res=1080, color_transfer="smpte2084")
+        self.assertEqual(p["pix_fmt"], "yuv420p10le")
+        self.assertEqual(p["profile"], "main10")
+
+    def test_sharpen_off_downscale_unchanged(self):
+        """sharpen=False + downscale = byte-identical to no-floor path."""
+        p = self._p(height=1080, target_res=720, sharpen=False)
+        p_ref = self._p(height=1080, target_res=720)
+        self.assertEqual(p, p_ref)
 
 
 class TestDecodeFilterArgs(unittest.TestCase):

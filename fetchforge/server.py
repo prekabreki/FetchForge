@@ -745,12 +745,15 @@ def calc_encode_params(
     maxrate_override: str = "",
     nvenc_tune: str = "uhq",
     target_res: int = 0,
+    sharpen: bool = False,
 ) -> dict:
     """
     Derive NVENC encode parameters from source analysis.
     cq_override=0  → auto-select by resolution.
     maxrate_override="" → auto-calculate from source bitrate + codec efficiency.
+    sharpen=True or upscaling enforces a quality floor (CQ≤24, maxrate≥3M, preset≥p4).
     """
+    source_height = height
     if target_res and target_res > 0:
         height = target_res
 
@@ -823,13 +826,23 @@ def calc_encode_params(
     ten_bit = "10le" in pix_fmt or "10be" in pix_fmt or hdr
     pix_out = "yuv420p10le" if ten_bit else "yuv420p"
 
+    if nvenc_tune == "hq":
+        preset = "p2" if fps > 35 else "p4"
+    elif fps > 35:
+        preset = "p2" if height < 2160 else "p3"
+    else:
+        preset = "p4"
+
+    is_upscale = target_res > 0 and target_res > source_height
+    if sharpen or is_upscale:
+        cq = min(cq, 24)
+        maxrate_mbps = max(maxrate_mbps, 3)
+        if preset == "p2":
+            preset = "p4"
+
     return {
         "cq": cq,
-        # hq: p2 freely for all 60fps (no uhq restriction). uhq: p2 rejected by uhq at 4K;
-        # p3 for 4K 60fps, p2 for sub-4K 60fps (handled at encode time for p2→p4 guard).
-        "preset": ("p2" if fps > 35 else "p4") if nvenc_tune == "hq" else (
-            "p2" if (fps > 35 and height < 2160) else ("p3" if fps > 35 else "p4")
-        ),
+        "preset": preset,
         "maxrate": f"{maxrate_mbps}M",
         "bufsize": f"{maxrate_mbps * 2}M",
         "pix_fmt": pix_out,
@@ -1944,6 +1957,7 @@ async def download(
                             maxrate_override=maxrate,
                             nvenc_tune=effective_tune,
                             target_res=_target_res,
+                            sharpen=_sharpen,
                         )
                         enc_log = "Encode params: CQ={} maxrate={} preset={} tune={} pix={}".format(
                             params["cq"], params["maxrate"], params["preset"], effective_tune, params["pix_fmt"]
@@ -2207,6 +2221,7 @@ async def download(
                             maxrate_override=maxrate,
                             nvenc_tune=effective_tune,
                             target_res=_target_res,
+                            sharpen=_sharpen,
                         )
                         enc_log = "Encode params: CQ={} maxrate={} preset={} tune={} pix={}".format(
                             params["cq"], params["maxrate"], params["preset"], effective_tune, params["pix_fmt"]
@@ -2470,6 +2485,7 @@ async def convert_local(
                     maxrate_override=maxrate,
                     nvenc_tune=effective_tune,
                     target_res=_target_res,
+                    sharpen=_sharpen,
                 )
                 enc_log = "Encode params: CQ={} maxrate={} preset={} tune={} pix={}".format(
                     params["cq"], params["maxrate"], params["preset"], effective_tune, params["pix_fmt"]
