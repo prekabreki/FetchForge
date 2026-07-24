@@ -995,9 +995,11 @@
         <span class="badge" id="cookie-badge">Checking...</span>
         <button class="btn btn-outline btn-sm" onclick="document.getElementById('cookie-file').click()">Load cookies.txt</button>
         <input type="file" id="cookie-file" accept=".txt" onchange="uploadCookies(this)">
+        <button class="btn btn-outline btn-sm" id="cookie-fetch-btn" onclick="attemptFetchCookies()">Attempt to fetch cookies</button>
         <button class="btn btn-outline btn-sm" id="cookie-clear-btn" onclick="clearCookies()" style="display:none;">Clear cookies</button>
         <span style="font-size:12px;color:var(--muted);">In Cookie-Editor, use Export → download to get the file</span>
       </div>
+      <div id="cookie-fetch-result" style="display:none;font-size:12px;margin-top:10px;"></div>
 
       <div class="cookies-paste-row">
         <div class="cookies-paste-hint">Or paste cookies (Cookie-Editor → Export → Netscape). Pasted text is masked and never displayed.</div>
@@ -1047,6 +1049,15 @@
               <div class="field-label">Audio Stream</div>
               <select id="audio-format"></select>
             </div>
+          </div>
+          <div id="playlist-select" style="display:none;margin-top:12px;">
+            <div style="display:flex;align-items:center;gap:14px;margin-bottom:6px;flex-wrap:wrap;">
+              <span style="font-family:var(--mono);font-size:10px;letter-spacing:2px;color:var(--muted);">PLAYLIST — <span id="playlist-sel-count">0</span>/<span id="playlist-total">0</span> selected</span>
+              <span style="color:var(--accent);cursor:pointer;font-size:11px;" onclick="playlistSelectAll(true)">select all</span>
+              <span style="color:var(--accent);cursor:pointer;font-size:11px;" onclick="playlistSelectAll(false)">select none</span>
+              <span style="color:var(--accent);cursor:pointer;font-size:11px;" onclick="playlistInvert()">invert</span>
+            </div>
+            <div id="playlist-items" style="max-height:260px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;"></div>
           </div>
           <div style="margin-top:10px;">
             <button class="btn btn-outline" onclick="addToQueue()" id="queue-add-btn" style="display:none;">➕ Add to Queue</button>
@@ -1383,6 +1394,7 @@ let currentTuneMode = 'uhq';
 let currentMode = 'video';        // 'video' (H.265) or 'audio' (WAV/MP3)
 let currentAudioPreset = 'wav';   // 'wav' or 'mp3'
 let currentVideoDuration = 0;     // duration (secs) of the last /video-info result; 0 for playlists/unknown
+let _playlistEntries = [];        // last playlist's per-video entries ({url,title,duration,index,_checked}); empty for single videos (#15)
 let _lastAudioFormats = [];       // last fetched audio format list, for auto-preset
 let videoEncodeStart = null;
 // Smart encode-ETA state (EMA of progress rate). Reset per video.
@@ -1971,6 +1983,81 @@ async function clearCookies() {
   checkCookies();
 }
 
+// #12: ask the server to read cookies straight from an installed browser.
+// With no args, it scans every browser+profile and picks the richest YouTube
+// source; called with (browser, profile) it switches to a specific one.
+async function attemptFetchCookies(browser, profile) {
+  const btn = document.getElementById('cookie-fetch-btn');
+  const box = document.getElementById('cookie-fetch-result');
+  const targeted = !!browser;
+  btn.disabled = true;
+  const prevLabel = btn.textContent;
+  btn.textContent = targeted ? 'Switching…' : 'Scanning…';
+  box.style.display = 'block';
+  box.innerHTML = targeted
+    ? `Reading ${escapeHtml(browser)}${profile ? ' / ' + escapeHtml(profile) : ''}…`
+    : 'Scanning installed browsers and profiles…';
+  try {
+    const form = new FormData();
+    if (browser) form.append('browser', browser);
+    if (profile) form.append('profile', profile);
+    const r = await fetch(`${API}/fetch-cookies`, { method: 'POST', body: form });
+    const d = await r.json();
+    renderCookieFetchResult(d);
+    if (d.selected) {
+      log(`Loaded ${d.selected.youtube_cookies} YouTube cookie(s) from ${d.selected.browser} / ${d.selected.display_name}.`, 'info');
+    } else if (d.error) {
+      log('Fetch cookies: ' + d.error, 'error');
+    } else {
+      log('No YouTube cookies found in any installed browser.', 'error');
+    }
+    checkCookies();
+  } catch(e) {
+    box.innerHTML = `<span style="color:var(--accent2);">Fetch failed: ${escapeHtml(String(e))}</span>`;
+    log('Attempt to fetch cookies failed: ' + e, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = prevLabel;
+  }
+}
+
+let _cookieCandidates = [];   // last scan's candidates, referenced by index for "use this"
+
+function renderCookieFetchResult(d) {
+  const box = document.getElementById('cookie-fetch-result');
+  _cookieCandidates = d.candidates || [];
+  const rows = [];
+  if (d.selected) {
+    rows.push(`<div style="color:var(--accent);margin-bottom:6px;">✓ Using <strong>${escapeHtml(d.selected.browser)} / ${escapeHtml(d.selected.display_name)}</strong> — ${d.selected.youtube_cookies} YouTube cookie(s).</div>`);
+  } else if (d.error) {
+    rows.push(`<div style="color:var(--accent2);margin-bottom:6px;">${escapeHtml(d.error)}</div>`);
+  } else {
+    rows.push(`<div style="color:var(--accent2);margin-bottom:6px;">No YouTube cookies found. Log in to YouTube in a browser, then try again.</div>`);
+  }
+  const shown = _cookieCandidates.filter(c => !c.error || c.youtube_cookies > 0);
+  if (shown.length) {
+    rows.push('<div style="color:var(--muted);margin:4px 0 2px;">Sources scanned:</div>');
+    _cookieCandidates.forEach((c, i) => {
+      if (c.error && !(c.youtube_cookies > 0)) return;
+      const isSel = d.selected && c.browser === d.selected.browser && (c.profile_dir || null) === (d.selected.profile_dir || null);
+      const count = c.error ? '<span style="color:var(--muted);">error</span>' : `${c.youtube_cookies} YT`;
+      const canSwitch = !isSel && !c.error && c.youtube_cookies > 0;
+      const action = canSwitch
+        ? ` <span style="color:var(--accent);cursor:pointer;text-decoration:underline;" onclick="useCookieSource(${i})">use this</span>`
+        : (isSel ? ' <span style="color:var(--accent);">✓</span>' : '');
+      rows.push(`<div style="padding:2px 0;">• ${escapeHtml(c.browser)} / ${escapeHtml(c.display_name)} — ${count}${action}</div>`);
+    });
+  }
+  rows.push('<div style="color:var(--muted);margin-top:6px;font-size:11px;">Tip: cookies from a running browser can be rotated by YouTube — for durable auth, log in via a fresh private window and close it before fetching.</div>');
+  box.innerHTML = rows.join('');
+}
+
+function useCookieSource(i) {
+  const c = _cookieCandidates[i];
+  if (!c) return;
+  attemptFetchCookies(c.browser, c.profile_dir || '');
+}
+
 let _pendingCookies = '';
 
 function handleCookiePaste(e) {
@@ -2087,6 +2174,16 @@ async function fetchInfo() {
       aSel.appendChild(o);
     });
     _lastAudioFormats = info.audio_formats || [];
+    // #15: a resolved playlist gets a per-video checklist (all checked); a
+    // single video clears it and behaves as before.
+    if (info.is_playlist && Array.isArray(info.entries) && info.entries.length) {
+      _playlistEntries = info.entries.map(e => ({ ...e, _checked: true }));
+      renderPlaylistSelect();
+      document.getElementById('playlist-select').style.display = '';
+    } else {
+      _playlistEntries = [];
+      document.getElementById('playlist-select').style.display = 'none';
+    }
     document.getElementById('video-info').classList.add('visible');
     document.getElementById('queue-add-btn').style.display = '';
     autoSelectPreset();
@@ -2818,7 +2915,65 @@ function escapeAttr(s) {
 // ---- JOB QUEUE ----
 let dlQueue = []; // array of {url, title, video_format, audio_format}
 
+// #15 — render the resolved playlist as a per-video checklist.
+function renderPlaylistSelect() {
+  const box = document.getElementById('playlist-items');
+  box.innerHTML = _playlistEntries.map((e, i) => {
+    const dur = e.duration ? ' · ' + formatDuration(e.duration) : '';
+    return `<label style="display:flex;align-items:center;gap:8px;padding:5px 10px;border-bottom:1px solid var(--border);cursor:pointer;">
+      <input type="checkbox" ${e._checked ? 'checked' : ''} onchange="_playlistEntries[${i}]._checked=this.checked;updatePlaylistCount()">
+      <span style="color:var(--muted);font-size:10px;flex-shrink:0;width:28px;">${e.index}</span>
+      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeAttr(e.title)}">${escapeHtml(e.title)}</span>
+      <span style="color:var(--muted);font-size:10px;flex-shrink:0;">${dur}</span>
+    </label>`;
+  }).join('');
+  updatePlaylistCount();
+}
+
+function updatePlaylistCount() {
+  document.getElementById('playlist-sel-count').textContent = _playlistEntries.filter(e => e._checked).length;
+  document.getElementById('playlist-total').textContent = _playlistEntries.length;
+}
+
+function playlistSelectAll(v) { _playlistEntries.forEach(e => e._checked = v); renderPlaylistSelect(); }
+function playlistInvert() { _playlistEntries.forEach(e => e._checked = !e._checked); renderPlaylistSelect(); }
+
 function addToQueue() {
+  // Playlist: expand each checked entry into its own queue item (#15). Leave
+  // video_format empty so the server takes the highest-available stream per
+  // video (mixed 720p/1080p lists — #13); the picked audio format still rides
+  // along but the highest-available selector ignores it when video_format is
+  // blank, so a video missing the exact audio itag still succeeds.
+  if (_playlistEntries.length) {
+    const af = document.getElementById('audio-format').value;
+    if (!af) { log('Select an audio format first.', 'error'); return; }
+    const chosen = _playlistEntries.filter(e => e._checked);
+    if (!chosen.length) { log('No videos selected.', 'error'); return; }
+    const outDir = document.getElementById('output-dir').value.trim();
+    let added = 0;
+    chosen.forEach(e => {
+      if (dlQueue.find(x => x.type === 'youtube' && x.url === e.url)) return;
+      dlQueue.push({
+        type: 'youtube', url: e.url, title: e.title || e.url,
+        video_format: '', audio_format: af,
+        expected_size: 0,              // no per-entry size from flat-playlist; duration gates completeness
+        output_dir: outDir,
+        tune_mode: currentTuneMode,
+        duration: e.duration || 0,
+      });
+      added++;
+    });
+    log(`Queued ${added} video(s) from playlist${added !== chosen.length ? ' (' + (chosen.length - added) + ' already queued)' : ''}.`, 'info');
+    renderDlQueue();
+    document.getElementById('url-input').value = '';
+    document.getElementById('video-info').classList.remove('visible');
+    document.getElementById('queue-add-btn').style.display = 'none';
+    document.getElementById('playlist-select').style.display = 'none';
+    _playlistEntries = [];
+    currentVideoDuration = 0;
+    return;
+  }
+
   const url = document.getElementById('url-input').value.trim();
   const vf = document.getElementById('video-format').value;
   const af = document.getElementById('audio-format').value;
@@ -2854,7 +3009,9 @@ function renderDlQueue() {
     const tag = q.type === 'local'
       ? '<span style="background:var(--accent3);color:#111;font-size:9px;padding:1px 5px;border-radius:3px;margin-right:6px;">ENC</span>'
       : '<span style="background:var(--accent);color:#111;font-size:9px;padding:1px 5px;border-radius:3px;margin-right:6px;">DL</span>';
-    const fmtLabel = q.video_format ? `${q.video_format}+${q.audio_format}` : `audio:${q.audio_format}`;
+    const fmtLabel = q.video_format
+      ? `${q.video_format}+${q.audio_format}`
+      : (currentMode === 'audio' ? `audio:${q.audio_format}` : `best+${q.audio_format}`);
     const detail = q.type === 'local'
       ? `<span style="color:var(--muted);margin:0 12px;flex-shrink:0;font-size:10px;">${q.size_gb} GB</span>`
       : `<span style="color:var(--muted);margin:0 12px;flex-shrink:0;font-size:10px;">${fmtLabel}${q.expected_size > 0 ? ' \u00b7 ' + (q.expected_size / 1024**3).toFixed(1) + 'GB' : ''}</span>`;
