@@ -1,6 +1,25 @@
+import os
 import unittest
 from unittest import mock
 from fetchforge import provision
+
+
+class TestUsePreservesPath(unittest.TestCase):
+    """Issue #7: the ffmpeg preflight must not reorder PATH when ffmpeg is already
+    discoverable there — prepending /usr/bin would shadow the venv's newer yt-dlp."""
+
+    def test_leaves_path_untouched_when_already_on_path(self):
+        with mock.patch("shutil.which", return_value="/usr/bin/ffmpeg"), \
+             mock.patch.dict(os.environ, {"PATH": "/venv/bin:/usr/bin"}, clear=True):
+            provision._use("/usr/bin/ffmpeg")
+            self.assertEqual(os.environ["PATH"], "/venv/bin:/usr/bin")
+
+    def test_prepends_when_off_path(self):
+        # e.g. the Windows auto-provisioned build under %LOCALAPPDATA%, not on PATH.
+        with mock.patch("shutil.which", return_value=None), \
+             mock.patch.dict(os.environ, {"PATH": "/venv/bin:/usr/bin"}, clear=True):
+            provision._use("/opt/ff/ffmpeg")
+            self.assertTrue(os.environ["PATH"].startswith("/opt/ff" + os.pathsep))
 
 
 class TestNvencDetection(unittest.TestCase):
@@ -33,10 +52,35 @@ class TestNvencDetection(unittest.TestCase):
             def fake_dl(url, dest):
                 P(dest).parent.mkdir(parents=True, exist_ok=True)
                 P(dest).write_bytes(data)
-            with mock.patch.object(provision, "FFMPEG_CACHE", cache):
+            # provision_windows now re-verifies NVENC on the downloaded build; the
+            # fake .exe can't be executed, so stub the check as present.
+            with mock.patch.object(provision, "FFMPEG_CACHE", cache), \
+                 mock.patch.object(provision, "ffmpeg_has_nvenc", return_value=True):
                 out = provision.provision_windows(download=fake_dl)
             self.assertTrue(out.endswith("ffmpeg.exe"))
             self.assertTrue((cache / "ffprobe.exe").exists())
+
+    def test_provision_windows_without_nvenc_raises(self):
+        # A downloaded build that extracts fine but lacks hevc_nvenc must be
+        # rejected, not silently used (guards against a wrong/changed asset).
+        import io, zipfile, tempfile
+        from pathlib import Path as P
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("ffmpeg-x/bin/ffmpeg.exe", b"MZ-fake")
+            zf.writestr("ffmpeg-x/bin/ffprobe.exe", b"MZ-fake")
+        data = buf.getvalue()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = P(tmp) / "ffmpeg"
+            def fake_dl(url, dest):
+                P(dest).parent.mkdir(parents=True, exist_ok=True)
+                P(dest).write_bytes(data)
+            with mock.patch.object(provision, "FFMPEG_CACHE", cache), \
+                 mock.patch.object(provision, "ffmpeg_has_nvenc", return_value=False):
+                with self.assertRaises(provision.ProvisionError):
+                    provision.provision_windows(download=fake_dl)
 
     def test_provision_windows_missing_ffmpeg_exe_raises(self):
         import io, zipfile, tempfile
