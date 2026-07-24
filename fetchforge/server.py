@@ -956,6 +956,16 @@ async def check_cookies():
         return {"exists": True, "valid": False, "reason": str(e)}
 
 
+@app.delete("/cookies")
+async def clear_cookies():
+    """Remove the loaded cookies.txt so downloads run cookie-free. Public content
+    needs no auth, and stale cookies are worse than none (see issue #9). Guarded
+    against cross-origin callers by _origin_guard like other mutating routes."""
+    existed = COOKIES_PATH.exists()
+    await asyncio.to_thread(COOKIES_PATH.unlink, missing_ok=True)
+    return {"status": "ok", "existed": existed}
+
+
 @app.get("/history")
 async def get_history():
     return await _load_history()
