@@ -445,6 +445,23 @@ def _newest_new_file(cache_dir: Path, pre_existing: set, pattern: str = "*.mkv")
     return new[-1] if new else None
 
 
+def _video_format_selector(vf: str, af: str, prefer_picked: bool) -> str:
+    """Build yt-dlp's -f for a video download.
+
+    `prefer_picked` (a single video, or a batch item that carries its own
+    per-video format choice) honors the exact itags the user selected, but always
+    appends a best-available fallback so a video missing those itags degrades
+    gracefully instead of hard-failing with "Requested format is not available".
+
+    Otherwise — a playlist, whose one picked format was read from only the FIRST
+    video and can't represent a mixed 720p/1080p list — we always take the highest
+    available stream per video (`bv*+ba/b`)."""
+    fallback = "bv*+ba/b"
+    if prefer_picked and vf and af:
+        return "{}+{}/{}".format(vf, af, fallback)
+    return fallback
+
+
 def _resolve_batch_items(items_json: str):
     """Parse the client `items` payload into the structures the pipeline
     consumes. Returns (video_urls, video_titles, video_durations, per_item)
@@ -1308,7 +1325,11 @@ async def download(
         def _yt_format_args() -> list:
             if is_audio:
                 return ["-f", audio_format]
-            return ["-f", "{}+{}".format(video_format, audio_format)]
+            # Single video honors the explicit pick (with a best-available
+            # fallback); a multi-video playlist always grabs the highest
+            # available per video (mixed 720p/1080p lists — issue #13).
+            return ["-f", _video_format_selector(video_format, audio_format,
+                                                 prefer_picked=(total_videos <= 1))]
 
         def _yt_merge_args() -> list:
             return [] if is_audio else ["--merge-output-format", "mkv"]
@@ -1426,6 +1447,7 @@ async def download(
 
             async def dl_worker():
                 global current_dl_process
+                failed_videos = []   # videos skipped in a playlist/batch (reported at the end)
                 try:
                     for vid_idx, vid_url in enumerate(video_urls, 1):
                         if _stopping():
@@ -1464,7 +1486,7 @@ async def download(
 
                         dl_args = [
                             str(get_ytdlp()),
-                            "-f", "{}+{}".format(vf, af),
+                            "-f", _video_format_selector(vf, af, prefer_picked=batch),
                             *NODE_ARGS,
                             "--no-playlist",
                             "--no-overwrites",
@@ -1558,21 +1580,26 @@ async def download(
                                 if mkv_files and exp_bytes > 0:
                                     actual = mkv_files[0].stat().st_size
                                     size_note = " (got {:.0f}MB of expected {:.0f}MB)".format(actual / 1024**2, exp_bytes / 1024**2)
-                                if not batch:
-                                    abort.set()
-                                    await msg_q.put(sse_error("{}Download failed{}.".format(dl_label, size_note)))
-                                    break
-                                await msg_q.put(sse_error("{}Download failed{} \u2014 skipping.".format(dl_label, size_note)))
-                                continue
+                                if total_videos > 1 or batch:
+                                    # One un-downloadable video must not abort the
+                                    # rest of a playlist/batch \u2014 record it and keep
+                                    # going; the whole job still completes.
+                                    failed_videos.append(vid_title or vid_url)
+                                    await msg_q.put(sse_log("{}Download failed{} \u2014 skipping, continuing with the rest.".format(dl_label, size_note)))
+                                    continue
+                                abort.set()
+                                await msg_q.put(sse_error("{}Download failed{}.".format(dl_label, size_note)))
+                                break
 
                         if not mkv_files:
                             await msg_q.put(sse_item_failed(vid_idx, total_videos, "no mkv"))
-                            if not batch:
-                                abort.set()
-                                await msg_q.put(sse_error("{}No .mkv found after download.".format(dl_label)))
-                                break
-                            await msg_q.put(sse_error("{}No .mkv found after download \u2014 skipping.".format(dl_label)))
-                            continue
+                            if total_videos > 1 or batch:
+                                failed_videos.append(vid_title or vid_url)
+                                await msg_q.put(sse_log("{}No .mkv found after download \u2014 skipping, continuing with the rest.".format(dl_label)))
+                                continue
+                            abort.set()
+                            await msg_q.put(sse_error("{}No .mkv found after download.".format(dl_label)))
+                            break
 
                         await msg_q.put(sse_log("{}Queued for encoding.".format(dl_label)))
                         if not await _put_file((vid_idx, mkv_files[0])):
@@ -1582,6 +1609,10 @@ async def download(
                             sleep_s = random.uniform(3, 8)
                             await msg_q.put(sse_log("Next download in {:.1f}s...".format(sleep_s)))
                             await asyncio.sleep(sleep_s)
+
+                    if failed_videos:
+                        shown = "; ".join(failed_videos[:10]) + (" …" if len(failed_videos) > 10 else "")
+                        await msg_q.put(sse_log("⚠ Skipped {} video(s) that couldn't be downloaded: {}".format(len(failed_videos), shown)))
 
                 finally:
                     # Always make sure the encoder receives its stop-sentinel (even on

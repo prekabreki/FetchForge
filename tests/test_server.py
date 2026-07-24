@@ -56,6 +56,23 @@ class TestStaleCookieDetection(unittest.TestCase):
         self.assertEqual(json.loads(s[6:].strip()), {"type": "cookie_warning", "msg": "hi"})
 
 
+class TestVideoFormatSelector(unittest.TestCase):
+    """Issue #13: playlists (mixed 720p/1080p) take highest available; a single
+    video / batch item honors the pick but never hard-fails."""
+
+    def test_playlist_takes_highest(self):
+        self.assertEqual(server._video_format_selector("298", "140", prefer_picked=False),
+                         "bv*+ba/b")
+
+    def test_single_honors_pick_with_fallback(self):
+        self.assertEqual(server._video_format_selector("298", "140", prefer_picked=True),
+                         "298+140/bv*+ba/b")
+
+    def test_falls_back_to_highest_when_pick_missing(self):
+        self.assertEqual(server._video_format_selector("", "", prefer_picked=True),
+                         "bv*+ba/b")
+
+
 class TestNewestNewFile(unittest.TestCase):
     """Issue #8: the pipeline fallback must pick only a file produced by THIS
     download, never a sibling video's MKV already sitting in the shared cache."""
