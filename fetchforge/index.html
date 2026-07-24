@@ -1276,6 +1276,28 @@
         "></div>
       </div>
 
+      <div class="adv-grid" style="grid-template-columns: 1fr 1fr;margin-bottom:14px;">
+        <div class="field">
+          <div class="field-label">Target Resolution</div>
+          <select id="target-res">
+            <option value="">Passthrough (source)</option>
+            <option value="720">720p</option>
+            <option value="1080">1080p</option>
+            <option value="1440">1440p</option>
+            <option value="2160">2160p</option>
+          </select>
+        </div>
+        <div class="field" style="justify-content:flex-end;">
+          <div class="toggle-row" style="margin-bottom:0;">
+            <label class="toggle">
+              <input type="checkbox" id="sharpen">
+              <span class="slider"></span>
+            </label>
+            <span class="toggle-label">Sharpen</span>
+          </div>
+        </div>
+      </div>
+
       <div class="action-row" style="gap:8px;">
         <button class="btn btn-outline" onclick="addLocalToQueue()">➕ Add to Queue</button>
         <button class="btn btn-success" id="local-convert-btn" onclick="startLocalConvert()">▶ Convert Now</button>
@@ -2220,6 +2242,8 @@ async function runOneItem(item, opts) {
     form.append('tune_mode', opts.tuneMode);
     form.append('mode', opts.mode);
     form.append('audio_preset', opts.audioPreset);
+    form.append('target_res', opts.targetRes);
+    form.append('sharpen', opts.sharpen);
   } else {
     endpoint = `${API}/download`;
     form = new FormData();
@@ -2237,6 +2261,8 @@ async function runOneItem(item, opts) {
     form.append('expected_size', String(item.expected_size || 0));
     form.append('mode', opts.mode);
     form.append('audio_preset', opts.audioPreset);
+    form.append('target_res', opts.targetRes);
+    form.append('sharpen', opts.sharpen);
   }
 
   let gotError = false;
@@ -2318,6 +2344,8 @@ async function runBatch(items, opts) {
   form.append('tune_mode', opts.tuneMode);
   form.append('mode', opts.mode);
   form.append('audio_preset', opts.audioPreset);
+  form.append('target_res', opts.targetRes);
+  form.append('sharpen', opts.sharpen);
 
   let gotCancelled = false;
   const outcome = new Map(); // idx (1-based) -> { ok, error? }
@@ -2401,6 +2429,8 @@ async function startDownload() {
     tuneMode: currentTuneMode,
     mode: currentMode,
     audioPreset: currentAudioPreset,
+    targetRes: document.getElementById('target-res').value || '',
+    sharpen: document.getElementById('sharpen').checked ? 'true' : 'false',
   };
 
   _jobRunning = true;
