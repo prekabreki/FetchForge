@@ -745,13 +745,15 @@ def calc_encode_params(
     maxrate_override: str = "",
     nvenc_tune: str = "uhq",
     target_res: int = 0,
-    sharpen: bool = False,
 ) -> dict:
     """
     Derive NVENC encode parameters from source analysis.
     cq_override=0  → auto-select by resolution.
     maxrate_override="" → auto-calculate from source bitrate + codec efficiency.
     """
+    if target_res and target_res > 0:
+        height = target_res
+
     # Quality target: lower = better quality / larger file
     if cq_override > 0:
         cq = cq_override
@@ -836,8 +838,6 @@ def calc_encode_params(
         "ten_bit": ten_bit,
         "bf": 3,
         "b_ref_mode": "middle",
-        "target_res": target_res,
-        "sharpen": sharpen,
     }
 
 current_process: Optional[asyncio.subprocess.Process] = None
@@ -1498,8 +1498,8 @@ async def download(
     mode: str = Form("video"),       # "video" → H.265 MP4; "audio" → WAV/MP3 extract
     audio_preset: str = Form("mp3"), # "wav" or "mp3"; only used when mode == "audio"
     items: str = Form(""),           # JSON array of per-item {url,video_format,audio_format,expected_size,output_dir,tune_mode,title,duration}
-    target_res: str = Form("0"),     # target height for unified resolution; 0 = off
-    sharpen: str = Form("false"),    # apply CAS sharpen filter after scaling
+    target_res: str = Form("0"),     # output height in pixels, "0" = off
+    sharpen: str = Form("false"),    # "true"/"false"
 ):
     async def stream():
         global current_process
@@ -1568,6 +1568,9 @@ async def download(
 
     async def _download_stream():
         global current_process
+
+        _target_res = int(target_res) if target_res.lstrip("-").isdigit() else 0
+        _sharpen = sharpen == "true"
 
         dest_dir = Path(output_dir) if output_dir else CONVERTED_DIR
         dest_dir.mkdir(parents=True, exist_ok=True)
@@ -1940,8 +1943,7 @@ async def download(
                             cq_override=int(cq) if cq.isdigit() else 0,
                             maxrate_override=maxrate,
                             nvenc_tune=effective_tune,
-                            target_res=int(target_res) if target_res else 0,
-                            sharpen=sharpen == "true",
+                            target_res=_target_res,
                         )
                         enc_log = "Encode params: CQ={} maxrate={} preset={} tune={} pix={}".format(
                             params["cq"], params["maxrate"], params["preset"], effective_tune, params["pix_fmt"]
@@ -1950,7 +1952,7 @@ async def download(
 
                         enc_args = build_video_ffmpeg_args(
                             input_file, output_file, params, effective_tune, src.get("codec", ""),
-                            target_height=params["target_res"], sharpen=params["sharpen"],
+                            target_height=_target_res, sharpen=_sharpen,
                         )
                         enc_res: dict = {}
                         async for _s in run_encode(enc_args, duration_secs=duration_secs,
@@ -2204,8 +2206,7 @@ async def download(
                             cq_override=int(cq) if cq.isdigit() else 0,
                             maxrate_override=maxrate,
                             nvenc_tune=effective_tune,
-                            target_res=int(target_res) if target_res else 0,
-                            sharpen=sharpen == "true",
+                            target_res=_target_res,
                         )
                         enc_log = "Encode params: CQ={} maxrate={} preset={} tune={} pix={}".format(
                             params["cq"], params["maxrate"], params["preset"], effective_tune, params["pix_fmt"]
@@ -2214,7 +2215,7 @@ async def download(
 
                         ffmpeg_args = build_video_ffmpeg_args(
                             input_file, output_file, params, effective_tune, src.get("codec", ""),
-                            target_height=params["target_res"], sharpen=params["sharpen"],
+                            target_height=_target_res, sharpen=_sharpen,
                         )
 
                     enc_res: dict = {}
@@ -2326,8 +2327,8 @@ async def convert_local(
     tune_mode: str = Form("uhq"),
     mode: str = Form("video"),       # "video" → H.265 MP4; "audio" → WAV/MP3 extract
     audio_preset: str = Form("mp3"), # "wav" or "mp3"; only used when mode == "audio"
-    target_res: str = Form("0"),     # target height for unified resolution; 0 = off
-    sharpen: str = Form("false"),    # apply CAS sharpen filter after scaling
+    target_res: str = Form("0"),     # output height in pixels, "0" = off
+    sharpen: str = Form("false"),    # "true"/"false"
 ):
     async def stream():
         global current_process
@@ -2401,6 +2402,9 @@ async def convert_local(
     async def _convert_local_stream():
         global current_process
 
+        _target_res = int(target_res) if target_res.lstrip("-").isdigit() else 0
+        _sharpen = sharpen == "true"
+
         is_audio = mode == "audio"
         out_ext = audio_output_ext(audio_preset) if is_audio else "mp4"
         out_suffix = "" if is_audio else "_h265"
@@ -2465,8 +2469,7 @@ async def convert_local(
                     cq_override=int(cq) if cq.isdigit() else 0,
                     maxrate_override=maxrate,
                     nvenc_tune=effective_tune,
-                    target_res=int(target_res) if target_res else 0,
-                    sharpen=sharpen == "true",
+                    target_res=_target_res,
                 )
                 enc_log = "Encode params: CQ={} maxrate={} preset={} tune={} pix={}".format(
                     params["cq"], params["maxrate"], params["preset"], effective_tune, params["pix_fmt"]
@@ -2475,7 +2478,7 @@ async def convert_local(
 
                 ffmpeg_args = build_video_ffmpeg_args(
                     input_file, output_file, params, effective_tune, src.get("codec", ""),
-                    target_height=params["target_res"], sharpen=params["sharpen"],
+                    target_height=_target_res, sharpen=_sharpen,
                 )
 
             enc_res: dict = {}
