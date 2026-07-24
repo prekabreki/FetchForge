@@ -214,6 +214,29 @@ class TestEncodeParams(unittest.TestCase):
         self.assertEqual(p["cq"], 26)
         self.assertEqual(p["maxrate"], "7M")
 
+    def test_target_res_720_to_1080_uses_output_height(self):
+        p = self._p(height=720, target_res=1080, video_bitrate_kbps=100000, codec="h264")
+        self.assertEqual(p["cq"], 26)
+        self.assertEqual(p["maxrate"], "7M")
+
+    def test_target_res_2160_to_1080_uses_output_not_source(self):
+        p = self._p(height=2160, target_res=1080, video_bitrate_kbps=100000, codec="h264")
+        self.assertEqual(p["cq"], 26)
+        self.assertEqual(p["maxrate"], "7M")
+
+    def test_target_res_omitted_leaves_behavior_unchanged(self):
+        p720 = self._p(height=720, video_bitrate_kbps=100000, codec="h264")
+        self.assertEqual(p720["cq"], 28)
+        self.assertEqual(p720["maxrate"], "4M")
+        p2160 = self._p(height=2160, video_bitrate_kbps=100000, codec="h264")
+        self.assertEqual(p2160["cq"], 22)
+        self.assertEqual(p2160["maxrate"], "20M")
+
+    def test_target_res_zero_same_as_omitted(self):
+        p = self._p(height=720, target_res=0, video_bitrate_kbps=100000, codec="h264")
+        self.assertEqual(p["cq"], 28)
+        self.assertEqual(p["maxrate"], "4M")
+
 
 class TestDecodeFilterArgs(unittest.TestCase):
     """_decode_filter_args filter-chain unit tests (issue #18)."""
