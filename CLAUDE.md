@@ -57,10 +57,11 @@ Cache (raw MKVs from yt-dlp, deleted after encode):
 | DELETE | `/cookies` | Removes cookies.txt so downloads run cookie-free; returns `{status, existed}` |
 | POST | `/upload-cookies` | Saves uploaded file as cookies.txt |
 | POST | `/paste-cookies` | Validates pasted Netscape text, saves to cookies.txt, returns `{valid, cookies, youtube_cookies}` |
+| POST | `/fetch-cookies` | Best-effort browser cookie import (#12). No body → scans installed Chromium-family browsers + all profiles + Firefox default, picks the source with the most YouTube cookies, saves it, resets the stale flag. Optional `browser`+`profile` form fields extract one specific source. Returns `{selected, candidates}` (per-candidate `error` on failure, never fatal) |
 | GET | `/history` | Returns last 50 history entries |
 | POST | `/history` | Saves a history entry (deduped by URL) |
 | DELETE | `/history` | Clears all history |
-| GET | `/video-info?url=` | Fetches title, duration, formats via yt-dlp |
+| GET | `/video-info?url=` | Fetches title, duration, formats via yt-dlp. For a playlist also returns `entries` (`[{url, title, duration, index}]`) so the UI can offer a per-video checklist (#15) |
 | POST | `/download` | Main SSE stream — download + encode |
 | POST | `/convert-local` | SSE stream — encode local files |
 | POST | `/probe-file` | ffprobe a local file, returns height + fps |
@@ -190,7 +191,7 @@ Because the hidden launcher has no console to close, the server **self-exits whe
 ## yt-dlp setup
 
 - Node.js (yt-dlp JS runtime): `_resolve_node_args()` finds `node` on PATH, falling back to `C:\Program Files\nodejs\node.exe` on Windows; omitted if not found.
-- Cookies: optional `cookies.txt` in `STATE_DIR` (the cwd `fetchforge` was launched from), supplied via UI either by file upload or by pasting Netscape-format text into card #01. The paste field captures clipboard via an `onpaste` handler into a JS variable (`_pendingCookies`) and shows a `••• captured N line(s)` placeholder — the raw text is never rendered. Backend `_validate_cookies_text()` parses the Netscape format, counts entries, and reports YouTube-domain cookie counts. `/check-cookies` also returns these stats so card #01 always reflects current validity. A **Clear cookies** button (card #01, `DELETE /cookies`) removes cookies.txt for a cookie-free run. **Stale-cookie auto-drop:** if yt-dlp reports the loaded cookies were rotated/invalidated mid-run (`_maybe_flag_stale_cookies()` matches "no longer valid" / "have likely been rotated"), the server sets a run-scoped `_cookies_disabled` flag so `cookie_args()` drops `--cookies` for every subsequent video immediately (rescues an in-flight playlist), emits a `cookie_warning` SSE event, and resets the flag when fresh cookies are uploaded/pasted — dead cookies are worse than none for public content.
+- Cookies: optional `cookies.txt` in `STATE_DIR` (the cwd `fetchforge` was launched from), supplied via UI either by file upload or by pasting Netscape-format text into card #01. The paste field captures clipboard via an `onpaste` handler into a JS variable (`_pendingCookies`) and shows a `••• captured N line(s)` placeholder — the raw text is never rendered. Backend `_validate_cookies_text()` parses the Netscape format, counts entries, and reports YouTube-domain cookie counts. `/check-cookies` also returns these stats so card #01 always reflects current validity. A **Clear cookies** button (card #01, `DELETE /cookies`) removes cookies.txt for a cookie-free run. An **Attempt to fetch cookies** button (card #01, `POST /fetch-cookies`, #12) reads cookies straight from installed browsers via `yt_dlp.cookies.extract_cookies_from_browser`: `_browser_roots()`/`_firefox_root()` locate the per-OS data dirs, `_chromium_profiles()` reads each Chromium root's `Local State` → `profile.info_cache` to enumerate profiles with their display names, `_scan_all_browser_cookies()` extracts+counts each (keeping the jar so the winner isn't re-extracted), and the richest YouTube source is saved via `_save_jar()`. Blocking work runs in `asyncio.to_thread`; per-candidate failures (locked keyring/DB, absent browser) are caught. The UI lists ranked sources and lets the user switch to a specific `browser`+`profile`. **Stale-cookie auto-drop:** if yt-dlp reports the loaded cookies were rotated/invalidated mid-run (`_maybe_flag_stale_cookies()` matches "no longer valid" / "have likely been rotated"), the server sets a run-scoped `_cookies_disabled` flag so `cookie_args()` drops `--cookies` for every subsequent video immediately (rescues an in-flight playlist), emits a `cookie_warning` SSE event, and resets the flag when fresh cookies are uploaded/pasted — dead cookies are worse than none for public content.
 - Format selection: user picks video + audio format IDs from `/video-info`, passed as `videoId+audioId`
 - Always downloads with `--merge-output-format mkv`, then ffmpeg re-encodes to MP4
 - `--concurrent-fragments 2` — keep at 2; 4 triggered YouTube throttling on large (7+ GiB) streams
@@ -200,7 +201,7 @@ Because the hidden launcher has no console to close, the server **self-exits whe
 
 1. **01 — yt-dlp** — version check + update button
 2. **02 — Authentication** — upload cookies.txt
-3. **03 — Video URL** — URL input, fetch info, format selection, history panel, add-to-queue
+3. **03 — Video URL** — URL input, fetch info, format selection, history panel, add-to-queue. A resolved playlist renders a per-video checklist (`_playlistEntries`, all checked, select all/none/invert — #15); `addToQueue()` expands the checked entries into individual queue items with `video_format=""` so each takes the highest-available stream (#13) via batch/single mode
 4. **04 — Conversion** — presets, advanced CQ/maxrate, pipeline/download-only/shutdown toggles, output dir
 5. **05 — Local Conversion** — browse files / browse folder / scan folder, file list, add to queue
 6. **06 — Progress** — overall job bar, per-video encode bar, phase label + filename, stats row, DL status row, size/bloat row, log box
@@ -255,7 +256,7 @@ yield "data: {}\n\n".format(json.dumps({"msg": params["cq"]}))
 
 ## Versioning
 
-`fetchforge.__version__` in `fetchforge/__init__.py` (currently `"2.0.0"`), imported into `fetchforge/server.py` as `APP_VERSION` (`from fetchforge import __version__ as APP_VERSION`) and surfaced by `pyproject.toml`'s `dynamic = ["version"]` (`attr = "fetchforge.__version__"`) so the pip package version and the running app agree. Bump on every deploy. Displayed in the header as `v 2.0.0` with a green dot fetched from `GET /version` — confirms both HTML and server are fresh after a restart.
+`fetchforge.__version__` in `fetchforge/__init__.py` (currently `"2.1.0"`), imported into `fetchforge/server.py` as `APP_VERSION` (`from fetchforge import __version__ as APP_VERSION`) and surfaced by `pyproject.toml`'s `dynamic = ["version"]` (`attr = "fetchforge.__version__"`) so the pip package version and the running app agree. Bump on every deploy. Displayed in the header as `v 2.1.0` with a green dot fetched from `GET /version` — confirms both HTML and server are fresh after a restart.
 
 <!-- init-workspace:start -->
 ## Task tracking & work environment

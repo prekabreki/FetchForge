@@ -2,6 +2,7 @@ import asyncio
 import datetime
 import json
 import os
+import platform
 import random
 import re
 import shutil
@@ -1028,6 +1029,192 @@ async def clear_cookies():
     return {"status": "ok", "existed": existed}
 
 
+# ── "Attempt to fetch cookies" — read cookies straight from installed browsers ─
+# yt-dlp can decrypt a browser's cookie store directly (same path
+# `--cookies-from-browser` uses). We scan every installed Chromium-family browser
+# and ALL its profiles (the YouTube-logged-in one is often not "Default"), plus
+# Firefox's default, count YouTube/Google cookies in each, and save the richest
+# source. Best-effort by design (issue #12): a profile that errors (locked
+# keyring/DB, no browser) is recorded and skipped, never fatal.
+_CHROMIUM_BROWSERS = ("brave", "chrome", "chromium", "edge", "vivaldi", "opera")
+
+
+def _browser_roots() -> dict:
+    """browser_name → user-data root for the current OS. A Chromium root holds a
+    `Local State` JSON and per-profile subdirs; a missing root = browser absent."""
+    home = Path.home()
+    sysname = platform.system()
+    if sysname == "Windows":
+        local = Path(os.getenv("LOCALAPPDATA", str(home / "AppData/Local")))
+        roaming = Path(os.getenv("APPDATA", str(home / "AppData/Roaming")))
+        return {
+            "brave": local / "BraveSoftware/Brave-Browser/User Data",
+            "chrome": local / "Google/Chrome/User Data",
+            "chromium": local / "Chromium/User Data",
+            "edge": local / "Microsoft/Edge/User Data",
+            "vivaldi": local / "Vivaldi/User Data",
+            "opera": roaming / "Opera Software/Opera Stable",
+        }
+    if sysname == "Darwin":
+        app = home / "Library/Application Support"
+        return {
+            "brave": app / "BraveSoftware/Brave-Browser",
+            "chrome": app / "Google/Chrome",
+            "chromium": app / "Chromium",
+            "edge": app / "Microsoft Edge",
+            "vivaldi": app / "Vivaldi",
+            "opera": app / "com.operasoftware.Opera",
+        }
+    config = Path(os.getenv("XDG_CONFIG_HOME", str(home / ".config")))
+    return {
+        "brave": config / "BraveSoftware/Brave-Browser",
+        "chrome": config / "google-chrome",
+        "chromium": config / "chromium",
+        "edge": config / "microsoft-edge",
+        "vivaldi": config / "vivaldi",
+        "opera": config / "opera",
+    }
+
+
+def _firefox_root() -> Path:
+    home = Path.home()
+    sysname = platform.system()
+    if sysname == "Windows":
+        return Path(os.getenv("APPDATA", str(home / "AppData/Roaming"))) / "Mozilla/Firefox"
+    if sysname == "Darwin":
+        return home / "Library/Application Support/Firefox"
+    return home / ".mozilla/firefox"
+
+
+def _chromium_profiles(root: Path) -> list:
+    """(profile_dir, display_name) pairs for a Chromium root. Reads
+    `Local State` → profile.info_cache for the dir→display-name map (so a named
+    "Pétur Heima" profile shows through), falling back to on-disk Default/Profile*
+    dirs, then to ("Default", "Default")."""
+    info = {}
+    ls = root / "Local State"
+    if ls.exists():
+        try:
+            data = json.loads(ls.read_text(encoding="utf-8", errors="replace"))
+            info = (data.get("profile") or {}).get("info_cache") or {}
+        except Exception:
+            info = {}
+    profiles = []
+    if info:
+        for dirname, meta in info.items():
+            profiles.append((dirname, (meta or {}).get("name") or dirname))
+    elif root.exists():
+        for p in sorted(root.iterdir()):
+            if p.is_dir() and (p.name == "Default" or p.name.startswith("Profile")):
+                profiles.append((p.name, p.name))
+    return profiles or [("Default", "Default")]
+
+
+class _QuietYDLLogger:
+    """Silences yt-dlp's chatty extraction output; we surface our own status."""
+    def debug(self, *a, **k): pass
+    info = warning = error = trouble = debug
+
+
+def _extract_one(browser: str, profile):
+    """Extract cookies for one (browser, profile) into a YoutubeDLCookieJar.
+    Blocking (subprocess + desktop keyring). Raises on any failure."""
+    from yt_dlp.cookies import extract_cookies_from_browser
+    return extract_cookies_from_browser(browser, profile=profile, logger=_QuietYDLLogger())
+
+
+def _count_youtube_cookies(jar) -> tuple:
+    total = yt = 0
+    for c in jar:
+        total += 1
+        dom = (getattr(c, "domain", "") or "").lower()
+        if "youtube" in dom or "google" in dom:
+            yt += 1
+    return total, yt
+
+
+def _save_jar(jar, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    jar.save(str(path), ignore_discard=True, ignore_expires=True)
+
+
+def _scan_all_browser_cookies() -> list:
+    """Enumerate installed browsers + profiles, extract each, count YouTube
+    cookies. Returns [(entry_dict, jar_or_None)] sorted by youtube_cookies desc.
+    Keeps each jar so the caller can save the winner without re-extracting.
+    Blocking — call via asyncio.to_thread."""
+    results = []
+    for browser, root in _browser_roots().items():
+        if not root.exists():
+            continue
+        for profile_dir, display in _chromium_profiles(root):
+            entry = {"browser": browser, "profile_dir": profile_dir,
+                     "display_name": display, "cookies": 0, "youtube_cookies": 0}
+            jar = None
+            try:
+                jar = _extract_one(browser, profile_dir)
+                entry["cookies"], entry["youtube_cookies"] = _count_youtube_cookies(jar)
+            except Exception as e:
+                entry["error"] = str(e)[:200]
+                jar = None
+            results.append((entry, jar))
+    ff = _firefox_root()
+    if ff.exists():
+        entry = {"browser": "firefox", "profile_dir": None,
+                 "display_name": "default", "cookies": 0, "youtube_cookies": 0}
+        jar = None
+        try:
+            jar = _extract_one("firefox", None)
+            entry["cookies"], entry["youtube_cookies"] = _count_youtube_cookies(jar)
+        except Exception as e:
+            entry["error"] = str(e)[:200]
+            jar = None
+        results.append((entry, jar))
+    results.sort(key=lambda r: r[0].get("youtube_cookies", 0), reverse=True)
+    return results
+
+
+@app.post("/fetch-cookies")
+async def fetch_cookies(browser: str = Form(""), profile: str = Form("")):
+    """Best-effort: scan installed browsers/profiles for YouTube cookies, pick the
+    richest source, and save it as cookies.txt (issue #12). With an explicit
+    browser (+optional profile dir), extract just that source instead. A fresh
+    save clears the stale-cookie flag (#9). Per-candidate failures are reported,
+    never fatal. Guarded against cross-origin callers by _origin_guard."""
+    global _cookies_disabled
+
+    if browser:
+        prof = profile or None
+        try:
+            jar = await asyncio.to_thread(_extract_one, browser, prof)
+        except Exception as e:
+            label = "{}{}".format(browser, "/" + profile if profile else "")
+            return {"selected": None, "candidates": [],
+                    "error": "Could not read {}: {}".format(label, str(e)[:200])}
+        total, yt = _count_youtube_cookies(jar)
+        await asyncio.to_thread(_save_jar, jar, COOKIES_PATH)
+        _cookies_disabled = False
+        sel = {"browser": browser, "profile_dir": prof,
+               "display_name": profile or "default", "cookies": total, "youtube_cookies": yt}
+        return {"selected": sel, "candidates": [sel]}
+
+    results = await asyncio.to_thread(_scan_all_browser_cookies)
+    candidates = [entry for entry, _ in results]
+    best_entry, best_jar = next(
+        ((e, j) for e, j in results if e.get("youtube_cookies", 0) > 0 and j is not None),
+        (None, None),
+    )
+    if best_entry is None:
+        return {"selected": None, "candidates": candidates}
+    try:
+        await asyncio.to_thread(_save_jar, best_jar, COOKIES_PATH)
+        _cookies_disabled = False
+    except Exception as e:
+        return {"selected": None, "candidates": candidates,
+                "error": "Found cookies but failed to save: {}".format(str(e)[:200])}
+    return {"selected": best_entry, "candidates": candidates}
+
+
 @app.get("/history")
 async def get_history():
     return await _load_history()
@@ -1134,7 +1321,21 @@ async def video_info(url: str):
     is_playlist = info.get("_type") == "playlist"
 
     if is_playlist:
-        entries = info.get("entries", [])
+        entries = [e for e in info.get("entries", []) if e]
+        # Surface each entry so the UI can offer a per-video checklist (#15).
+        entry_list = []
+        for idx, e in enumerate(entries):
+            vid_url = e.get("webpage_url") or e.get("url") or ""
+            if vid_url and not vid_url.startswith("http"):
+                vid_url = "https://www.youtube.com/watch?v={}".format(vid_url)
+            if not vid_url:
+                continue
+            entry_list.append({
+                "url": vid_url,
+                "title": e.get("title") or vid_url,
+                "duration": e.get("duration") or 0,
+                "index": idx + 1,
+            })
         # For playlists, fetch format info from the first entry
         first_url = entries[0].get("url") or entries[0].get("webpage_url") if entries else url
         format_info = await _get_formats(first_url)
@@ -1142,7 +1343,8 @@ async def video_info(url: str):
             "is_playlist": True,
             "title": info.get("title", "Playlist"),
             "uploader": info.get("uploader") or info.get("channel"),
-            "count": len(entries),
+            "count": len(entry_list),
+            "entries": entry_list,
             "thumbnail": entries[0].get("thumbnails", [{}])[-1].get("url") if entries else None,
             **format_info,
         }

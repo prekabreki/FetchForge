@@ -38,8 +38,11 @@ cd fetchforge
 ./launch.sh        # Windows: launch.bat
 ```
 
-> "Update yt-dlp" in the UI is a no-op for pip installs — update with
-> `pip install -U fetchforge` (or `pip install -U "yt-dlp[default]"`).
+> The **Update yt-dlp** button adapts to how yt-dlp was installed: it runs
+> `pip install -U "yt-dlp[default]"` when yt-dlp lives in the app's own
+> environment (the normal pip/venv install), self-updates the bundled
+> `yt-dlp.exe` on Windows, and otherwise points you at your system package
+> manager. FetchForge itself updates with `pip install -U fetchforge`.
 
 ## Stack
 
@@ -83,22 +86,38 @@ Working from a clone instead: run `./launch.sh` (or `launch.bat` on Windows) —
 Public videos need no cookies. Cookies are only necessary for age-restricted,
 private, or members-only videos, which require a logged-in YouTube session.
 
-To get a `cookies.txt`:
+The **Authentication** card (#01) gives you three ways to load them:
 
-1. Install a cookies-export browser extension — **Get cookies.txt LOCALLY**
-   for Chrome/Edge, or **cookies.txt** for Firefox.
-2. Log in to YouTube in that browser.
-3. Open the extension on a `youtube.com` tab and export in **Netscape**
-   format — that's your `cookies.txt`.
-4. Upload the file via the **Authentication** card in the FetchForge UI.
+- **Attempt to fetch cookies** — one click; FetchForge reads cookies straight
+  from your installed browsers (Brave, Chrome, Chromium, Edge, Vivaldi, Opera,
+  Firefox) and *all* their profiles, picks the one with the most YouTube
+  cookies, and loads it. If more than one profile has cookies, it lists them so
+  you can switch. Best-effort — a locked keyring or missing browser is reported,
+  not fatal.
+- **Load cookies.txt** — upload a Netscape-format file exported by a browser
+  extension (**Get cookies.txt LOCALLY** for Chrome/Edge, **cookies.txt** for
+  Firefox: log in to YouTube, open the extension on a `youtube.com` tab, export).
+- **Paste cookies** — paste the Netscape text directly; it's masked, never
+  displayed, and saved server-side.
 
-The file grants access to your YouTube account, so treat it as a secret: it's
-gitignored and stays on your machine — don't share or commit it. Re-export it
-if it stops working; YouTube rotates cookies periodically.
+A **Clear cookies** button removes them for a cookie-free run. If YouTube rotates
+your cookies mid-download (a common failure — see below), FetchForge notices,
+drops them automatically for the rest of that run, and warns you, so one stale
+jar doesn't sink a whole playlist.
+
+The cookie file grants access to your YouTube account, so treat it as a secret:
+it's gitignored and stays on your machine — don't share or commit it.
+
+> **Cookie rotation:** cookies exported (or read) from a *running* browser can be
+> invalidated by YouTube as a security measure, and stale cookies are worse than
+> none. For durable auth, log in via a fresh private window and close it before
+> loading, and re-fetch if downloads start failing.
 
 ## Features
 
 - **Sequential or pipelined playlist processing** — pipeline mode runs download and encode concurrently with a `maxsize=1` queue (downloader stays at most one video ahead of the encoder)
+- **Per-video playlist selection** — a resolved playlist shows a checklist (all checked by default) with select all / none / invert, so you can grab just the parts you want
+- **Robust playlist formats** — playlists take the highest-available stream per video (handles mixed 720p/1080p lists), and one video that can't be fetched is skipped so the rest of the playlist still completes
 - **Smart pre-download skip** — checks for existing `<title>_h265.mp4` before downloading, skips if ≥85% of expected size
 - **Two encode tunes** — `uhq` (Smart Auto, archival quality) and `hq` (NLE-friendly, ~4–6× speed, capped at source bitrate)
 - **HDR / 10-bit passthrough** — auto-detected; outputs `yuv420p10le` + `main10`

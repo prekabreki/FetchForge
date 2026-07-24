@@ -73,6 +73,51 @@ class TestVideoFormatSelector(unittest.TestCase):
                          "bv*+ba/b")
 
 
+class TestCookieFetch(unittest.TestCase):
+    """Issue #12: browser cookie scanning — profile enumeration + counting."""
+
+    def test_chromium_profiles_from_local_state(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "Local State").write_text(json.dumps({
+                "profile": {"info_cache": {
+                    "Default": {"name": "Pétur Heima"},
+                    "Profile 1": {"name": "Pétur Vinna"},
+                }}
+            }), encoding="utf-8")
+            profs = dict(server._chromium_profiles(root))
+            self.assertEqual(profs["Default"], "Pétur Heima")
+            self.assertEqual(profs["Profile 1"], "Pétur Vinna")
+
+    def test_chromium_profiles_fallback_scans_dirs(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "Default").mkdir()
+            (root / "Profile 2").mkdir()
+            (root / "Cache").mkdir()          # not a profile dir
+            profs = dict(server._chromium_profiles(root))
+            self.assertIn("Default", profs)
+            self.assertIn("Profile 2", profs)
+            self.assertNotIn("Cache", profs)
+
+    def test_chromium_profiles_default_when_empty(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(server._chromium_profiles(Path(d)), [("Default", "Default")])
+
+    def test_browser_roots_has_expected_browsers(self):
+        roots = server._browser_roots()
+        for b in ("brave", "chrome", "chromium", "edge", "vivaldi", "opera"):
+            self.assertIn(b, roots)
+
+    def test_count_youtube_cookies(self):
+        class _C:
+            def __init__(self, domain): self.domain = domain
+        jar = [_C(".youtube.com"), _C(".google.com"), _C(".example.com"), _C("")]
+        total, yt = server._count_youtube_cookies(jar)
+        self.assertEqual(total, 4)
+        self.assertEqual(yt, 2)
+
+
 class TestNewestNewFile(unittest.TestCase):
     """Issue #8: the pipeline fallback must pick only a file produced by THIS
     download, never a sibling video's MKV already sitting in the shared cache."""
