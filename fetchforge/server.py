@@ -575,50 +575,70 @@ HAS_LIBPLACEBO = _ffmpeg_has_filter("libplacebo")
 
 
 def _decode_filter_args(input_file: Path, pix_fmt: str, cuvid: Optional[str],
-                        target_height: int = 0) -> list:
+                        target_height: int = 0, sharpen: bool = False) -> list:
     """Decode + pixel-format (+ optional scale) args for hevc_nvenc encode.
 
     When *target_height* > 0 the filter chain includes a scale to that height
     (even-dimension-safe, aspect-ratio-preserving).  Scaler engine selection:
     libplacebo (ewa_lanczos via Vulkan) → scale_cuda (NPP lanczos) → CPU
     (scale=…:flags=lanczos).  target_height=0 produces byte-identical output
-    to the original two-branch logic."""
+    to the original two-branch logic.
+
+    When *sharpen* is True a gentle Contrast Adaptive Sharpen (cas) filter is
+    appended to -vf after any scaling, with an explicit hwdownload for GPU
+    filter paths."""
+    CAS_STRENGTH = "0.5"
     cuvid_args = ["-c:v", cuvid] if cuvid else []
     if target_height > 0:
         if HAS_LIBPLACEBO:
+            vf = (f"libplacebo=w=-2:h={target_height}"
+                  f":upscaler=ewa_lanczos:downscaler=ewa_lanczos"
+                  f":format={pix_fmt}:tonemapping=none")
+            if sharpen:
+                vf += f",hwdownload,format={pix_fmt},cas={CAS_STRENGTH}"
             return [
                 "-hwaccel", "cuda",
                 *cuvid_args,
                 "-i", str(input_file),
-                "-vf", (f"libplacebo=w=-2:h={target_height}"
-                        f":upscaler=ewa_lanczos:downscaler=ewa_lanczos"
-                        f":format={pix_fmt}:tonemapping=none"),
+                "-vf", vf,
             ]
         if HAS_SCALE_CUDA:
+            vf = f"scale_cuda=format={pix_fmt}:w=-2:h={target_height}"
+            if sharpen:
+                vf += f",hwdownload,format={pix_fmt},cas={CAS_STRENGTH}"
             return [
                 "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
                 *cuvid_args,
                 "-i", str(input_file),
-                "-vf", f"scale_cuda=format={pix_fmt}:w=-2:h={target_height}",
+                "-vf", vf,
             ]
+        vf = f"scale=w=-2:h={target_height}:flags=lanczos,format={pix_fmt}"
+        if sharpen:
+            vf += f",cas={CAS_STRENGTH}"
         return [
             "-hwaccel", "cuda",
             *cuvid_args,
             "-i", str(input_file),
-            "-vf", f"scale=w=-2:h={target_height}:flags=lanczos,format={pix_fmt}",
+            "-vf", vf,
         ]
     # Passthrough — byte-identical to original two-branch logic.
     if HAS_SCALE_CUDA:
+        vf = f"scale_cuda=format={pix_fmt}"
+        if sharpen:
+            vf += f",hwdownload,format={pix_fmt},cas={CAS_STRENGTH}"
         return [
             "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
             *cuvid_args,
             "-i", str(input_file),
-            "-vf", f"scale_cuda=format={pix_fmt}",
+            "-vf", vf,
         ]
+    vf = f"format={pix_fmt}"
+    if sharpen:
+        vf += f",cas={CAS_STRENGTH}"
     return [
         "-hwaccel", "cuda",
         "-i", str(input_file),
-        "-vf", f"format={pix_fmt}",
+        "-vf", vf,
     ]
 
 # Audio-stream containers yt-dlp may produce when downloading audio-only formats.
@@ -862,20 +882,21 @@ async def _probe_nvenc_tune():
 
 def build_video_ffmpeg_args(input_file: Path, output_file: Path, params: dict,
                             effective_tune: str, codec: str,
-                            target_height: int = 0) -> list:
+                            target_height: int = 0, sharpen: bool = False) -> list:
     """Construct the hevc_nvenc ffmpeg argv. Pure (no I/O beyond the module-level
     capability probes) so it can be unit-tested with a fixture params dict. Single
     source of truth for the three former copies (H-2).
 
     *target_height* is forwarded to _decode_filter_args for optional scaling.
-    When 0 (default) the filter chain is byte-identical to the original."""
+    When 0 (default) the filter chain is byte-identical to the original.
+    *sharpen* appends a gentle CAS filter to the -vf chain."""
     # uhq requires p4+ minimum; p2 rejected — guard only needed for the uhq path.
     effective_preset = "p4" if (effective_tune == "uhq" and params["preset"] == "p2") else params["preset"]
     cuvid = _CUVID_DECODERS.get((codec or "").lower())
     return [
         get_ffmpeg(), "-y",
         "-loglevel", "info",
-        *_decode_filter_args(input_file, params["pix_fmt"], cuvid, target_height),
+        *_decode_filter_args(input_file, params["pix_fmt"], cuvid, target_height, sharpen),
         "-c:v", "hevc_nvenc",
         "-preset", effective_preset,
         "-profile:v", params["profile"],
