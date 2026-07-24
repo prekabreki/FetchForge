@@ -2,6 +2,7 @@
 Run: .venv/bin/python -m unittest discover -s tests -v
 (Use the venv python — server.py resolves yt-dlp/ffmpeg at import time.)"""
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -53,6 +54,35 @@ class TestStaleCookieDetection(unittest.TestCase):
         s = server.sse_cookie_warning("hi")
         self.assertTrue(s.startswith("data: ") and s.endswith("\n\n"))
         self.assertEqual(json.loads(s[6:].strip()), {"type": "cookie_warning", "msg": "hi"})
+
+
+class TestNewestNewFile(unittest.TestCase):
+    """Issue #8: the pipeline fallback must pick only a file produced by THIS
+    download, never a sibling video's MKV already sitting in the shared cache."""
+
+    def test_ignores_pre_existing_sibling(self):
+        with tempfile.TemporaryDirectory() as d:
+            cache = Path(d)
+            (cache / "part1.mkv").write_text("x")     # previous video, still in cache
+            pre = set(cache.glob("*.mkv"))
+            # A failed download produced nothing new -> must NOT grab part1.
+            self.assertIsNone(server._newest_new_file(cache, pre))
+            # A successful download drops part2 -> that's the one we want.
+            current = cache / "part2.mkv"
+            current.write_text("y")
+            self.assertEqual(server._newest_new_file(cache, pre), current)
+
+    def test_returns_newest_of_multiple_new(self):
+        with tempfile.TemporaryDirectory() as d:
+            cache = Path(d)
+            a, b = cache / "a.mkv", cache / "b.mkv"
+            a.write_text("a"); b.write_text("b")
+            os.utime(a, (1000, 1000)); os.utime(b, (2000, 2000))
+            self.assertEqual(server._newest_new_file(cache, set()), b)
+
+    def test_none_when_nothing_new(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(server._newest_new_file(Path(d), set()))
 
 
 class TestUrlValidation(unittest.TestCase):

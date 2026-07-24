@@ -436,6 +436,15 @@ def _predict_output_stem(title: str) -> str:
     return sanitize(_restrict_filename(title))
 
 
+def _newest_new_file(cache_dir: Path, pre_existing: set, pattern: str = "*.mkv"):
+    """The most-recently-modified file matching `pattern` that appeared in
+    `cache_dir` since `pre_existing` (a set of Paths) was snapshotted. Lets the
+    pipeline locate THIS download's output without grabbing a sibling video's
+    file already sitting in the shared cache (issue #8). None if nothing new."""
+    new = sorted(set(cache_dir.glob(pattern)) - set(pre_existing), key=os.path.getmtime)
+    return new[-1] if new else None
+
+
 def _resolve_batch_items(items_json: str):
     """Parse the client `items` payload into the structures the pipeline
     consumes. Returns (video_urls, video_titles, video_durations, per_item)
@@ -1471,6 +1480,12 @@ async def download(
                         dl_args += cookie_args()
                         dl_args += ["--", vid_url]
 
+                        # Snapshot the cache so the post-download fallback can tell
+                        # THIS download's output from sibling MKVs already present
+                        # (in pipeline mode the previous video is still encoding in
+                        # the same CACHE_DIR — see issue #8).
+                        pre_existing_mkvs = set(CACHE_DIR.glob("*.mkv"))
+
                         proc = await asyncio.create_subprocess_exec(
                             *dl_args,
                             stdout=asyncio.subprocess.PIPE,
@@ -1522,7 +1537,14 @@ async def download(
                                         mkv_files = [candidate]
                                         break
                         if not mkv_files:
-                            mkv_files = sorted(CACHE_DIR.glob("*.mkv"), key=os.path.getmtime)
+                            # Fallback only to a file that appeared during THIS
+                            # download — never a sibling video's MKV still in the
+                            # shared cache. A blind glob here would grab the
+                            # previous (still-encoding) video and mis-report this
+                            # failed download as complete (issue #8).
+                            found = _newest_new_file(CACHE_DIR, pre_existing_mkvs)
+                            if found:
+                                mkv_files = [found]
 
                         expected_dur = video_durations.get(vid_url) or 0
 
