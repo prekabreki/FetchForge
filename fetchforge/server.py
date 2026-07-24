@@ -231,6 +231,16 @@ def get_ytdlp() -> str:
     return _resolve_tool("yt-dlp", PKG_DIR / "yt-dlp.exe")
 
 
+def _ytdlp_in_this_env(ytdlp_path: str) -> bool:
+    """True when the resolved yt-dlp lives inside the running interpreter's
+    environment (venv / pip install) — i.e. `pip install -U` against
+    sys.executable will actually upgrade the copy the app uses."""
+    try:
+        return Path(ytdlp_path).resolve().is_relative_to(Path(sys.prefix).resolve())
+    except (OSError, ValueError):
+        return False
+
+
 def _resolve_node_args() -> list:
     """yt-dlp's JS runtime for solving challenges. Resolve node from PATH;
     fall back to the canonical Windows install location it always used."""
@@ -243,21 +253,19 @@ def _resolve_node_args() -> list:
 NODE_ARGS = _resolve_node_args()
 COOKIES_PATH = STATE_DIR / "cookies.txt"
 
-# Intermediate webm/mkv — cleared weekly. Override with BOP_CACHE_DIR.
-if os.getenv("BOP_CACHE_DIR"):
-    CACHE_DIR = Path(os.environ["BOP_CACHE_DIR"])
+# Intermediate webm/mkv — cleared weekly. Override with FETCHFORGE_CACHE_DIR
+# (the legacy BOP_CACHE_DIR is still honored so existing overrides don't break).
+_cache_override = os.getenv("FETCHFORGE_CACHE_DIR") or os.getenv("BOP_CACHE_DIR")
+if _cache_override:
+    CACHE_DIR = Path(_cache_override)
 elif IS_WINDOWS:
     CACHE_DIR = Path(r"E:/Cache/ytdlp") if Path(r"E:/").exists() else Path(r"C:/cache/ytdlp")
 else:
-    CACHE_DIR = Path(os.getenv("XDG_CACHE_HOME", Path.home() / ".cache")) / "bop-convert" / "ytdlp"
+    CACHE_DIR = Path(os.getenv("XDG_CACHE_HOME", Path.home() / ".cache")) / "fetchforge" / "ytdlp"
 OUTPUT_DIR = STATE_DIR / "downloads"    # final converted mp4s
 CONVERTED_DIR = OUTPUT_DIR / "converted"
-CACHE_DIR.mkdir(parents=True, exist_ok=True)
-OUTPUT_DIR.mkdir(exist_ok=True)
-CONVERTED_DIR.mkdir(exist_ok=True)
 HISTORY_PATH = STATE_DIR / "history.json"
 LOGS_DIR = STATE_DIR / "logs"
-LOGS_DIR.mkdir(exist_ok=True)
 from fetchforge import __version__ as APP_VERSION
 
 
@@ -287,7 +295,14 @@ def _setup_logging() -> None:
         logging.getLogger(name).addHandler(file_handler)
 
 
-_setup_logging()
+def _ensure_runtime_dirs() -> None:
+    """Create the writable runtime dirs (cache, downloads, logs). Called from
+    run_server() — NOT at import time — so a bare `import fetchforge.server`
+    (tests, third parties) has no filesystem side effects in the importer's cwd."""
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    CONVERTED_DIR.mkdir(exist_ok=True)
+    LOGS_DIR.mkdir(exist_ok=True)
 
 
 def _poweroff():
@@ -342,8 +357,37 @@ async def _save_history_entry(entry: dict):
 # Windows illegal chars + tilde + control chars
 ILLEGAL_RE = re.compile(r'[<>:"/\\|?*~\x00-\x1f]')
 
+# Set when yt-dlp reports the loaded cookies have been rotated/invalidated. Once
+# that happens the cookies are dead, and passing them is strictly worse than
+# passing none (forces a degraded client + hard format failures), so we drop them
+# for the rest of the run. Persists across the client's retry rounds; reset when
+# the user loads fresh cookies (upload/paste), which deserve a new chance.
+_cookies_disabled = False
+
+# yt-dlp's stale-cookie warning, e.g. "The provided YouTube account cookies are no
+# longer valid. They have likely been rotated in the browser as a security measure."
+_STALE_COOKIE_MARKERS = ("no longer valid", "have likely been rotated")
+
 def cookie_args() -> list:
+    if _cookies_disabled:
+        return []
     return ["--cookies", str(COOKIES_PATH)] if COOKIES_PATH.exists() else []
+
+
+def _maybe_flag_stale_cookies(line: str) -> Optional[str]:
+    """If a yt-dlp output line signals rotated/invalid cookies, disable cookies for
+    the rest of the run and return a one-time user-facing warning to emit; else None."""
+    global _cookies_disabled
+    if _cookies_disabled or not COOKIES_PATH.exists():
+        return None
+    low = line.lower()
+    if "cookie" in low and any(m in low for m in _STALE_COOKIE_MARKERS):
+        _cookies_disabled = True
+        return ("Your cookies appear stale (rotated/invalidated by the browser). "
+                "Continuing this run without cookies — public videos still download. "
+                "For private/age-restricted videos, re-export cookies from a fresh "
+                "private window and reload them.")
+    return None
 
 
 def is_http_url(url: str) -> bool:
@@ -392,6 +436,15 @@ def _predict_output_stem(title: str) -> str:
     return sanitize(_restrict_filename(title))
 
 
+def _newest_new_file(cache_dir: Path, pre_existing: set, pattern: str = "*.mkv"):
+    """The most-recently-modified file matching `pattern` that appeared in
+    `cache_dir` since `pre_existing` (a set of Paths) was snapshotted. Lets the
+    pipeline locate THIS download's output without grabbing a sibling video's
+    file already sitting in the shared cache (issue #8). None if nothing new."""
+    new = sorted(set(cache_dir.glob(pattern)) - set(pre_existing), key=os.path.getmtime)
+    return new[-1] if new else None
+
+
 def _resolve_batch_items(items_json: str):
     """Parse the client `items` payload into the structures the pipeline
     consumes. Returns (video_urls, video_titles, video_durations, per_item)
@@ -429,6 +482,9 @@ def sse_log(msg: str) -> str:
 
 def sse_error(msg: str) -> str:
     return _sse({"type": "error", "msg": msg})
+
+def sse_cookie_warning(msg: str) -> str:
+    return _sse({"type": "cookie_warning", "msg": msg})
 
 def sse_cancelled(msg: str = "Cancelled by user.") -> str:
     return _sse({"type": "cancelled", "msg": msg})
@@ -884,8 +940,10 @@ async def index():
 
 @app.post("/upload-cookies")
 async def upload_cookies(file: UploadFile = File(...)):
+    global _cookies_disabled
     content = await file.read()
     await asyncio.to_thread(COOKIES_PATH.write_bytes, content)
+    _cookies_disabled = False    # fresh cookies deserve a new chance
     return {"status": "ok", "message": "cookies.txt saved"}
 
 
@@ -918,6 +976,7 @@ def _validate_cookies_text(text: str) -> dict:
 
 @app.post("/paste-cookies")
 async def paste_cookies(text: str = Form(...)):
+    global _cookies_disabled
     result = _validate_cookies_text(text)
     if not result.get("valid"):
         return result
@@ -926,6 +985,7 @@ async def paste_cookies(text: str = Form(...)):
     if not any("netscape http cookie file" in l.lower() for l in body.splitlines()[:5]):
         body = "# Netscape HTTP Cookie File\n" + body
     await asyncio.to_thread(COOKIES_PATH.write_text, body, encoding="utf-8")
+    _cookies_disabled = False    # fresh cookies deserve a new chance
     return result
 
 
@@ -939,6 +999,16 @@ async def check_cookies():
         return {"exists": True, **info}
     except Exception as e:
         return {"exists": True, "valid": False, "reason": str(e)}
+
+
+@app.delete("/cookies")
+async def clear_cookies():
+    """Remove the loaded cookies.txt so downloads run cookie-free. Public content
+    needs no auth, and stale cookies are worse than none (see issue #9). Guarded
+    against cross-origin callers by _origin_guard like other mutating routes."""
+    existed = COOKIES_PATH.exists()
+    await asyncio.to_thread(COOKIES_PATH.unlink, missing_ok=True)
+    return {"status": "ok", "existed": existed}
 
 
 @app.get("/history")
@@ -987,12 +1057,34 @@ async def ytdlp_version():
 
 @app.post("/update-ytdlp")
 async def update_ytdlp():
+    """Update yt-dlp using the mechanism that matches how it was installed.
+
+    yt-dlp's own `-U` self-updater refuses for pip / package-manager installs, so
+    it's only correct for the Windows bundled standalone exe. For the normal
+    pip-dependency case we upgrade via pip against this interpreter; a system
+    binary we don't own can't be updated in place, so we say so."""
+    ytdlp = get_ytdlp()
+    bundled = PKG_DIR / "yt-dlp.exe"
+    if IS_WINDOWS and str(bundled) == ytdlp:
+        cmd = [ytdlp, "-U"]
+    elif _ytdlp_in_this_env(ytdlp):
+        cmd = [sys.executable, "-m", "pip", "install", "-U", "yt-dlp[default]"]
+    else:
+        return {"output": (
+            "yt-dlp here is a system/package-managed binary at {}.\n"
+            "FetchForge can't update it in place — update it with your OS package "
+            "manager (e.g. `sudo dnf upgrade yt-dlp` or `sudo apt upgrade yt-dlp`), "
+            "or run FetchForge from a virtualenv where yt-dlp is a pip dependency."
+        ).format(ytdlp)}
     proc = await asyncio.create_subprocess_exec(
-        str(get_ytdlp()), "-U",
+        *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
     )
     stdout, _ = await proc.communicate()
+    # get_ytdlp() is cached to a path; a pip upgrade replaces the package in place,
+    # so the path stays valid and /ytdlp-version (a fresh subprocess) reports the
+    # new version without a server restart.
     return {"output": stdout.decode(errors="replace").strip()}
 
 
@@ -1388,6 +1480,12 @@ async def download(
                         dl_args += cookie_args()
                         dl_args += ["--", vid_url]
 
+                        # Snapshot the cache so the post-download fallback can tell
+                        # THIS download's output from sibling MKVs already present
+                        # (in pipeline mode the previous video is still encoding in
+                        # the same CACHE_DIR — see issue #8).
+                        pre_existing_mkvs = set(CACHE_DIR.glob("*.mkv"))
+
                         proc = await asyncio.create_subprocess_exec(
                             *dl_args,
                             stdout=asyncio.subprocess.PIPE,
@@ -1401,6 +1499,9 @@ async def download(
                                 proc.terminate()
                                 break
                             line = raw.decode(errors="replace").rstrip()
+                            _cw = _maybe_flag_stale_cookies(line)
+                            if _cw:
+                                await msg_q.put(sse_cookie_warning(_cw))
                             m = re.search(
                                 r"\[download\]\s+([\d.]+)%\s+of\s+(\S+)\s+at\s+(.+?)\s+ETA\s+(\S+)",
                                 line
@@ -1436,7 +1537,14 @@ async def download(
                                         mkv_files = [candidate]
                                         break
                         if not mkv_files:
-                            mkv_files = sorted(CACHE_DIR.glob("*.mkv"), key=os.path.getmtime)
+                            # Fallback only to a file that appeared during THIS
+                            # download — never a sibling video's MKV still in the
+                            # shared cache. A blind glob here would grab the
+                            # previous (still-encoding) video and mis-report this
+                            # failed download as complete (issue #8).
+                            found = _newest_new_file(CACHE_DIR, pre_existing_mkvs)
+                            if found:
+                                mkv_files = [found]
 
                         expected_dur = video_durations.get(vid_url) or 0
 
@@ -1686,6 +1794,9 @@ async def download(
                         proc.terminate()
                         break
                     line = raw.decode(errors="replace").rstrip()
+                    _cw = _maybe_flag_stale_cookies(line)
+                    if _cw:
+                        yield sse_cookie_warning(_cw)
                     m = re.search(
                         r"\[download\]\s+([\d.]+)%\s+of\s+([\S]+)\s+at\s+([\S]+)\s+ETA\s+([\S]+)",
                         line
@@ -2177,6 +2288,8 @@ async def shutdown_now(request: Request):
 
 def run_server(open_browser: bool = True) -> None:
     global _uvicorn_server
+    _ensure_runtime_dirs()   # create cache/downloads/logs before anything writes to them
+    _setup_logging()         # deferred here (not import time) so a bare import is side-effect-free
     logger.info("Starting FetchForge at http://localhost:8765")
     if open_browser:
         import threading, webbrowser

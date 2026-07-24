@@ -72,12 +72,26 @@ def provision_windows(download=urlretrieve) -> str:
     exe = FFMPEG_CACHE / "ffmpeg.exe"
     if not exe.exists():
         raise ProvisionError("Downloaded ffmpeg archive did not contain ffmpeg.exe")
+    # Verify the build we just fetched actually has the NVENC encoder we need,
+    # rather than trusting the URL — a wrong/changed asset would otherwise only
+    # surface as a cryptic encode failure much later.
+    if not ffmpeg_has_nvenc(str(exe)):
+        raise ProvisionError(
+            "Downloaded ffmpeg build does not report the hevc_nvenc encoder.\n"
+            "Install an NVENC-capable ffmpeg manually (put ffmpeg.exe/ffprobe.exe "
+            "on PATH) and re-run."
+        )
     return str(exe)
 
 
 def _windows_zip_url() -> str:
     # BtbN's FFmpeg-Builds GPL "latest" build (github.com/BtbN/FFmpeg-Builds):
-    # ships as a .zip (no extra deps to unpack) and includes hevc_nvenc.
+    # ships as a .zip (no extra deps to unpack) and includes hevc_nvenc. Verified
+    # 2026-07-24 to resolve (HTTP 200, asset ffmpeg-master-latest-win64-gpl.zip).
+    # We deliberately track "latest" rather than pinning a dated release: BtbN
+    # prunes old autobuild-* tags, so a pinned URL would eventually 404, whereas
+    # "latest" is stable. provision_windows() re-verifies hevc_nvenc after download,
+    # so a bad "latest" is caught rather than silently used.
     return ("https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/"
             "ffmpeg-master-latest-win64-gpl.zip")
 
@@ -101,7 +115,19 @@ def macos_guidance() -> str:
 
 
 def _use(ffmpeg: str) -> str:
-    os.environ["PATH"] = str(Path(ffmpeg).parent) + os.pathsep + os.environ.get("PATH", "")
+    """Make `ffmpeg` discoverable to child processes.
+
+    Only prepend its directory to PATH when it isn't already resolvable there —
+    e.g. the Windows auto-provisioned build under %LOCALAPPDATA%, which lives off
+    PATH. When ffmpeg was already found *on* PATH (the typical Linux system
+    install in /usr/bin), leave PATH untouched: blindly prepending its dir would
+    push /usr/bin ahead of everything else and shadow other PATH entries — most
+    notably the venv's own, newer `yt-dlp` console script (see issue #7)."""
+    ffmpeg_path = Path(ffmpeg).resolve()
+    already = shutil.which("ffmpeg")
+    if already and Path(already).resolve() == ffmpeg_path:
+        return ffmpeg
+    os.environ["PATH"] = str(ffmpeg_path.parent) + os.pathsep + os.environ.get("PATH", "")
     return ffmpeg
 
 

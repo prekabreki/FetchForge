@@ -1,7 +1,25 @@
+import sys
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from fetchforge import server
+
+
+class TestUpdateTargetDetection(unittest.TestCase):
+    """Issue #6: /update-ytdlp must pip-upgrade yt-dlp that lives in this
+    interpreter's env, and NOT try to update a system/package-managed binary."""
+
+    def test_venv_ytdlp_is_updatable(self):
+        p = str(Path(sys.prefix) / "bin" / "yt-dlp")
+        self.assertTrue(server._ytdlp_in_this_env(p))
+
+    def test_system_ytdlp_not_in_env(self):
+        # /usr/bin is outside a venv sys.prefix (the case that must fall through
+        # to the "use your package manager" message).
+        if Path("/usr/bin").resolve().is_relative_to(Path(sys.prefix).resolve()):
+            self.skipTest("running under a system interpreter (sys.prefix == /usr)")
+        self.assertFalse(server._ytdlp_in_this_env("/usr/bin/yt-dlp"))
 
 
 class TestLazyToolResolution(unittest.TestCase):

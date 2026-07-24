@@ -42,7 +42,7 @@ FetchForge/                   # repo root
 `yt-dlp.exe` and `_internal/` are optional manual overrides FetchForge looks for next to the installed package (`PKG_DIR`) — the normal pip-install path gets yt-dlp as a dependency and ffmpeg via auto-provisioning/package-manager instead, so most installs never have these.
 
 Cache (raw MKVs from yt-dlp, deleted after encode):
-- `E:/Cache/ytdlp` if E: exists, otherwise `C:/cache/ytdlp` on Windows; `$XDG_CACHE_HOME/bop-convert/ytdlp` (or `~/.cache/bop-convert/ytdlp`) on Linux/macOS; override with `BOP_CACHE_DIR`.
+- `E:/Cache/ytdlp` if E: exists, otherwise `C:/cache/ytdlp` on Windows; `$XDG_CACHE_HOME/fetchforge/ytdlp` (or `~/.cache/fetchforge/ytdlp`) on Linux/macOS; override with `FETCHFORGE_CACHE_DIR` (the legacy `BOP_CACHE_DIR` is still honored).
 
 ## Endpoints
 
@@ -52,8 +52,9 @@ Cache (raw MKVs from yt-dlp, deleted after encode):
 | GET | `/version` | Returns `APP_VERSION` |
 | GET | `/heartbeat` | Keep-alive ping from the open tab; resets the idle watchdog. Returns `{ok, timeout}` |
 | GET | `/ytdlp-version` | Returns yt-dlp version string |
-| POST | `/update-ytdlp` | Updates yt-dlp binary to latest |
+| POST | `/update-ytdlp` | Updates yt-dlp via the mechanism matching the install: `pip install -U` when yt-dlp lives in this interpreter's env, the bundled exe's own `-U` on Windows, else a "use your package manager" message for a system binary |
 | GET | `/check-cookies` | Returns `{exists, valid, cookies, youtube_cookies, reason?}` — parses cookies.txt and reports counts |
+| DELETE | `/cookies` | Removes cookies.txt so downloads run cookie-free; returns `{status, existed}` |
 | POST | `/upload-cookies` | Saves uploaded file as cookies.txt |
 | POST | `/paste-cookies` | Validates pasted Netscape text, saves to cookies.txt, returns `{valid, cookies, youtube_cookies}` |
 | GET | `/history` | Returns last 50 history entries |
@@ -117,6 +118,7 @@ All events: `data: {JSON}\n\n`. **Every event is built by an `sse_*` helper** at
 | `cancelled` | `msg` | User hit Cancel — distinct from `error`; terminal, no retry |
 | `done` | `msg` | Job complete |
 | `shutdown` | `msg` | Client starts the visible 60s countdown |
+| `cookie_warning` | `msg` | yt-dlp reported the loaded cookies were rotated/invalidated; server has dropped cookies for the rest of the run. UI shows the notice and marks the cookie badge stale |
 
 ## Encode parameters
 
@@ -188,7 +190,7 @@ Because the hidden launcher has no console to close, the server **self-exits whe
 ## yt-dlp setup
 
 - Node.js (yt-dlp JS runtime): `_resolve_node_args()` finds `node` on PATH, falling back to `C:\Program Files\nodejs\node.exe` on Windows; omitted if not found.
-- Cookies: optional `cookies.txt` in `STATE_DIR` (the cwd `fetchforge` was launched from), supplied via UI either by file upload or by pasting Netscape-format text into card #01. The paste field captures clipboard via an `onpaste` handler into a JS variable (`_pendingCookies`) and shows a `••• captured N line(s)` placeholder — the raw text is never rendered. Backend `_validate_cookies_text()` parses the Netscape format, counts entries, and reports YouTube-domain cookie counts. `/check-cookies` also returns these stats so card #01 always reflects current validity.
+- Cookies: optional `cookies.txt` in `STATE_DIR` (the cwd `fetchforge` was launched from), supplied via UI either by file upload or by pasting Netscape-format text into card #01. The paste field captures clipboard via an `onpaste` handler into a JS variable (`_pendingCookies`) and shows a `••• captured N line(s)` placeholder — the raw text is never rendered. Backend `_validate_cookies_text()` parses the Netscape format, counts entries, and reports YouTube-domain cookie counts. `/check-cookies` also returns these stats so card #01 always reflects current validity. A **Clear cookies** button (card #01, `DELETE /cookies`) removes cookies.txt for a cookie-free run. **Stale-cookie auto-drop:** if yt-dlp reports the loaded cookies were rotated/invalidated mid-run (`_maybe_flag_stale_cookies()` matches "no longer valid" / "have likely been rotated"), the server sets a run-scoped `_cookies_disabled` flag so `cookie_args()` drops `--cookies` for every subsequent video immediately (rescues an in-flight playlist), emits a `cookie_warning` SSE event, and resets the flag when fresh cookies are uploaded/pasted — dead cookies are worse than none for public content.
 - Format selection: user picks video + audio format IDs from `/video-info`, passed as `videoId+audioId`
 - Always downloads with `--merge-output-format mkv`, then ffmpeg re-encodes to MP4
 - `--concurrent-fragments 2` — keep at 2; 4 triggered YouTube throttling on large (7+ GiB) streams

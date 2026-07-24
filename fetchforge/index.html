@@ -995,6 +995,7 @@
         <span class="badge" id="cookie-badge">Checking...</span>
         <button class="btn btn-outline btn-sm" onclick="document.getElementById('cookie-file').click()">Load cookies.txt</button>
         <input type="file" id="cookie-file" accept=".txt" onchange="uploadCookies(this)">
+        <button class="btn btn-outline btn-sm" id="cookie-clear-btn" onclick="clearCookies()" style="display:none;">Clear cookies</button>
         <span style="font-size:12px;color:var(--muted);">In Cookie-Editor, use Export → download to get the file</span>
       </div>
 
@@ -1926,6 +1927,8 @@ async function checkCookies() {
     const badge = document.getElementById('cookie-badge');
     const hdr = document.getElementById('cookie-header');
     const dot = document.getElementById('cookie-dot');
+    const clearBtn = document.getElementById('cookie-clear-btn');
+    if (clearBtn) clearBtn.style.display = d.exists ? '' : 'none';
     if (d.exists && d.valid) {
       const yt = d.youtube_cookies || 0;
       badge.textContent = `✓ cookies loaded (${d.cookies}, ${yt} YouTube)`;
@@ -1956,6 +1959,16 @@ async function uploadCookies(input) {
   await fetch(`${API}/upload-cookies`, { method: 'POST', body: form });
   checkCookies();
   log('Cookies uploaded.', 'info');
+}
+
+async function clearCookies() {
+  try {
+    await fetch(`${API}/cookies`, { method: 'DELETE' });
+    log('Cookies cleared — downloads will run without authentication.', 'info');
+  } catch(e) {
+    log('Failed to clear cookies: ' + e, 'error');
+  }
+  checkCookies();
 }
 
 let _pendingCookies = '';
@@ -2673,6 +2686,17 @@ function handleMsg(msg) {
     stopElapsedTimer();
     celebrate();
     log(msg.msg, 'done');
+
+  } else if (msg.type === 'cookie_warning') {
+    // Server detected the loaded cookies were rotated/invalidated and dropped
+    // them for the rest of the run. Surface it and mark the badge stale.
+    log('⚠ ' + msg.msg, 'error');
+    const badge = document.getElementById('cookie-badge');
+    if (badge) { badge.textContent = '⚠ cookies stale — running without them'; badge.className = 'badge badge-warn'; }
+    const dot = document.getElementById('cookie-dot');
+    if (dot) dot.className = 'dot warn';
+    const hdr = document.getElementById('cookie-header');
+    if (hdr) hdr.textContent = 'cookies: stale';
 
   } else if (msg.type === 'shutdown') {
     log('⚠ ' + msg.msg, 'info');

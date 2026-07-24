@@ -2,11 +2,87 @@
 Run: .venv/bin/python -m unittest discover -s tests -v
 (Use the venv python — server.py resolves yt-dlp/ffmpeg at import time.)"""
 import json
+import os
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from fetchforge import server
 from yt_dlp.utils import sanitize_filename
+
+
+class TestStaleCookieDetection(unittest.TestCase):
+    """Issue #9: yt-dlp's rotated-cookie warning must flip cookies off for the run."""
+
+    def setUp(self):
+        server._cookies_disabled = False
+
+    def tearDown(self):
+        server._cookies_disabled = False
+
+    def test_flags_and_drops_cookies_on_rotation_warning(self):
+        with tempfile.TemporaryDirectory() as d:
+            ck = Path(d) / "cookies.txt"
+            ck.write_text("x")
+            with mock.patch.object(server, "COOKIES_PATH", ck):
+                self.assertEqual(server.cookie_args(), ["--cookies", str(ck)])
+                line = ("WARNING: [youtube] The provided YouTube account cookies are "
+                        "no longer valid. They have likely been rotated in the browser.")
+                msg = server._maybe_flag_stale_cookies(line)
+                self.assertIsNotNone(msg)
+                self.assertTrue(server._cookies_disabled)
+                self.assertEqual(server.cookie_args(), [])            # dropped for the run
+                self.assertIsNone(server._maybe_flag_stale_cookies(line))  # one-shot
+
+    def test_benign_line_does_not_flag(self):
+        with tempfile.TemporaryDirectory() as d:
+            ck = Path(d) / "cookies.txt"
+            ck.write_text("x")
+            with mock.patch.object(server, "COOKIES_PATH", ck):
+                self.assertIsNone(server._maybe_flag_stale_cookies("[download]  50% of 10MiB"))
+                self.assertFalse(server._cookies_disabled)
+
+    def test_no_flag_when_no_cookies_loaded(self):
+        with tempfile.TemporaryDirectory() as d:
+            ck = Path(d) / "cookies.txt"   # never created
+            with mock.patch.object(server, "COOKIES_PATH", ck):
+                self.assertIsNone(server._maybe_flag_stale_cookies("cookies are no longer valid"))
+                self.assertFalse(server._cookies_disabled)
+
+    def test_sse_cookie_warning_shape(self):
+        s = server.sse_cookie_warning("hi")
+        self.assertTrue(s.startswith("data: ") and s.endswith("\n\n"))
+        self.assertEqual(json.loads(s[6:].strip()), {"type": "cookie_warning", "msg": "hi"})
+
+
+class TestNewestNewFile(unittest.TestCase):
+    """Issue #8: the pipeline fallback must pick only a file produced by THIS
+    download, never a sibling video's MKV already sitting in the shared cache."""
+
+    def test_ignores_pre_existing_sibling(self):
+        with tempfile.TemporaryDirectory() as d:
+            cache = Path(d)
+            (cache / "part1.mkv").write_text("x")     # previous video, still in cache
+            pre = set(cache.glob("*.mkv"))
+            # A failed download produced nothing new -> must NOT grab part1.
+            self.assertIsNone(server._newest_new_file(cache, pre))
+            # A successful download drops part2 -> that's the one we want.
+            current = cache / "part2.mkv"
+            current.write_text("y")
+            self.assertEqual(server._newest_new_file(cache, pre), current)
+
+    def test_returns_newest_of_multiple_new(self):
+        with tempfile.TemporaryDirectory() as d:
+            cache = Path(d)
+            a, b = cache / "a.mkv", cache / "b.mkv"
+            a.write_text("a"); b.write_text("b")
+            os.utime(a, (1000, 1000)); os.utime(b, (2000, 2000))
+            self.assertEqual(server._newest_new_file(cache, set()), b)
+
+    def test_none_when_nothing_new(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(server._newest_new_file(Path(d), set()))
 
 
 class TestUrlValidation(unittest.TestCase):
