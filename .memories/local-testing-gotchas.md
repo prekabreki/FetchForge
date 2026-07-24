@@ -20,9 +20,19 @@ Run the real `fetchforge/index.html` `<script>` under **jsdom** with
 `toItemPayload`, `handleMsg`). jsdom has no canvas 2d context (the progress `SparkChart`
 crashes) -- stub `HTMLCanvasElement.prototype.getContext` with a self-returning callable
 Proxy, and make `window.fetch` a never-resolving promise so on-load fetches don't process
-and throw on shape. `dlQueue`/`currentTuneMode` are `let` (not on `window`); reach them
+and throw on shape. `dlQueue`/`currentTuneMode`/`_queueProgress` are `let` (not on `window`); reach them
 only through the functions. This is the fastest real-execution check of the single-file
 frontend. See [[project-overview]].
+
+**Do NOT reach for extract-the-`<script>`-and-`eval`-it instead of jsdom** — tried in PR #38
+and it burns a debugging cycle on a JS scoping trap. `let`/`const` inside a *direct* `eval`
+are scoped to the eval, so extracted functions close over their own copy of a `let` module
+variable; the harness then assigns a *different* (implicit global) binding, the functions
+never see it, and the tests fail while the app is fine. (`var` in a direct eval does hoist
+into the enclosing scope, which is the workaround if you're already down that road.) The
+failure mode that actually matters is the inverse: a harness that pokes globals directly can
+look green while testing its own state instead of the app's. jsdom avoids the whole class.
+A committed jsdom suite is tracked as issue #42.
 
 Not covered by any of this: a real yt-dlp download + NVENC encode (network/cookies/GPU) --
 tracked as a manual verification task in the issue tracker.
