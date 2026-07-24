@@ -595,7 +595,7 @@ def _decode_filter_args(input_file: Path, pix_fmt: str, cuvid: Optional[str],
                   f":upscaler=ewa_lanczos:downscaler=ewa_lanczos"
                   f":format={pix_fmt}:tonemapping=none")
             if sharpen:
-                vf += f",hwdownload,format={pix_fmt},cas={CAS_STRENGTH}"
+                vf += f",cas={CAS_STRENGTH}"
             return [
                 "-hwaccel", "cuda",
                 *cuvid_args,

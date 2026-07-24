@@ -392,7 +392,7 @@ class TestDecodeFilterArgs(unittest.TestCase):
         a = server._decode_filter_args(Path("in.mkv"), "yuv420p10le", None, target_height=1080, sharpen=True)
         vf = self._vf(a)
         self.assertIn("cas=", vf)
-        self.assertIn("hwdownload,format=yuv420p10le", vf)
+        self.assertNotIn("hwdownload", vf)
         self.assertIn("tonemapping=none", vf)
 
     def test_sharpen_default_off(self):
