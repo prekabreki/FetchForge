@@ -1276,7 +1276,16 @@
         "></div>
       </div>
 
-      <div class="adv-grid" style="grid-template-columns: 1fr 1fr;margin-bottom:14px;">
+      <!-- Target Resolution + Sharpen are HIDDEN: the upscale/sharpen feature is not
+           ready to ship (open work: #33 HDR passthrough through libplacebo, #34 scale_cuda
+           + sharpen on the Windows NVENC build, #35 skip the scaler at 1:1, #37 FSRCNNX
+           neural upscale; and cas=0.5 measured near-invisible — see
+           docs/research/upscale_research.md).
+           The elements stay in the DOM on purpose: startDownload() reads
+           #target-res.value and #sharpen.checked for BOTH the download and local flows, so
+           leaving them present makes every job send the off state (target_res=0,
+           sharpen=false) with no JS changes. To re-enable, delete the display:none. -->
+      <div class="adv-grid" style="display:none;grid-template-columns: 1fr 1fr;margin-bottom:14px;">
         <div class="field">
           <div class="field-label">Target Resolution</div>
           <select id="target-res">
@@ -2399,6 +2408,18 @@ async function runBatch(items, opts) {
 const MAX_RETRY_ROUNDS = 3;
 
 async function startDownload() {
+  // A resolved playlist must go through addToQueue() so the per-video checklist
+  // (#15) is honoured. Seeding the raw playlist URL below instead would leave
+  // _playlistEntries unread, and the server would expand every entry itself
+  // (server.py `_type == "playlist"`) — silently downloading the whole playlist
+  // from the top and ignoring the user's selection.
+  // Runs whether or not the queue already holds items, so picks are never
+  // silently dropped; addToQueue() dedupes by URL.
+  if (_playlistEntries.length) {
+    addToQueue();
+    if (dlQueue.length === 0) return;   // nothing checked, nothing else queued
+  }
+
   // If no queue, seed it from the current URL
   if (dlQueue.length === 0) {
     const url = document.getElementById('url-input').value.trim();
@@ -2434,6 +2455,7 @@ async function startDownload() {
   };
 
   _jobRunning = true;
+  _queueProgress = { completed: 0, total: 0 };   // stale from a prior run
   cancelled = false;            // fresh run — clear any prior cancel state
   _currentController = null;
   acquireWakeLock();
@@ -2500,6 +2522,9 @@ async function startDownload() {
       renderDlQueue();
       completed += batchItems.length;
       const totalVisible = completed + dlQueue.length + retryQueue.length;
+      // A pipelined batch is one request spanning N videos, so the server's own
+      // video_start/progress.overall already tracks the whole run — cede the bar.
+      _queueProgress = { completed: 0, total: 0 };
       document.getElementById('overall-section').style.display = '';
       document.getElementById('stat-overall').textContent = completed + ' / ' + totalVisible;
       log(`── Batch of ${batchItems.length} video(s) — pipelined ──`, 'info');
@@ -2534,10 +2559,9 @@ async function startDownload() {
 
     const totalVisible = completed + dlQueue.length + retryQueue.length;
     const showOverall = totalVisible > 1 || completed > 1;
+    _queueProgress = { completed, total: totalVisible };
     if (showOverall) {
-      document.getElementById('overall-section').style.display = '';
-      document.getElementById('stat-overall').textContent = completed + ' / ' + totalVisible;
-      document.getElementById('overall-bar-fill').style.width = ((completed - 1) / totalVisible * 100).toFixed(1) + '%';
+      renderOverall(0);
     } else {
       document.getElementById('overall-section').style.display = 'none';
     }
@@ -2574,7 +2598,7 @@ async function startDownload() {
     }
 
     if (showOverall && result.ok) {
-      document.getElementById('overall-bar-fill').style.width = (completed / totalVisible * 100).toFixed(1) + '%';
+      renderOverall(100);
     }
   }
 
@@ -2655,6 +2679,30 @@ function runShutdownCountdown(seconds) {
   });
 }
 
+// ── Job-level ("overall") progress bar ────────────────────────────────────────
+// Two things write this bar: the client queue loop and the server's
+// video_start/progress.overall events. Since playlist expansion moved
+// client-side (#15) the server usually sees only ONE video per request and
+// reports total=1, so letting it drive would hide the bar for a multi-item
+// queue. The client queue is therefore the authority whenever it holds more
+// than one item; the server's per-request progress is folded in as the
+// fraction *within* the current item. When the client cedes control
+// (single item, or a pipelined batch where the server does span N videos)
+// _queueProgress is zeroed and the original server-driven path runs unchanged.
+let _queueProgress = { completed: 0, total: 0 };
+function clientOwnsOverall() {
+  return _queueProgress.total > 1 || _queueProgress.completed > 1;
+}
+function renderOverall(itemPct) {
+  if (!clientOwnsOverall()) return;   // server-driven path handles display
+  const { completed, total } = _queueProgress;
+  document.getElementById('overall-section').style.display = '';
+  document.getElementById('stat-overall').textContent = completed + ' / ' + total;
+  const within = Math.min(100, Math.max(0, itemPct || 0)) / 100;
+  const frac = Math.min(1, Math.max(0, ((completed - 1) + within) / total));
+  document.getElementById('overall-bar-fill').style.width = (frac * 100).toFixed(1) + '%';
+}
+
 function handleMsg(msg) {
   const barBg = document.getElementById('bar-bg');
   if (msg.type === 'video_start') {
@@ -2666,7 +2714,9 @@ function handleMsg(msg) {
     document.getElementById('stat-elapsed').textContent = '00:00:00';
     resetSizeTracker();
     startElapsedTimer();
-    if (msg.total > 1) {
+    if (clientOwnsOverall()) {
+      renderOverall(0);            // start of this item; keep the job-level bar
+    } else if (msg.total > 1) {
       overallSec.style.display = '';
       document.getElementById('stat-overall').textContent = msg.current + ' / ' + msg.total;
       const pct = ((msg.current - 1) / msg.total * 100).toFixed(1);
@@ -2722,7 +2772,8 @@ function handleMsg(msg) {
     document.getElementById('bar-fill').style.width = msg.pct.toFixed(1) + '%';
     document.getElementById('stat-pct').textContent = msg.pct.toFixed(1) + '%';
     if (msg.overall != null) {
-      document.getElementById('overall-bar-fill').style.width = msg.overall.toFixed(1) + '%';
+      if (clientOwnsOverall()) renderOverall(msg.overall);
+      else document.getElementById('overall-bar-fill').style.width = msg.overall.toFixed(1) + '%';
     }
     if (msg.size) document.getElementById('stat-size').textContent = msg.size;
     if (msg.speed) document.getElementById('stat-speed').textContent = msg.speed;
