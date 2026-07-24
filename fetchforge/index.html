@@ -1276,7 +1276,16 @@
         "></div>
       </div>
 
-      <div class="adv-grid" style="grid-template-columns: 1fr 1fr;margin-bottom:14px;">
+      <!-- Target Resolution + Sharpen are HIDDEN: the upscale/sharpen feature is not
+           ready to ship (open work: #33 HDR passthrough through libplacebo, #34 scale_cuda
+           + sharpen on the Windows NVENC build, #35 skip the scaler at 1:1, #37 FSRCNNX
+           neural upscale; and cas=0.5 measured near-invisible — see
+           docs/research/upscale_research.md).
+           The elements stay in the DOM on purpose: startDownload() reads
+           #target-res.value and #sharpen.checked for BOTH the download and local flows, so
+           leaving them present makes every job send the off state (target_res=0,
+           sharpen=false) with no JS changes. To re-enable, delete the display:none. -->
+      <div class="adv-grid" style="display:none;grid-template-columns: 1fr 1fr;margin-bottom:14px;">
         <div class="field">
           <div class="field-label">Target Resolution</div>
           <select id="target-res">
