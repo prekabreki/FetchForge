@@ -744,6 +744,8 @@ def calc_encode_params(
     cq_override: int = 0,
     maxrate_override: str = "",
     nvenc_tune: str = "uhq",
+    target_res: int = 0,
+    sharpen: bool = False,
 ) -> dict:
     """
     Derive NVENC encode parameters from source analysis.
@@ -834,6 +836,8 @@ def calc_encode_params(
         "ten_bit": ten_bit,
         "bf": 3,
         "b_ref_mode": "middle",
+        "target_res": target_res,
+        "sharpen": sharpen,
     }
 
 current_process: Optional[asyncio.subprocess.Process] = None
@@ -1494,6 +1498,8 @@ async def download(
     mode: str = Form("video"),       # "video" → H.265 MP4; "audio" → WAV/MP3 extract
     audio_preset: str = Form("mp3"), # "wav" or "mp3"; only used when mode == "audio"
     items: str = Form(""),           # JSON array of per-item {url,video_format,audio_format,expected_size,output_dir,tune_mode,title,duration}
+    target_res: str = Form("0"),     # target height for unified resolution; 0 = off
+    sharpen: str = Form("false"),    # apply CAS sharpen filter after scaling
 ):
     async def stream():
         global current_process
@@ -1934,6 +1940,8 @@ async def download(
                             cq_override=int(cq) if cq.isdigit() else 0,
                             maxrate_override=maxrate,
                             nvenc_tune=effective_tune,
+                            target_res=int(target_res) if target_res else 0,
+                            sharpen=sharpen == "true",
                         )
                         enc_log = "Encode params: CQ={} maxrate={} preset={} tune={} pix={}".format(
                             params["cq"], params["maxrate"], params["preset"], effective_tune, params["pix_fmt"]
@@ -1941,7 +1949,8 @@ async def download(
                         await msg_q.put(sse_log(enc_log))
 
                         enc_args = build_video_ffmpeg_args(
-                            input_file, output_file, params, effective_tune, src.get("codec", "")
+                            input_file, output_file, params, effective_tune, src.get("codec", ""),
+                            target_height=params["target_res"], sharpen=params["sharpen"],
                         )
                         enc_res: dict = {}
                         async for _s in run_encode(enc_args, duration_secs=duration_secs,
@@ -2195,6 +2204,8 @@ async def download(
                             cq_override=int(cq) if cq.isdigit() else 0,
                             maxrate_override=maxrate,
                             nvenc_tune=effective_tune,
+                            target_res=int(target_res) if target_res else 0,
+                            sharpen=sharpen == "true",
                         )
                         enc_log = "Encode params: CQ={} maxrate={} preset={} tune={} pix={}".format(
                             params["cq"], params["maxrate"], params["preset"], effective_tune, params["pix_fmt"]
@@ -2202,7 +2213,8 @@ async def download(
                         yield sse_log(enc_log)
 
                         ffmpeg_args = build_video_ffmpeg_args(
-                            input_file, output_file, params, effective_tune, src.get("codec", "")
+                            input_file, output_file, params, effective_tune, src.get("codec", ""),
+                            target_height=params["target_res"], sharpen=params["sharpen"],
                         )
 
                     enc_res: dict = {}
@@ -2314,6 +2326,8 @@ async def convert_local(
     tune_mode: str = Form("uhq"),
     mode: str = Form("video"),       # "video" → H.265 MP4; "audio" → WAV/MP3 extract
     audio_preset: str = Form("mp3"), # "wav" or "mp3"; only used when mode == "audio"
+    target_res: str = Form("0"),     # target height for unified resolution; 0 = off
+    sharpen: str = Form("false"),    # apply CAS sharpen filter after scaling
 ):
     async def stream():
         global current_process
@@ -2451,6 +2465,8 @@ async def convert_local(
                     cq_override=int(cq) if cq.isdigit() else 0,
                     maxrate_override=maxrate,
                     nvenc_tune=effective_tune,
+                    target_res=int(target_res) if target_res else 0,
+                    sharpen=sharpen == "true",
                 )
                 enc_log = "Encode params: CQ={} maxrate={} preset={} tune={} pix={}".format(
                     params["cq"], params["maxrate"], params["preset"], effective_tune, params["pix_fmt"]
@@ -2458,7 +2474,8 @@ async def convert_local(
                 yield sse_log(enc_log)
 
                 ffmpeg_args = build_video_ffmpeg_args(
-                    input_file, output_file, params, effective_tune, src.get("codec", "")
+                    input_file, output_file, params, effective_tune, src.get("codec", ""),
+                    target_height=params["target_res"], sharpen=params["sharpen"],
                 )
 
             enc_res: dict = {}
