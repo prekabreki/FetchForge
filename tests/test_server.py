@@ -323,6 +323,61 @@ class TestDecodeFilterArgs(unittest.TestCase):
         self.assertIn("h=2160", vf)
         self.assertIn("yuv420p10le", vf)
 
+    # -- sharpen (CAS) toggle (issue #19) --
+
+    def test_sharpen_off_cpu_passthrough(self):
+        server.HAS_LIBPLACEBO = False
+        server.HAS_SCALE_CUDA = False
+        a = server._decode_filter_args(Path("in.mkv"), "yuv420p", None, sharpen=False)
+        self.assertEqual(self._vf(a), "format=yuv420p")
+
+    def test_sharpen_on_cpu_passthrough(self):
+        server.HAS_LIBPLACEBO = False
+        server.HAS_SCALE_CUDA = False
+        a = server._decode_filter_args(Path("in.mkv"), "yuv420p", None, sharpen=True)
+        vf = self._vf(a)
+        self.assertIn("cas=", vf)
+        self.assertNotIn("hwdownload", vf)
+
+    def test_sharpen_on_gpu_passthrough(self):
+        server.HAS_LIBPLACEBO = False
+        server.HAS_SCALE_CUDA = True
+        a = server._decode_filter_args(Path("in.mkv"), "yuv420p", "h264_cuvid", sharpen=True)
+        vf = self._vf(a)
+        self.assertIn("cas=", vf)
+        self.assertIn("hwdownload", vf)
+
+    def test_sharpen_on_cpu_scale(self):
+        server.HAS_LIBPLACEBO = False
+        server.HAS_SCALE_CUDA = False
+        a = server._decode_filter_args(Path("in.mkv"), "yuv420p", None, target_height=720, sharpen=True)
+        vf = self._vf(a)
+        self.assertIn("cas=", vf)
+        self.assertNotIn("hwdownload", vf)
+
+    def test_sharpen_on_gpu_scale_cuda(self):
+        server.HAS_LIBPLACEBO = False
+        server.HAS_SCALE_CUDA = True
+        a = server._decode_filter_args(Path("in.mkv"), "yuv420p", "h264_cuvid", target_height=720, sharpen=True)
+        vf = self._vf(a)
+        self.assertIn("cas=", vf)
+        self.assertIn("hwdownload", vf)
+
+    def test_sharpen_on_libplacebo_scale(self):
+        server.HAS_LIBPLACEBO = True
+        server.HAS_SCALE_CUDA = False
+        a = server._decode_filter_args(Path("in.mkv"), "yuv420p10le", None, target_height=1080, sharpen=True)
+        vf = self._vf(a)
+        self.assertIn("cas=", vf)
+        self.assertIn("hwdownload,format=yuv420p10le", vf)
+        self.assertIn("tonemapping=none", vf)
+
+    def test_sharpen_default_off(self):
+        server.HAS_LIBPLACEBO = False
+        server.HAS_SCALE_CUDA = True
+        a = server._decode_filter_args(Path("in.mkv"), "yuv420p", "h264_cuvid")
+        self.assertNotIn("cas=", self._vf(a))
+
 
 class TestFfmpegArgs(unittest.TestCase):
     PARAMS = {"cq": 24, "preset": "p2", "maxrate": "7M", "bufsize": "14M",
@@ -348,6 +403,14 @@ class TestFfmpegArgs(unittest.TestCase):
         vf = a[a.index("-vf") + 1]
         self.assertNotIn("h=", vf)
         self.assertNotIn("w=", vf)
+
+    def test_sharpen_off_via_build(self):
+        a = server.build_video_ffmpeg_args(Path("in.mkv"), Path("out.mp4"), self.PARAMS, "hq", "vp9")
+        self.assertNotIn("cas=", a[a.index("-vf") + 1])
+
+    def test_sharpen_on_via_build(self):
+        a = server.build_video_ffmpeg_args(Path("in.mkv"), Path("out.mp4"), self.PARAMS, "hq", "vp9", sharpen=True)
+        self.assertIn("cas=", a[a.index("-vf") + 1])
 
 
 class TestSseBuilders(unittest.TestCase):
