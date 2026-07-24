@@ -571,21 +571,47 @@ def _ffmpeg_has_filter(name: str) -> bool:
 # The bundled Windows ffmpeg (gyan.dev) has it; Fedora/Nobara builds ship
 # --disable-libnpp, so it's absent there even though hevc_nvenc encoding works.
 HAS_SCALE_CUDA = _ffmpeg_has_filter("scale_cuda")
+HAS_LIBPLACEBO = _ffmpeg_has_filter("libplacebo")
 
 
-def _decode_filter_args(input_file: Path, pix_fmt: str, cuvid: Optional[str]) -> list:
-    """Decode + pixel-format args feeding the hevc_nvenc encode.
+def _decode_filter_args(input_file: Path, pix_fmt: str, cuvid: Optional[str],
+                        target_height: int = 0) -> list:
+    """Decode + pixel-format (+ optional scale) args for hevc_nvenc encode.
 
-    Fast path (scale_cuda present): NVDEC decode into CUDA memory and convert
-    the pixel format on the GPU — zero CPU roundtrip. This is what Windows used.
-    Fallback (no scale_cuda): NVDEC decode but let ffmpeg download frames so a
-    CPU `format` filter can run; hevc_nvenc re-uploads and encodes. Slower by a
-    PCIe copy, but works on stock Linux ffmpeg. hevc_nvenc does the heavy lifting
-    either way."""
+    When *target_height* > 0 the filter chain includes a scale to that height
+    (even-dimension-safe, aspect-ratio-preserving).  Scaler engine selection:
+    libplacebo (ewa_lanczos via Vulkan) → scale_cuda (NPP lanczos) → CPU
+    (scale=…:flags=lanczos).  target_height=0 produces byte-identical output
+    to the original two-branch logic."""
+    cuvid_args = ["-c:v", cuvid] if cuvid else []
+    if target_height > 0:
+        if HAS_LIBPLACEBO:
+            return [
+                "-hwaccel", "cuda",
+                *cuvid_args,
+                "-i", str(input_file),
+                "-vf", (f"libplacebo=w=-2:h={target_height}"
+                        f":upscaler=ewa_lanczos:downscaler=ewa_lanczos"
+                        f":format={pix_fmt}:tonemapping=none"),
+            ]
+        if HAS_SCALE_CUDA:
+            return [
+                "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
+                *cuvid_args,
+                "-i", str(input_file),
+                "-vf", f"scale_cuda=format={pix_fmt}:w=-2:h={target_height}",
+            ]
+        return [
+            "-hwaccel", "cuda",
+            *cuvid_args,
+            "-i", str(input_file),
+            "-vf", f"scale=w=-2:h={target_height}:flags=lanczos,format={pix_fmt}",
+        ]
+    # Passthrough — byte-identical to original two-branch logic.
     if HAS_SCALE_CUDA:
         return [
             "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
-            *(["-c:v", cuvid] if cuvid else []),
+            *cuvid_args,
             "-i", str(input_file),
             "-vf", f"scale_cuda=format={pix_fmt}",
         ]
@@ -835,17 +861,21 @@ async def _probe_nvenc_tune():
 
 
 def build_video_ffmpeg_args(input_file: Path, output_file: Path, params: dict,
-                            effective_tune: str, codec: str) -> list:
+                            effective_tune: str, codec: str,
+                            target_height: int = 0) -> list:
     """Construct the hevc_nvenc ffmpeg argv. Pure (no I/O beyond the module-level
     capability probes) so it can be unit-tested with a fixture params dict. Single
-    source of truth for the three former copies (H-2)."""
+    source of truth for the three former copies (H-2).
+
+    *target_height* is forwarded to _decode_filter_args for optional scaling.
+    When 0 (default) the filter chain is byte-identical to the original."""
     # uhq requires p4+ minimum; p2 rejected — guard only needed for the uhq path.
     effective_preset = "p4" if (effective_tune == "uhq" and params["preset"] == "p2") else params["preset"]
     cuvid = _CUVID_DECODERS.get((codec or "").lower())
     return [
         get_ffmpeg(), "-y",
         "-loglevel", "info",
-        *_decode_filter_args(input_file, params["pix_fmt"], cuvid),
+        *_decode_filter_args(input_file, params["pix_fmt"], cuvid, target_height),
         "-c:v", "hevc_nvenc",
         "-preset", effective_preset,
         "-profile:v", params["profile"],
