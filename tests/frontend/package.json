@@ -1,0 +1,14 @@
+{
+  "name": "fetchforge-frontend-tests",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "jsdom harness for fetchforge/index.html. Dev-only: pyproject packages=[\"fetchforge\"], so nothing here ships in the pip package.",
+  "scripts": {
+    "test": "node --test --test-timeout=20000",
+    "test:mutations": "node mutation-check.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "^27.0.0"
+  }
+}
