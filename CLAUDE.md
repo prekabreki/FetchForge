@@ -50,6 +50,7 @@ Cache (raw MKVs from yt-dlp, deleted after encode):
 |--------|------|---------|
 | GET | `/` | Serves `fetchforge/index.html` |
 | GET | `/version` | Returns `APP_VERSION` |
+| GET | `/capabilities` | Startup capability report (#47): resolved ffmpeg path, its reported version, the outcome of all three startup probes, and a prebuilt `warning` (`null` when all pass) that the header banner renders. Cached in `lifespan`; probes are never re-run |
 | GET | `/heartbeat` | Keep-alive ping from the open tab; resets the idle watchdog. Returns `{ok, timeout}` |
 | GET | `/ytdlp-version` | Returns yt-dlp version string |
 | POST | `/update-ytdlp` | Updates yt-dlp via the mechanism matching the install: `pip install -U` when yt-dlp lives in this interpreter's env, the bundled exe's own `-U` on Windows, else a "use your package manager" message for a system binary |
