@@ -142,6 +142,53 @@
   }
   .dot.warn { background: var(--accent2); box-shadow: 0 0 6px rgba(239,83,80,0.5); }
 
+  /* #47 — the ffmpeg capability warning. Amber (--accent), not --accent2: a
+     degraded capability is a warning with a remedy, not an error. Non-blocking
+     by construction — it sits in the flow above the blurb, gates nothing, and
+     stays hidden while all three startup probes pass. */
+  .cap-warning {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    background: rgba(232,160,35,0.06);
+    border: 1px solid rgba(232,160,35,0.28);
+    border-left: 3px solid var(--accent);
+    border-radius: var(--radius);
+    padding: 12px 14px;
+    margin-bottom: 18px;
+  }
+  .cap-warning[hidden] { display: none; }
+  .cap-warning-icon {
+    flex: none;
+    width: 16px; height: 16px;
+    margin-top: 2px;
+    color: var(--accent);
+  }
+  .cap-warning-head {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--accent);
+    margin-bottom: 6px;
+  }
+  .cap-warning-list {
+    margin: 0 0 8px;
+    padding-left: 16px;
+    font-size: 13px;
+    color: var(--text2);
+    line-height: 1.6;
+  }
+  .cap-warning-list strong { color: var(--text); font-weight: 600; }
+  /* Mono, because a filesystem path is instrument data. Long Windows paths must
+     wrap rather than push the page sideways. */
+  .cap-warning-meta {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    line-height: 1.7;
+    overflow-wrap: anywhere;
+  }
+  .cap-warning-meta span { color: var(--text2); }
+
   .card {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -1101,6 +1148,25 @@
     </div>
   </header>
 
+  <!-- #47 — filled in by fetchCapabilities() when a startup probe found this
+       ffmpeg missing something FetchForge uses. Hidden when all three pass. -->
+  <div id="cap-warning" class="cap-warning" role="status" hidden>
+    <svg class="cap-warning-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"></path>
+      <line x1="12" y1="9" x2="12" y2="13"></line>
+      <line x1="12" y1="17" x2="12.01" y2="17"></line>
+    </svg>
+    <div>
+      <div class="cap-warning-head" id="cap-warning-head"></div>
+      <ul class="cap-warning-list" id="cap-warning-list"></ul>
+      <div class="cap-warning-meta">
+        ffmpeg in use: <span id="cap-warning-path"></span><br>
+        reported version: <span id="cap-warning-version"></span>
+      </div>
+    </div>
+  </div>
+
   <div class="hero-blurb">
     Download YouTube videos and playlists, then convert to <strong>H.265/HEVC</strong> using NVIDIA NVENC hardware encoding.
     Supports single videos, full playlists with pipeline mode, and local file conversion. Smart auto-analysis picks optimal CQ, maxrate, and preset from the source.
@@ -1122,7 +1188,7 @@
         <button class="btn btn-outline btn-sm" id="cookie-clear-btn" onclick="clearCookies()" style="display:none;">Clear cookies</button>
         <span style="font-size:12px;color:var(--muted);">In Cookie-Editor, use Export → download to get the file</span>
       </div>
-      <div id="cookie-fetch-result" style="display:none;font-size:12px;margin-top:10px;"></div>
+      <div id="cookie-fetch-result" role="status" aria-live="polite" style="display:none;font-size:12px;margin-top:10px;"></div>
 
       <div class="cookies-paste-row">
         <div class="cookies-paste-hint">Or paste cookies (Cookie-Editor → Export → Netscape). Pasted text is masked and never displayed.</div>
@@ -1976,6 +2042,7 @@ function toggleDownloadOnly() {
 checkCookies();
 fetchVersion();
 fetchAppVersion();
+fetchCapabilities();
 loadHistory();
 updateYtdlp();
 // Several controls are div/span + onclick rather than <button> (they sit inside
@@ -2213,6 +2280,43 @@ async function fetchAppVersion() {
   }
 }
 
+// #47 — the three startup capability probes (uhq tune, scale_cuda, libplacebo)
+// used to fail in silence, so a stale ffmpeg could cost output quality for months
+// unnoticed. Render whatever the server's startup report found, naming the PATH
+// (the original confusion was not knowing which ffmpeg was in use), the reported
+// version and the remedy. The server decides *whether* to warn — from probe
+// results, never from a version comparison — this only draws it.
+async function fetchCapabilities() {
+  const box = document.getElementById('cap-warning');
+  if (!box) return;
+  let d;
+  try {
+    const r = await fetch(`${API}/capabilities`);
+    d = await r.json();
+  } catch {
+    return;   // a diagnostic must never break the page it is diagnosing
+  }
+  const w = d && d.warning;
+  if (!w) { box.hidden = true; return; }
+  document.getElementById('cap-warning-head').textContent = w.headline;
+  const list = document.getElementById('cap-warning-list');
+  list.textContent = '';
+  (w.items || []).forEach(it => {
+    const li = document.createElement('li');
+    const name = document.createElement('strong');
+    name.textContent = it.name;
+    li.appendChild(name);
+    // textContent throughout: a filesystem path is untrusted-shaped text and
+    // never goes near innerHTML.
+    li.appendChild(document.createTextNode(
+      ' — ' + [it.impact, it.remedy].filter(Boolean).join(' ')));
+    list.appendChild(li);
+  });
+  document.getElementById('cap-warning-path').textContent = w.ffmpeg_path;
+  document.getElementById('cap-warning-version').textContent = w.ffmpeg_version;
+  box.hidden = false;
+}
+
 async function checkCookies() {
   try {
     const r = await fetch(`${API}/check-cookies`);
@@ -2289,6 +2393,10 @@ async function attemptFetchCookies(browser, profile) {
       log(`Loaded ${d.selected.youtube_cookies} YouTube cookie(s) from ${d.selected.browser} / ${d.selected.display_name}.`, 'info');
     } else if (d.error) {
       log('Fetch cookies: ' + d.error, 'error');
+    } else if ((d.candidates || []).some(c => c.error)) {
+      // #43: a scan where every source errored is a failure, not "logged out".
+      const failed = (d.candidates || []).filter(c => c.error);
+      log(`Could not read cookies from ${failed.length} of ${d.candidates.length} browser profile(s) — see card #01 for the reasons.`, 'error');
     } else {
       log('No YouTube cookies found in any installed browser.', 'error');
     }
@@ -2304,30 +2412,67 @@ async function attemptFetchCookies(browser, profile) {
 
 let _cookieCandidates = [];   // last scan's candidates, referenced by index for "use this"
 
+// Server-side marker for Chromium App-Bound Encryption (server.py APP_BOUND_ENCRYPTION, #46).
+const ABE_REASON = 'app_bound_encryption';
+
+// Error strings come from exceptions — escape, then clip so one long reason
+// cannot blow out the row.
+function cookieErrorText(msg) {
+  const s = String(msg || '');
+  return escapeHtml(s.length > 120 ? s.slice(0, 120).trimEnd() + '…' : s);
+}
+
 function renderCookieFetchResult(d) {
   const box = document.getElementById('cookie-fetch-result');
   _cookieCandidates = d.candidates || [];
+  const errored = _cookieCandidates.filter(c => c.error);
+  const abe = _cookieCandidates.filter(c => c.reason === ABE_REASON);
   const rows = [];
   if (d.selected) {
     rows.push(`<div style="color:var(--accent);margin-bottom:6px;">✓ Using <strong>${escapeHtml(d.selected.browser)} / ${escapeHtml(d.selected.display_name)}</strong> — ${d.selected.youtube_cookies} YouTube cookie(s).</div>`);
   } else if (d.error) {
     rows.push(`<div style="color:var(--accent2);margin-bottom:6px;">${escapeHtml(d.error)}</div>`);
-  } else {
+  } else if (errored.length) {
+    // #43: the scan itself failed — do not diagnose that as "you are logged out".
+    const total = _cookieCandidates.length;
+    const which = errored.length < total
+      ? `${errored.length} of the ${total} scanned sources`
+      : (total === 1 ? 'the only browser profile found' : `any of the ${total} scanned sources`);
+    rows.push(`<div style="color:var(--accent2);margin-bottom:6px;">Could not read cookies from ${which}. ${errored.length === 1 ? 'Reason' : 'Reasons'} below.</div>`);
+  } else if (_cookieCandidates.length) {
     rows.push(`<div style="color:var(--accent2);margin-bottom:6px;">No YouTube cookies found. Log in to YouTube in a browser, then try again.</div>`);
+  } else {
+    rows.push(`<div style="color:var(--accent2);margin-bottom:6px;">No supported browser profiles were found to scan.</div>`);
   }
-  const shown = _cookieCandidates.filter(c => !c.error || c.youtube_cookies > 0);
-  if (shown.length) {
+  if (_cookieCandidates.length) {
     rows.push('<div style="color:var(--muted);margin:4px 0 2px;">Sources scanned:</div>');
+    // #43: list every candidate, errored ones included, each with its reason.
     _cookieCandidates.forEach((c, i) => {
-      if (c.error && !(c.youtube_cookies > 0)) return;
       const isSel = d.selected && c.browser === d.selected.browser && (c.profile_dir || null) === (d.selected.profile_dir || null);
-      const count = c.error ? '<span style="color:var(--muted);">error</span>' : `${c.youtube_cookies} YT`;
       const canSwitch = !isSel && !c.error && c.youtube_cookies > 0;
       const action = canSwitch
         ? ` <span style="color:var(--accent);cursor:pointer;text-decoration:underline;" onclick="useCookieSource(${i})" role="button" tabindex="0">use this</span>`
         : (isSel ? ' <span style="color:var(--accent);">✓</span>' : '');
-      rows.push(`<div style="padding:2px 0;">• ${escapeHtml(c.browser)} / ${escapeHtml(c.display_name)} — ${count}${action}</div>`);
+      const bits = [];
+      if (!c.error || c.youtube_cookies > 0) bits.push(`${c.youtube_cookies} YT`);
+      if (c.reason === ABE_REASON) {
+        bits.push('<span style="color:var(--accent2);">blocked by browser encryption</span>');
+      } else if (c.error) {
+        bits.push(`<span style="color:var(--accent2);">failed:</span> <span style="color:var(--muted);">${cookieErrorText(c.error)}</span>`);
+      }
+      rows.push(`<div style="padding:2px 0;">• ${escapeHtml(c.browser)} / ${escapeHtml(c.display_name)} — ${bits.join(' — ')}${action}</div>`);
     });
+  }
+  // #46: one summary for App-Bound Encryption, never repeated per profile.
+  if (abe.length || d.reason === ABE_REASON) {
+    const names = [...new Set(abe.map(c => String(c.browser || '')))].filter(Boolean)
+      .map(b => b.charAt(0).toUpperCase() + b.slice(1));
+    const who = names.length ? escapeHtml(names.join(', ')) : 'This browser';
+    rows.push(`<div style="margin-top:8px;padding:8px 10px;border:1px solid var(--border2);border-radius:var(--radius-sm);background:var(--surface2);">
+      <div style="color:var(--accent2);font-weight:600;margin-bottom:4px;">${who} encrypt${names.length > 1 ? '' : 's'} cookies so only the browser can read them</div>
+      <div style="color:var(--text2);">Chromium 127+ on Windows locks the cookie key to the browser itself (App-Bound Encryption). No outside program can unwrap it, so FetchForge cannot read these cookies — closing the browser or running as administrator will not help.</div>
+      <div style="color:var(--text2);margin-top:4px;">Export them from inside the browser instead: install <strong>Get cookies.txt LOCALLY</strong>, export youtube.com, then use <strong>Load cookies.txt</strong> or the <strong>paste cookies</strong> box in this card.</div>
+    </div>`);
   }
   rows.push('<div style="color:var(--muted);margin-top:6px;font-size:11px;">Tip: cookies from a running browser can be rotated by YouTube — for durable auth, log in via a fresh private window and close it before fetching.</div>');
   box.innerHTML = rows.join('');

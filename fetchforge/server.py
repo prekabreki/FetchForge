@@ -158,6 +158,13 @@ _SESSION_TOKEN = secrets.token_urlsafe(32)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await _probe_nvenc_tune()
+    # Record what this ffmpeg can actually do (#47). Diagnostics only: it reuses
+    # the probe results above plus one `ffmpeg -version`, and is wrapped here as
+    # well as internally — a report that fails must never stop the server booting.
+    try:
+        await asyncio.to_thread(_refresh_capability_report)
+    except Exception:
+        logger.warning("startup capability report failed", exc_info=True)
     watchdog = asyncio.create_task(_heartbeat_watchdog())
     yield
     watchdog.cancel()
@@ -1242,6 +1249,194 @@ async def _probe_nvenc_tune():
                         "using 'hq' + AQ")
 
 
+# ── Startup capability report (#47) ──────────────────────────────────────────
+# Three startup probes each quietly select a lesser path when they fail:
+# _probe_nvenc_tune() (the uhq archival tune), HAS_SCALE_CUDA (GPU-resident
+# pixel-format conversion) and HAS_LIBPLACEBO (the ewa_lanczos scaler). None of
+# that ever reached the UI, so an ffmpeg predating a feature could cost output
+# quality for months without a word. The report below turns those *already
+# computed* results into something the UI can show. No probe is re-run here.
+#
+# THE PROBES ARE THE ONLY GATE. The version string is descriptive — it explains a
+# failure, it never decides one. Distro packages, git-master snapshots and vendor
+# builds all version inconsistently, so a version comparison used as the real gate
+# would fire on perfectly healthy installs. Probe for behaviour, report the
+# version to explain it.
+
+FFMPEG_VERSION_UNKNOWN = "unknown version"
+FFMPEG_PATH_UNKNOWN = "unknown path"
+
+_FFMPEG_VERSION_RE = re.compile(r"ffmpeg version\s+(\S+)", re.IGNORECASE)
+
+# Cached at startup by _refresh_capability_report(), served by GET /capabilities.
+_capability_report: dict = {}
+
+
+def _parse_ffmpeg_version(output: str) -> str:
+    """Pull the version/build token out of `ffmpeg -version` output. Pure.
+
+    Covers the shapes seen in the wild:
+        ffmpeg version 7.1.1-full_build-www.gyan.dev Copyright ...
+        ffmpeg version 2023-10-29-git-2532e832d2-full_build-www.gyan.dev ...
+        ffmpeg version n7.1 Copyright ...
+        ffmpeg version 6.1.1 Copyright ...          (Fedora)
+
+    Returns "" when the output is not recognisably ffmpeg. An unusual build must
+    degrade to "unknown version" — never to a bogus one, and never to silence."""
+    m = _FFMPEG_VERSION_RE.search(output or "")
+    return m.group(1) if m else ""
+
+
+def _read_ffmpeg_version() -> str:
+    """The build string from `ffmpeg -version`, or "" if it cannot be read.
+
+    This is the one extra subprocess the report is allowed (the encode probes are
+    emphatically *not* re-run). Returns "" on any failure at all — missing binary,
+    timeout, non-zero exit, unparseable output. The caller degrades to
+    "unknown version" and still warns on whatever the probes found."""
+    try:
+        out = subprocess.run([get_ffmpeg(), "-hide_banner", "-version"],
+                             capture_output=True, text=True, timeout=15)
+    except Exception:
+        return ""
+    return _parse_ffmpeg_version((out.stdout or "") + "\n" + (out.stderr or ""))
+
+
+def _uhq_capability(tune_cause: str) -> dict:
+    """The uhq-tune entry, built from #44's already-resolved cause. Same symptom,
+    different remedies: an ffmpeg that never knew the option and a driver that
+    refused it must not be given the same advice."""
+    if tune_cause == _TUNE_FFMPEG_TOO_OLD:
+        remedy = ("Update ffmpeg — the uhq tune arrived in ffmpeg 7.1. "
+                  "Your GPU driver is not the problem.")
+    elif tune_cause == _TUNE_DRIVER_REJECTED:
+        remedy = ("Update the NVIDIA driver — this ffmpeg knows the uhq tune, "
+                  "the driver refused it.")
+    elif tune_cause == _TUNE_SUPPORTED:
+        remedy = ""
+    else:
+        remedy = ("Check the startup log for the hevc_nvenc probe output — the "
+                  "uhq probe failed for an unrecognised reason.")
+    return {
+        "key": "nvenc_uhq_tune",
+        "name": "NVENC 'uhq' archival tune",
+        "ok": tune_cause == _TUNE_SUPPORTED,
+        "cause": tune_cause,
+        "impact": "Encodes fall back to the 'hq' tune — faster, lower quality.",
+        "remedy": remedy,
+    }
+
+
+def build_capability_report(*, ffmpeg_path: str, ffmpeg_version: str,
+                            tune_cause: str, has_scale_cuda: bool,
+                            has_libplacebo: bool) -> dict:
+    """Compose the capability report and its warning. Pure — every input is
+    injected, so the whole thing is unit-testable with no ffmpeg, no GPU and no
+    subprocess.
+
+    `warning` is None exactly when all three probes passed. It is never keyed off
+    *ffmpeg_version*: an empty version yields "unknown version" in the message and
+    changes nothing about whether the warning exists."""
+    caps = [
+        _uhq_capability(tune_cause),
+        {
+            "key": "scale_cuda",
+            "name": "GPU-resident pixel-format conversion (scale_cuda)",
+            "ok": bool(has_scale_cuda),
+            "cause": "supported" if has_scale_cuda else "filter_missing",
+            "impact": "Format conversion falls back to the CPU — slower encodes.",
+            "remedy": "" if has_scale_cuda else
+                      ("Use an ffmpeg built with --enable-libnpp (the Windows "
+                       "gyan.dev / BtbN builds have it)."),
+        },
+        {
+            "key": "libplacebo",
+            "name": "High-quality scaler (libplacebo / ewa_lanczos)",
+            "ok": bool(has_libplacebo),
+            "cause": "supported" if has_libplacebo else "filter_missing",
+            "impact": "Upscaling falls back to a lower-quality scaler.",
+            "remedy": "" if has_libplacebo else
+                      "Use an ffmpeg built with --enable-libplacebo.",
+        },
+    ]
+
+    path = ffmpeg_path or FFMPEG_PATH_UNKNOWN
+    version = ffmpeg_version or FFMPEG_VERSION_UNKNOWN
+    failing = [c for c in caps if not c["ok"]]
+
+    warning = None
+    if failing:
+        noun = "capability" if len(failing) == 1 else "capabilities"
+        headline = "{} ffmpeg {} unavailable — FetchForge is using fallback paths".format(
+            len(failing), noun)
+        # The path is the headline fact: the whole confusion this warning exists
+        # to end was not knowing *which* ffmpeg was in use.
+        text = "{} | ffmpeg: {} ({}) | {}".format(
+            headline, path, version,
+            " ".join("{} — {}".format(c["name"], c["remedy"]) for c in failing))
+        warning = {
+            "headline": headline,
+            "ffmpeg_path": path,
+            "ffmpeg_version": version,
+            "items": [{"name": c["name"], "impact": c["impact"],
+                       "remedy": c["remedy"]} for c in failing],
+            "text": text,
+        }
+
+    return {
+        "ffmpeg_path": path,
+        "ffmpeg_version": version,
+        "capabilities": caps,
+        "warning": warning,
+    }
+
+
+def _refresh_capability_report() -> dict:
+    """Build the report from results already computed at startup, cache it, return it.
+
+    DANGER ZONE: called from `lifespan`. A diagnostic must never stop the server
+    booting, so every step that touches the outside world is individually wrapped
+    and the whole body is wrapped again. Worst case is a report that says it is
+    unavailable, next to a server that started fine.
+
+    Note the version read is caught *separately* from the report build: a version
+    that cannot be read degrades to "unknown version" and must never suppress an
+    otherwise-valid probe warning."""
+    global _capability_report
+    try:
+        try:
+            path = get_ffmpeg()
+        except Exception:
+            path = ""
+        try:
+            version = _read_ffmpeg_version()
+        except Exception:
+            version = ""
+        report = build_capability_report(
+            ffmpeg_path=str(path or ""),
+            ffmpeg_version=version,
+            tune_cause=_nvenc_tune_cause,
+            has_scale_cuda=HAS_SCALE_CUDA,
+            has_libplacebo=HAS_LIBPLACEBO,
+        )
+        if report.get("warning"):
+            logger.warning(report["warning"]["text"])
+        else:
+            logger.info("ffmpeg capabilities: all probes passed ({})".format(
+                report.get("ffmpeg_version")))
+        _capability_report = report
+    except Exception as e:
+        logger.warning("capability report unavailable: {}".format(e))
+        _capability_report = {
+            "ffmpeg_path": FFMPEG_PATH_UNKNOWN,
+            "ffmpeg_version": FFMPEG_VERSION_UNKNOWN,
+            "capabilities": [],
+            "warning": None,
+            "error": "capability report unavailable",
+        }
+    return _capability_report
+
+
 def build_video_ffmpeg_args(input_file: Path, output_file: Path, params: dict,
                             effective_tune: str, codec: str,
                             target_height: int = 0, sharpen: bool = False) -> list:
@@ -1528,6 +1723,61 @@ def _chromium_profiles(root: Path) -> list:
     return profiles or [("Default", "Default")]
 
 
+# ── Chromium App-Bound Encryption (issue #46) ────────────────────────────────
+# Chromium 127+ on Windows binds the cookie-encryption key to the browser
+# executable via an elevation service, so no external process can unwrap it —
+# `--cookies-from-browser` can never succeed for Brave/Chrome/Edge/Vivaldi on
+# such a profile. yt-dlp reports it as a bare "Failed to decrypt with DPAPI",
+# which reads like a transient permissions problem; it is permanent. We detect
+# it so the UI can say so and route the user to the extension-export path
+# ("Load cookies.txt" / "Paste cookies"), which works because an extension runs
+# inside the browser. Detection is diagnostic only — never an abort, never a
+# workaround attempt, and Windows-only (ABE has no Linux/macOS equivalent).
+APP_BOUND_ENCRYPTION = "app_bound_encryption"
+
+# yt-dlp's decrypt-failure wording (yt-dlp issues 10927 / 7271). A locked cookie
+# DB ("Could not copy ... cookie database") is a *different*, possibly transient
+# failure and must keep its own reason — so match the decrypt wording only.
+_DECRYPT_FAILURE_HINTS = ("failed to decrypt", "dpapi")
+
+
+def _looks_like_decrypt_failure(msg) -> bool:
+    """True when an extraction error is a cookie *decryption* failure rather
+    than a locked/absent database. Total — never raises."""
+    try:
+        low = str(msg or "").lower()
+    except Exception:
+        return False
+    return any(h in low for h in _DECRYPT_FAILURE_HINTS)
+
+
+def _chromium_uses_app_bound_encryption(root: Path) -> bool:
+    """True when a Chromium user-data root's `Local State` carries an App-Bound
+    Encryption key. Cheap (no DB access, no locked-file copy) and total: a
+    missing, empty, malformed or unreadable `Local State` yields False so the
+    candidate stays reported as a plain error. Windows-only by definition."""
+    if platform.system() != "Windows":
+        return False
+    try:
+        data = json.loads((root / "Local State").read_text(encoding="utf-8", errors="replace"))
+        if not isinstance(data, dict):
+            return False
+        os_crypt = data.get("os_crypt")
+        if not isinstance(os_crypt, dict):
+            return False
+        return bool(os_crypt.get("app_bound_encrypted_key"))
+    except Exception:
+        return False
+
+
+def _failure_reason(root: Path, error_msg) -> str:
+    """Machine-readable reason for a failed Chromium candidate, or "" when the
+    failure has no more specific explanation than its error string."""
+    if _looks_like_decrypt_failure(error_msg) and _chromium_uses_app_bound_encryption(root):
+        return APP_BOUND_ENCRYPTION
+    return ""
+
+
 class _QuietYDLLogger:
     """Silences yt-dlp's chatty extraction output; we surface our own status."""
     def debug(self, *a, **k): pass
@@ -1574,6 +1824,9 @@ def _scan_all_browser_cookies() -> list:
                 entry["cookies"], entry["youtube_cookies"] = _count_youtube_cookies(jar)
             except Exception as e:
                 entry["error"] = str(e)[:200]
+                reason = _failure_reason(root, entry["error"])   # total; cannot raise
+                if reason:
+                    entry["reason"] = reason
                 jar = None
             results.append((entry, jar))
     ff = _firefox_root()
@@ -1607,8 +1860,13 @@ async def fetch_cookies(browser: str = Form(""), profile: str = Form("")):
             jar = await asyncio.to_thread(_extract_one, browser, prof)
         except Exception as e:
             label = "{}{}".format(browser, "/" + profile if profile else "")
-            return {"selected": None, "candidates": [],
-                    "error": "Could not read {}: {}".format(label, str(e)[:200])}
+            root = _browser_roots().get(browser)
+            reason = _failure_reason(root, str(e)) if root is not None else ""
+            out = {"selected": None, "candidates": [],
+                   "error": "Could not read {}: {}".format(label, str(e)[:200])}
+            if reason:
+                out["reason"] = reason
+            return out
         total, yt = _count_youtube_cookies(jar)
         await asyncio.to_thread(_save_jar, jar, COOKIES_PATH)
         _cookies_disabled = False
@@ -2948,6 +3206,19 @@ def _open_file_dialog() -> list:
 @app.get("/version")
 async def get_version():
     return {"version": APP_VERSION}
+
+
+@app.get("/capabilities")
+async def get_capabilities():
+    """The startup capability report (#47): which ffmpeg is in use, what version
+    it reports, and the outcome of all three startup probes — plus a prebuilt
+    `warning` (None when everything passed) for the UI to render.
+
+    Served from the cache filled in `lifespan`; the lazy refresh only fires if
+    the app was started without its lifespan, and runs off the event loop."""
+    if not _capability_report:
+        await asyncio.to_thread(_refresh_capability_report)
+    return _capability_report
 
 
 @app.get("/heartbeat")
