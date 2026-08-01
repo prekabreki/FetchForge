@@ -1,8 +1,10 @@
 import asyncio
 import datetime
+import importlib.util
 import json
 import os
 import platform
+import site
 import random
 import re
 import shutil
@@ -228,18 +230,54 @@ def get_ffprobe() -> str:
     return _resolve_tool("ffprobe", PKG_DIR / "_internal" / "ffprobe.exe")
 
 @functools.cache
-def get_ytdlp() -> str:
-    return _resolve_tool("yt-dlp", PKG_DIR / "yt-dlp.exe")
+def get_ytdlp_argv() -> list:
+    """argv prefix that runs yt-dlp — a console script when we can find one,
+    else this interpreter's importable `yt_dlp` module.
+
+    yt-dlp is a pip dependency, but where pip puts its console script depends on
+    the install shape: a venv's Scripts/bin, `--user`'s site base, or (Windows
+    Store Python) a redirected LocalCache dir that is on none of the paths a
+    tool search would guess. `python -m yt_dlp` is equivalent and needs no path
+    guessing, so it's the fallback rather than an error.
+    """
+    bundled = PKG_DIR / "yt-dlp.exe"
+    if IS_WINDOWS and bundled.exists():
+        return [str(bundled)]
+    found = shutil.which("yt-dlp")
+    if found:
+        return [found]
+    bindir = "Scripts" if IS_WINDOWS else "bin"
+    for exe in ("yt-dlp", "yt-dlp.exe"):
+        cand = Path(sys.prefix) / bindir / exe
+        if cand.exists():
+            return [str(cand)]
+    if importlib.util.find_spec("yt_dlp") is not None:
+        return [sys.executable, "-m", "yt_dlp"]
+    if bundled.exists():        # last resort (e.g. a manually-dropped binary)
+        return [str(bundled)]
+    raise RuntimeError(
+        "yt-dlp not found. It ships as a dependency of this package — "
+        "reinstall with `pip install -U fetchforge` (or `pip install -U yt-dlp[default]` "
+        "into the same interpreter) and restart FetchForge."
+    )
 
 
-def _ytdlp_in_this_env(ytdlp_path: str) -> bool:
+def _ytdlp_in_this_env(ytdlp_argv: list) -> bool:
     """True when the resolved yt-dlp lives inside the running interpreter's
     environment (venv / pip install) — i.e. `pip install -U` against
     sys.executable will actually upgrade the copy the app uses."""
-    try:
-        return Path(ytdlp_path).resolve().is_relative_to(Path(sys.prefix).resolve())
-    except (OSError, ValueError):
-        return False
+    if ytdlp_argv[:1] == [sys.executable]:      # `python -m yt_dlp`: by definition ours
+        return True
+    # sys.prefix covers venv/system installs; the user base covers `pip install
+    # --user`, which pip also upgrades in place from this interpreter.
+    roots = [sys.prefix, site.getuserbase()]
+    for root in roots:
+        try:
+            if Path(ytdlp_argv[0]).resolve().is_relative_to(Path(root).resolve()):
+                return True
+        except (OSError, ValueError, IndexError):
+            continue
+    return False
 
 
 def _resolve_node_args() -> list:
@@ -1319,7 +1357,7 @@ async def clear_history():
 @app.get("/ytdlp-version")
 async def ytdlp_version():
     proc = await asyncio.create_subprocess_exec(
-        str(get_ytdlp()), "--version",
+        *get_ytdlp_argv(), "--version",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -1335,10 +1373,10 @@ async def update_ytdlp():
     it's only correct for the Windows bundled standalone exe. For the normal
     pip-dependency case we upgrade via pip against this interpreter; a system
     binary we don't own can't be updated in place, so we say so."""
-    ytdlp = get_ytdlp()
+    ytdlp = get_ytdlp_argv()
     bundled = PKG_DIR / "yt-dlp.exe"
-    if IS_WINDOWS and str(bundled) == ytdlp:
-        cmd = [ytdlp, "-U"]
+    if IS_WINDOWS and ytdlp == [str(bundled)]:
+        cmd = [*ytdlp, "-U"]
     elif _ytdlp_in_this_env(ytdlp):
         cmd = [sys.executable, "-m", "pip", "install", "-U", "yt-dlp[default]"]
     else:
@@ -1347,14 +1385,14 @@ async def update_ytdlp():
             "FetchForge can't update it in place — update it with your OS package "
             "manager (e.g. `sudo dnf upgrade yt-dlp` or `sudo apt upgrade yt-dlp`), "
             "or run FetchForge from a virtualenv where yt-dlp is a pip dependency."
-        ).format(ytdlp)}
+        ).format(ytdlp[0])}
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
     )
     stdout, _ = await proc.communicate()
-    # get_ytdlp() is cached to a path; a pip upgrade replaces the package in place,
+    # get_ytdlp_argv() is cached; a pip upgrade replaces the package in place,
     # so the path stays valid and /ytdlp-version (a fresh subprocess) reports the
     # new version without a server restart.
     return {"output": stdout.decode(errors="replace").strip()}
@@ -1366,7 +1404,7 @@ async def video_info(url: str):
         return JSONResponse({"error": "URL must be http or https"}, status_code=400)
     # Use --flat-playlist first to detect playlist vs single
     args = [
-        str(get_ytdlp()),
+        *get_ytdlp_argv(),
         "--flat-playlist",
         "-J",
         "--no-download",
@@ -1430,7 +1468,7 @@ async def video_info(url: str):
 
 async def _get_formats(url: str) -> dict:
     args = [
-        str(get_ytdlp()),
+        *get_ytdlp_argv(),
         "-J",
         "--no-download",
         "--no-playlist",
@@ -1640,7 +1678,7 @@ async def download(
 
             yield sse_phase('Resolving...')
 
-            flat_args = [str(get_ytdlp()), "--flat-playlist", "-J", "--no-download", *NODE_ARGS]
+            flat_args = [*get_ytdlp_argv(), "--flat-playlist", "-J", "--no-download", *NODE_ARGS]
             flat_args += cookie_args()
             flat_args += ["--", url]
 
@@ -1760,7 +1798,7 @@ async def download(
                             await msg_q.put(sse_log("{}Downloading...".format(dl_label)))
 
                         dl_args = [
-                            str(get_ytdlp()),
+                            *get_ytdlp_argv(),
                             "-f", _video_format_selector(vf, af, prefer_picked=batch),
                             *NODE_ARGS,
                             "--no-playlist",
@@ -2073,7 +2111,7 @@ async def download(
                 yield sse_phase("{}Downloading".format(label), vid_title)
 
                 dl_args = [
-                    str(get_ytdlp()),
+                    *get_ytdlp_argv(),
                     *_yt_format_args(),
                     *NODE_ARGS,
                     "--no-playlist",
