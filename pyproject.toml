@@ -30,4 +30,7 @@ packages = ["fetchforge"]
 version = { attr = "fetchforge.__version__" }
 
 [tool.setuptools.package-data]
-fetchforge = ["index.html"]
+# PKG_DIR is the read-only install dir, so anything the UI loads at runtime has to
+# be listed here or it works from a source checkout and 404s from a pip install.
+# fonts/ is vendored webfonts + their OFL licences (see fetchforge/fonts/SOURCES.txt).
+fetchforge = ["index.html", "fonts/*.woff2", "fonts/*.txt"]

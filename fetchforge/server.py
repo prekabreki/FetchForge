@@ -141,7 +141,7 @@ async def _tracked(agen):
 import secrets
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, UploadFile, File, Form, Request
-from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
+from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
@@ -197,6 +197,13 @@ app.add_middleware(
 
 PKG_DIR = Path(__file__).parent          # code + index.html template (read-only)
 STATE_DIR = Path.cwd()                    # all writable runtime state
+
+# Vendored webfonts, served by /fonts/{name} so the UI never touches a CDN.
+# The allowlist is built once from the shipped directory and matched exactly:
+# no StaticFiles mount, so nothing outside these filenames is reachable and
+# path traversal has nothing to traverse into.
+FONTS_DIR = PKG_DIR / "fonts"
+FONT_FILES = frozenset(p.name for p in FONTS_DIR.glob("*.woff2")) if FONTS_DIR.is_dir() else frozenset()
 
 
 def _resolve_tool(name: str, win_bundled: Path) -> str:
@@ -1567,6 +1574,21 @@ async def index():
     # Hand the page this launch's session token (consumed by /shutdown-now).
     html = html.replace("__DLPR_TOKEN__", _SESSION_TOKEN)
     return HTMLResponse(html)
+
+
+@app.get("/fonts/{name}")
+async def font_asset(name: str):
+    """Serve one vendored webfont. Exact-match allowlist, woff2 only."""
+    if name not in FONT_FILES:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return FileResponse(
+        FONTS_DIR / name,
+        media_type="font/woff2",
+        # Immutable content at a stable path: a font only changes when the package
+        # does, and a stale face is the one thing this whole change exists to avoid.
+        # A day is long enough to survive the page reloads a single session makes.
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
 
 
 @app.post("/upload-cookies")

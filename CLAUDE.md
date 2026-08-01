@@ -25,6 +25,10 @@ FetchForge/                   # repo root
     provision.py                 # NVENC-ffmpeg detection / Windows auto-download
     server.py                    # entire backend
     index.html                   # entire frontend
+    fonts/                       # self-hosted webfonts (no CDN) + their OFL licences
+      *.woff2                      # Outfit + JetBrains Mono, latin & latin-ext
+      OFL-*.txt                    # SIL OFL 1.1, one per family
+      SOURCES.txt                  # provenance, versions, subsetting rationale
     yt-dlp.exe                   # optional manual override binary (gitignored)
     _internal/                   # optional manual ffmpeg/ffprobe override (gitignored)
   launch.bat                   # source-clone entry point (Windows, visible console)
@@ -49,6 +53,7 @@ Cache (raw MKVs from yt-dlp, deleted after encode):
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | `/` | Serves `fetchforge/index.html` |
+| GET | `/fonts/{name}` | Serves one self-hosted woff2 from `PKG_DIR/fonts`. Exact-match allowlist (`FONT_FILES`, globbed once at import) rather than a `StaticFiles` mount, so nothing else in the package is reachable. Anything shipped here must also be listed in `pyproject.toml`'s `package-data` or it 404s from a pip install |
 | GET | `/version` | Returns `APP_VERSION` |
 | GET | `/capabilities` | Startup capability report (#47): resolved ffmpeg path, its reported version, the outcome of all three startup probes, and a prebuilt `warning` (`null` when all pass) that the header banner renders. Cached in `lifespan`; probes are never re-run |
 | GET | `/heartbeat` | Keep-alive ping from the open tab; resets the idle watchdog. Returns `{ok, timeout}` |
@@ -261,7 +266,7 @@ yield "data: {}\n\n".format(json.dumps({"msg": params["cq"]}))
 
 ## Versioning
 
-`fetchforge.__version__` in `fetchforge/__init__.py` (currently `"2.1.0"`), imported into `fetchforge/server.py` as `APP_VERSION` (`from fetchforge import __version__ as APP_VERSION`) and surfaced by `pyproject.toml`'s `dynamic = ["version"]` (`attr = "fetchforge.__version__"`) so the pip package version and the running app agree. Bump on every deploy. Displayed in the header as `v 2.1.0` with a green dot fetched from `GET /version` — confirms both HTML and server are fresh after a restart.
+`fetchforge.__version__` in `fetchforge/__init__.py` (currently `"2.2.0"`), imported into `fetchforge/server.py` as `APP_VERSION` (`from fetchforge import __version__ as APP_VERSION`) and surfaced by `pyproject.toml`'s `dynamic = ["version"]` (`attr = "fetchforge.__version__"`) so the pip package version and the running app agree. Bump on every deploy. Displayed in the header as `v 2.2.0` with a green dot fetched from `GET /version` — confirms both HTML and server are fresh after a restart.
 
 <!-- init-workspace:start -->
 ## Task tracking & work environment

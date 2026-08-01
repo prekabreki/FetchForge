@@ -52,8 +52,30 @@ Fills carry dark text (`#111`), never white — `#fff` on `--accent2` is only 3.
 - **Headings / UI:** Outfit (400–800)
 - **Numbers, labels, paths, anything instrument-like:** JetBrains Mono (400–500)
 
-Both from Google Fonts with `display=swap`. Tracking is size-specific: `-0.5px` on
-the 28px logo, `0` on body, `+1.5px` on uppercase mono micro-labels.
+**Both are self-hosted, not loaded from a CDN.** The woff2 files live in
+`fetchforge/fonts/` and are served by this process at `/fonts/<name>.woff2`; there
+is no request to `fonts.googleapis.com` or `fonts.gstatic.com` at runtime. This is
+a localhost tool and local conversion works with no network at all — on the CDN the
+UI silently fell back to system fonts offline, which this pairing cannot survive
+given the mono face carries every number, path and instrumentation label.
+`font-display: swap` is preserved on every face.
+
+Two things about the `@font-face` blocks in `index.html` are load-bearing, not
+boilerplate:
+
+- Both files are **variable** fonts whose `wght` axis on disk is wider than the UI
+  uses (Outfit 100–900, JetBrains Mono 400–800). The declared `font-weight` range
+  is what constrains them. JetBrains Mono is pinned to `400 500` on purpose: mono
+  rules that ask for 700 clamp to 500, exactly as they did against the CDN.
+  Widening that range would silently make them heavier.
+- `latin` and `latin-ext` are separate faces with `unicode-range`. Video titles and
+  Windows paths carry accented characters, so latin-ext has to exist — but it is
+  only fetched when one actually appears.
+
+Provenance, versions and OFL licences: `fetchforge/fonts/SOURCES.txt`.
+
+Tracking is size-specific: `-0.5px` on the 28px logo, `0` on body, `+1.5px` on
+uppercase mono micro-labels.
 
 **11px is the floor for any functional text**, including mono micro-labels. Body
 copy is 15px, secondary 13–14px.
