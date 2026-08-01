@@ -83,6 +83,12 @@ copy is 15px, secondary 13–14px.
 
 - **Generic SaaS dashboard.** No Inter, no system-ui, no rounded-square icon tile
   above every heading.
+- **Emoji standing in for icons.** Icons are inline SVG so they inherit
+  `currentColor` and track the type ramp. Emoji are colour glyphs from a system
+  font: they ignore `color`, so they cannot be tinted to match state, and they
+  render and align differently per platform. The current file still violates this
+  (`➕ 📄 📁 🎬 🎵 ✕ ▶`) — tracked in #54, and the rule is recorded here so the
+  violation reads as debt rather than as intent.
 - **The "AI product" gradient.** No purple-to-blue, no teal-to-purple. A retired
   violet palette left real traces here (an amber dot glowing violet, a converting
   bar that ramped through `#6c4ce0`); those are fixed, and new ones are bugs.
