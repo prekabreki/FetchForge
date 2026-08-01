@@ -14,6 +14,18 @@ PRIORITIES = ["P0", "P1", "P2", "P3", "P4", "P?"]
 TYPE_LABELS = {"bug", "task", "chore", "epic", "feature"}
 
 
+def run(cmd):
+    """subprocess.run for `gh`, decoded as UTF-8.
+
+    Windows python decodes child output with the locale codec (cp1252), which
+    dies on any issue title/body containing an em dash or emoji: the reader
+    thread raises, stdout comes back None, and the caller silently sees no
+    issues. gh always emits UTF-8, so say so.
+    """
+    return subprocess.run(cmd, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace")
+
+
 def priority_label(issue):
     for lab in issue.get("labels", []):
         if re.match(r"^P[0-4]$", lab.get("name", "")):
@@ -80,26 +92,35 @@ def main(argv=None):
     ap.add_argument("--repo")
     ap.add_argument("--limit", type=int, default=200)
     args = ap.parse_args(argv)
+    # Titles carry em dashes and emoji; a cp1252 stdout would raise on the way out
+    # (the mirror image of the decode bug `run` fixes) when this runs under a pipe.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     gh = _gh()
 
     repo = args.repo
     if not repo:
-        r = subprocess.run([gh, "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
-                           capture_output=True, text=True)
-        repo = r.stdout.strip()
+        r = run([gh, "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"])
+        repo = (r.stdout or "").strip()
         if r.returncode != 0 or not repo:
             print("Could not determine the GitHub repo. Run inside a repo with a GitHub remote, "
                   "or pass --repo owner/name.", file=sys.stderr)
             return 1
 
-    r = subprocess.run([gh, "issue", "list", "--repo", repo, "--state", "open",
-                        "--limit", str(args.limit), "--json", "number,title,assignees,labels,body"],
-                       capture_output=True, text=True)
+    r = run([gh, "issue", "list", "--repo", repo, "--state", "open",
+             "--limit", str(args.limit), "--json", "number,title,assignees,labels,body"])
     if r.returncode != 0:
-        print(f"gh issue list failed (exit {r.returncode}): {r.stderr.strip()}", file=sys.stderr)
+        print(f"gh issue list failed (exit {r.returncode}): {(r.stderr or '').strip()}", file=sys.stderr)
+        return 1
+    if not (r.stdout or "").strip():
+        # Never fall back to "[]" here: an empty payload from an exit-0 gh means
+        # something ate the output, and printing "No ready issues" would be a
+        # false all-clear.
+        print("gh issue list returned no output — cannot tell ready work from none.",
+              file=sys.stderr)
         return 1
 
-    issues = json.loads(r.stdout or "[]")
+    issues = json.loads(r.stdout)
     print(format_output(filter_ready(issues)))
     return 0
 
