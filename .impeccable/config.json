@@ -1,0 +1,80 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "dark-glow",
+        "value": "*",
+        "files": [
+          "fetchforge/index.html"
+        ],
+        "createdAt": "2026-08-01T17:10:48.683Z",
+        "reason": "Deliberate and load-bearing: the coloured glows ARE the phase-signalling system on this dark surface (downloading / converting / done / error). Each now matches the colour of the element it lights; the previous mismatches (an amber dot glowing violet) were the real bug and are fixed."
+      },
+      {
+        "rule": "layout-transition",
+        "value": "*",
+        "files": [
+          "fetchforge/index.html"
+        ],
+        "createdAt": "2026-08-01T17:10:49.798Z",
+        "reason": "Progress bars transition on width. transform:scaleX would stretch the gradient fill and detach the 1:1 reference tick in the size tracker. The bars are 6-8px tall, so the layout cost is negligible and the honest property is the right one."
+      },
+      {
+        "rule": "broken-image",
+        "value": "*",
+        "files": [
+          "fetchforge/index.html"
+        ],
+        "createdAt": "2026-08-01T17:10:50.807Z",
+        "reason": "Both <img> elements are populated by JS after a fetch and are display:none until then. src=\"\" was the genuine defect (it resolves to the page URL and paints a broken-image glyph) and is fixed; omitting the attribute is the correct empty state."
+      },
+      {
+        "rule": "tiny-text",
+        "value": "*",
+        "files": [
+          "fetchforge/index.html"
+        ],
+        "createdAt": "2026-08-01T17:10:51.843Z",
+        "reason": "11px is this tool's agreed floor for monospace instrumentation labels, raised from 9-10px in this pass. Body copy is 15px."
+      },
+      {
+        "rule": "wide-tracking",
+        "value": "*",
+        "files": [
+          "fetchforge/index.html"
+        ],
+        "createdAt": "2026-08-01T17:10:52.956Z",
+        "reason": "0.14em is applied only to short uppercase monospace labels, which the rule text itself permits. Body copy tracks at 0."
+      },
+      {
+        "rule": "marquee",
+        "value": "*",
+        "files": [
+          "fetchforge/index.html"
+        ],
+        "createdAt": "2026-08-01T17:10:54.123Z",
+        "reason": "The only match is the indeterminate progress bar, where a looping animation is the message (working, duration unknown) rather than decoration. Under prefers-reduced-motion it becomes an opacity breathe so the signal survives without travel."
+      },
+      {
+        "rule": "gpt-thin-border-wide-shadow",
+        "value": "*",
+        "files": [
+          "fetchforge/index.html"
+        ],
+        "createdAt": "2026-08-01T17:10:55.128Z",
+        "reason": "Outline buttons pair a 1px border with a hover elevation shadow. The shadow exists only on hover and only for fine pointers, so the two never read as a single resting treatment."
+      },
+      {
+        "rule": "em-dash-overuse",
+        "value": "*",
+        "files": [
+          "fetchforge/index.html"
+        ],
+        "createdAt": "2026-08-01T17:10:56.123Z",
+        "reason": "Label-then-explanation is the consistent, deliberate pattern for this tool's checkbox and preset descriptions, not prose cadence."
+      }
+    ]
+  }
+}
