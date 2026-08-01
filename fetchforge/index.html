@@ -81,7 +81,11 @@
     border: 2px solid var(--border2);
     flex-shrink: 0;
     object-fit: cover;
+    /* Fixed box, so nothing shifts — the fade only removes the snap-in. */
+    opacity: 0;
+    transition: opacity 200ms var(--ease-out);
   }
+  .channel-logo.img-loaded { opacity: 1; }
 
   .logo {
     font-family: var(--sans);
@@ -356,7 +360,12 @@
     padding-top: 18px;
     border-top: 1px solid var(--border);
   }
-  .video-info.visible { display: flex; }
+  /* After a 1-3s fetch this block lands all at once — thumbnail, title, two
+     format dropdowns and up to 50 playlist rows — and shoves the page down.
+     Same fadeUp idiom as .failure-panel so the arrival reads as an arrival.
+     fetchInfo() restarts it explicitly on a second fetch (see the comment
+     there): the class is already on by then, so CSS alone would not replay. */
+  .video-info.visible { display: flex; animation: fadeUp 0.3s var(--ease-out) both; }
 
   .thumb {
     width: 190px;
@@ -366,8 +375,12 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
     box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-    transition: transform 0.2s var(--ease-out);
+    /* Space is already reserved by aspect-ratio, so the only thing to fix is
+       the pop: hold at 0 until the bytes arrive, then fade. */
+    opacity: 0;
+    transition: transform 0.2s var(--ease-out), opacity 200ms var(--ease-out);
   }
+  .thumb.img-loaded { opacity: 1; }
 
   .video-meta { flex: 1; min-width: 0; }
 
@@ -433,13 +446,17 @@
     padding: 14px 16px;
     cursor: pointer;
     transition: border-color 0.2s ease, background-color 0.2s ease,
-                box-shadow 0.2s ease, transform 0.2s var(--ease-out);
+                box-shadow 0.2s ease, transform 120ms var(--ease-out);
     display: block;
     position: relative;
     border-radius: var(--radius-sm);
   }
 
   .preset-card:hover { border-color: var(--border2); }
+  /* Same press acknowledgement .btn already has. Cards take 0.98; the
+     full-width rows below take 0.995, because the same ratio on a 900px row
+     reads as a lurch rather than a press. */
+  .preset-card:active { transform: scale(0.98); }
   .preset-card.selected { border-color: var(--accent); background: rgba(232,160,35,0.06); box-shadow: 0 0 0 1px var(--accent); }
   .preset-card input[type="radio"] { position: absolute; opacity: 0; width: 0; height: 0; }
 
@@ -494,6 +511,42 @@
     margin-bottom: 12px;
   }
 
+  /* The five encode controls (#51). The layout decision lives here once, not as
+     an inline grid-template-columns on the instance: three columns at full width
+     (CQ / bitrate / speed, then tune / pixel format / reset), two when the card
+     narrows, one on a phone so the panel never scrolls sideways. */
+  .adv-grid-encode { grid-template-columns: repeat(3, 1fr); }
+  @media (max-width: 760px) { .adv-grid-encode { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 520px) { .adv-grid-encode { grid-template-columns: 1fr; } }
+
+  /* Persistent hint under every control, stating range / default / consequence.
+     Deliberately not title=: a tooltip is invisible to the keyboard and to
+     touch, and on this surface the numbers are the point. 11px is the
+     documented functional-text floor; --muted on --surface2 is 4.6:1. */
+  .field-hint {
+    font-family: var(--mono);
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--muted);
+  }
+  /* Same line raised to a warning. --accent2 on --surface2 measures only 4.34:1,
+     so the warning is recessed onto --bg instead, where the same token reads at
+     5.35:1 — the token stays, the contrast floor holds, and no waiver is spent.
+     A tinted line with a rule down its edge, not a nested card. */
+  .field-warn {
+    font-family: var(--mono);
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--accent2);
+    background: var(--bg);
+    border-left: 2px solid var(--accent2);
+    padding: 6px 8px;
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  }
+  /* The reset control shares a grid cell with the fields, so it hugs its own
+     width instead of stretching to the column. */
+  .adv-reset-btn { align-self: start; }
+
   .adv-note { font-size: 13px; color: var(--muted); margin-bottom: 14px; }
 
   /* Toggle */
@@ -524,7 +577,9 @@
 
   /* Progress */
   .progress-section { display: none; margin-bottom: 16px; }
-  .progress-section.visible { display: block; }
+  /* Revealed once per page load, when Start is pressed — .visible is never
+     removed again, so this deliberately plays a single time. */
+  .progress-section.visible { display: block; animation: fadeUp 0.25s var(--ease-out) both; }
 
   /* Charts */
   .chart-panel {
@@ -722,7 +777,11 @@
     font-size: 12px;
     color: var(--text2);
   }
-  .size-tracker.visible { display: block; }
+  /* The one reveal the user did not ask for: it appears mid-encode and pushes
+     the log box down while they are reading numbers. resetSizeTracker() drops
+     .visible between videos, which takes the animation (and its `both` fill)
+     with it — so nothing is stranded visible, and it replays per video. */
+  .size-tracker.visible { display: block; animation: fadeUp 0.25s var(--ease-out) both; }
   .size-tracker-header {
     display: flex;
     justify-content: space-between;
@@ -869,10 +928,21 @@
     padding: 8px 12px;
     border-bottom: 1px solid var(--border);
     cursor: pointer;
-    transition: background 0.1s;
+    transition: background-color 0.1s ease, transform 120ms var(--ease-out);
   }
   .history-item:last-child { border-bottom: none; }
   .history-item:hover { background: rgba(232,160,35,0.05); }
+  .history-item:active { transform: scale(0.995); }
+
+  /* The span-shaped buttons (select all / invert / dismiss / "use this") get
+     the same press acknowledgement as .btn. .hold-confirm is excluded on
+     purpose: those two spans already report the press through their fill, and
+     a competing scale would read as a second, contradictory signal. */
+  span[role="button"]:not(.hold-confirm) {
+    display: inline-block;
+    transition: transform 120ms var(--ease-out);
+  }
+  span[role="button"]:not(.hold-confirm):active { transform: scale(0.98); }
 
   .history-thumb {
     width: 56px;
@@ -918,7 +988,17 @@
     justify-content: center;
     background: rgba(10,11,15,0.82);
     backdrop-filter: blur(3px);
-    animation: fadeUp 0.25s ease both;
+    animation: fadeUp 0.25s var(--ease-out) both;
+  }
+  /* Exit along the entry path, but faster out (180ms) than in (250ms): the
+     user has decided, the system is only acknowledging. `animation: none` is
+     required — the entry animation's `both` fill would otherwise pin opacity
+     and transform and the transition would never move. */
+  .shutdown-overlay.closing {
+    animation: none;
+    opacity: 0;
+    transform: translateY(8px);
+    transition: opacity 180ms var(--ease-out), transform 180ms var(--ease-out);
   }
   .shutdown-overlay-card {
     background: var(--surface);
@@ -1116,7 +1196,10 @@
     .btn:hover, .btn-primary:hover, .btn-success:hover,
     .btn-danger:hover, .btn-outline:hover,
     .preset-card:hover, .thumb:hover,
-    .btn:active:not(:disabled) { transform: none; }
+    .btn:active:not(:disabled),
+    .preset-card:active, .history-item:active,
+    span[role="button"]:not(.hold-confirm):active,
+    .shutdown-overlay.closing { transform: none; }
 
     /* stagger exists only to sequence movement */
     .card, .encode-pill { animation-delay: 0s !important; }
@@ -1368,10 +1451,10 @@
         </div>
 
         <div class="advanced-section" id="advanced-section">
-          <div class="adv-grid" style="grid-template-columns: 1fr 1fr;">
+          <div class="adv-grid adv-grid-encode">
             <div class="field">
-              <div class="field-label">Quality (CQ) — 0 = Auto</div>
-              <select id="cq-select">
+              <label class="field-label" for="cq-select">Quality (CQ)</label>
+              <select id="cq-select" aria-describedby="cq-hint">
                 <option value="0" selected>0 — Auto (recommended)</option>
                 <option value="18">18 — Near-lossless</option>
                 <option value="20">20 — High quality</option>
@@ -1383,10 +1466,11 @@
                 <option value="32">32 — Compact</option>
                 <option value="34">34 — Smallest</option>
               </select>
+              <div class="field-hint" id="cq-hint">0 = auto. 16–34. Lower = better quality, larger file.</div>
             </div>
             <div class="field">
-              <div class="field-label">Max Bitrate Ceiling (optional)</div>
-              <select id="maxrate">
+              <label class="field-label" for="maxrate">Max bitrate</label>
+              <select id="maxrate" aria-describedby="maxrate-hint">
                 <option value="" selected>Auto (from source)</option>
                 <option value="4M">4 Mbps</option>
                 <option value="6M">6 Mbps</option>
@@ -1397,10 +1481,54 @@
                 <option value="20M">20 Mbps</option>
                 <option value="25M">25 Mbps</option>
               </select>
+              <div class="field-hint" id="maxrate-hint">Auto = derived from source. Clamped to 20M at 4K, 12M at 1440p, 7M at 1080p.</div>
+            </div>
+            <!-- "Encoder speed", never "preset": the cards above are already
+                 called presets and mean something unrelated (#51). The form
+                 field is still `preset`, which is what NVENC calls p1–p7. -->
+            <div class="field">
+              <label class="field-label" for="enc-speed-select">Encoder speed (p1–p7)</label>
+              <select id="enc-speed-select" aria-describedby="enc-speed-hint">
+                <option value="" selected>Auto (from source)</option>
+                <option value="p1">p1 — fastest</option>
+                <option value="p2">p2</option>
+                <option value="p3">p3</option>
+                <option value="p4">p4</option>
+                <option value="p5">p5</option>
+                <option value="p6">p6</option>
+                <option value="p7">p7 — slowest, best</option>
+              </select>
+              <div class="field-hint" id="enc-speed-hint">Auto = p2/p3/p4 by resolution and fps. p1 fastest, p7 slowest and best.</div>
+            </div>
+            <div class="field">
+              <label class="field-label" for="tune-select">Tune</label>
+              <select id="tune-select" aria-describedby="tune-hint">
+                <option value="" selected>Auto (follows preset card)</option>
+                <option value="uhq">uhq — archival</option>
+                <option value="hq">hq — faster</option>
+              </select>
+              <div class="field-hint" id="tune-hint">Auto follows the preset card. uhq = archival quality; hq = 4–6× faster.</div>
+              <div class="field-warn" id="tune-unsupported" role="status" hidden></div>
+            </div>
+            <div class="field">
+              <label class="field-label" for="pixfmt-select">Pixel format</label>
+              <select id="pixfmt-select" aria-describedby="pixfmt-hint" onchange="updateHdrPixFmtWarning()">
+                <option value="" selected>Auto (from source)</option>
+                <option value="yuv420p">8-bit — yuv420p</option>
+                <option value="yuv420p10le">10-bit — yuv420p10le</option>
+              </select>
+              <div class="field-hint" id="pixfmt-hint">Auto = 10-bit for HDR or 10-bit sources, else 8-bit.</div>
+              <div class="field-warn" id="pixfmt-hdr-warn" role="status" hidden>Source is HDR. HDR metadata is passthrough only, so forced 8-bit will look wrong. Still permitted.</div>
+            </div>
+            <div class="field">
+              <span class="field-label">Overrides</span>
+              <button type="button" class="btn btn-outline btn-sm adv-reset-btn" id="adv-reset-btn"
+                      aria-describedby="adv-reset-hint" onclick="resetAdvancedToAuto()">Reset to auto</button>
+              <div class="field-hint" id="adv-reset-hint">Returns all five controls above to Auto in one action.</div>
             </div>
           </div>
           <div class="adv-note">
-            CQ controls perceptual quality (lower = better, larger file). NVENC preset (p2/p4) and 10-bit output are chosen automatically from source analysis. Set a max bitrate ceiling to hard-cap output size on high-bitrate sources.
+            Every control here defaults to Auto, derived from source analysis. Anything you set overrides that for the whole job. The server clamps out-of-range values to what NVENC will accept and logs whatever it actually applied, so a rejected or clamped override is never silent.
           </div>
         </div>
 
@@ -1959,6 +2087,10 @@ function autoSelectPreset() {
     setSelectVal('cq-select', '0');
     setSelectVal('maxrate', '');
   }
+  // Unconditional, and outside the card guard: a stale encoder-speed / tune /
+  // pixel-format override left behind by a previous video is invisible in the
+  // UI but changes every encode that follows it (#51).
+  resetEncodeOverridesToAuto();
   autoSelectAudioPreset();
 }
 
@@ -1981,7 +2113,110 @@ function selectPreset(el, cq, maxrate, tuneMode) {
   currentTuneMode = tuneMode || 'uhq';
   setSelectVal('cq-select', cq);
   setSelectVal('maxrate', maxrate);
+  // Picking a preset card is the user saying "use the card's settings". Leaving
+  // one of the other three on a manual value would encode against the card the
+  // UI is now showing as selected (#51).
+  resetEncodeOverridesToAuto();
 }
+
+// ---- ADVANCED ENCODE OVERRIDES (#51) ----
+// The three selects below map 1:1 onto the `preset` / `tune` / `pix_fmt` form
+// fields #50 added. "" means auto everywhere — client, wire and server — so a
+// panel left alone sends exactly what it sent before this existed.
+// The server is the gate: validate_encode_overrides() coerces, clamps and
+// falls back. Nothing here re-implements that; the hints restate its rules and
+// the option lists offer only values it accepts.
+const ADV_OVERRIDE_SELECTS = ['enc-speed-select', 'tune-select', 'pixfmt-select'];
+
+function resetEncodeOverridesToAuto() {
+  ADV_OVERRIDE_SELECTS.forEach(id => setSelectVal(id, ''));
+  updateHdrPixFmtWarning();
+}
+
+// The "Reset to auto" control: all five, one action.
+function resetAdvancedToAuto() {
+  setSelectVal('cq-select', '0');
+  setSelectVal('maxrate', '');
+  resetEncodeOverridesToAuto();
+}
+
+// One place builds the three fields for all three request shapes (single
+// download, batch download, local convert), so they cannot drift apart.
+function appendEncodeOverrides(form, opts) {
+  form.append('preset', opts.preset || '');
+  form.append('tune', opts.tune || '');
+  form.append('pix_fmt', opts.pixFmt || '');
+}
+
+// HDR is read off the *currently selected* video format, and the option list is
+// rebuilt by every resolve, so this can never report a previous video's source.
+function isHdrFormat(f) {
+  const note = ((f.note || '') + ' ' + (f.label || '')).toLowerCase();
+  const vcodec = (f.vcodec || '').toLowerCase();
+  // yt-dlp labels HDR formats in format_note ("2160p60 HDR"); vp9 profile 2 and
+  // 10-bit AV1 are the HDR-capable YouTube codecs.
+  return /\bhdr\b|hlg|pq\b/.test(note)
+      || vcodec.startsWith('vp9.2')
+      || /^av01\.[^.]+\.[^.]+\.10/.test(vcodec);
+}
+
+function selectedSourceIsHdr() {
+  if (currentMode === 'audio') return false;
+  const sel = document.getElementById('video-format');
+  const opt = sel && sel.selectedOptions[0];
+  return !!(opt && opt.dataset.hdr === '1');
+}
+
+// Forcing 8-bit out of an HDR source stays permitted — it is a real choice —
+// but HDR metadata is passthrough only, so the result will look wrong.
+function updateHdrPixFmtWarning() {
+  const warn = document.getElementById('pixfmt-hdr-warn');
+  const sel = document.getElementById('pixfmt-select');
+  if (!warn || !sel) return;
+  warn.hidden = !(sel.value === 'yuv420p' && selectedSourceIsHdr());
+}
+
+// The capability report is built once at startup and served from a cache, so
+// the two consumers below (the header warning banner and the tune control)
+// share a single in-flight read rather than each fetching it on load. A
+// rejected read stays rejected on purpose: both callers degrade to "leave it
+// alone", which is the right answer for a diagnostic that could not be taken.
+let _capabilitiesPromise = null;
+function getCapabilities() {
+  if (!_capabilitiesPromise) {
+    _capabilitiesPromise = fetch(`${API}/capabilities`).then(r => r.json());
+  }
+  return _capabilitiesPromise;
+}
+
+// uhq availability comes from the startup NVENC probe via GET /capabilities
+// (#47) — never re-probed, never hardcoded. When the probe says no, the option
+// is disabled with the server's own remedy shown, rather than being silently
+// accepted and downgraded during the encode.
+async function applyTuneCapability() {
+  const sel = document.getElementById('tune-select');
+  const opt = sel && sel.querySelector('option[value="uhq"]');
+  const why = document.getElementById('tune-unsupported');
+  if (!opt || !why) return;
+  let d;
+  try {
+    d = await getCapabilities();
+  } catch {
+    return;   // a capability read must never disable a control it could not check
+  }
+  const cap = (d.capabilities || []).find(c => c.key === 'nvenc_uhq_tune');
+  if (!cap || cap.ok) return;
+  opt.disabled = true;
+  opt.textContent = 'uhq — unavailable on this ffmpeg';
+  if (sel.value === 'uhq') sel.value = '';
+  why.textContent = 'uhq unavailable: ' + (cap.remedy || cap.impact || 'the startup NVENC probe rejected it.');
+  why.hidden = false;
+}
+
+applyTuneCapability();
+// Switching to an HDR format with 8-bit already forced has to raise the warning
+// too, so it tracks the format selection, not just the pixel-format selection.
+document.getElementById('video-format')?.addEventListener('change', updateHdrPixFmtWarning);
 
 function selectAudioPreset(el, preset) {
   document.querySelectorAll('#audio-presets .preset-card').forEach(c => c.classList.remove('selected'));
@@ -2252,10 +2487,32 @@ async function clearHistory() {
   }
 }
 
+// Both <img>s are populated after a fetch and sized by CSS, so there is no
+// layout shift to fix — only the snap. `.img-loaded` drives a 200ms opacity
+// transition; a cached image is already complete by the time onload could be
+// attached, so that case is handled explicitly rather than left to fire never.
+function _fadeInOnLoad(img) {
+  const reveal = () => {
+    // A transition cannot start from a box that was never rendered, and the
+    // channel logo is display:none until it loads. Un-hide it, let one frame
+    // commit that, and only then flip opacity — otherwise the two changes
+    // coalesce and it snaps in exactly as it did before. The thumbnail is
+    // already on screen by this point, so it fades straight away.
+    const wasUnrendered = img.getClientRects().length === 0;
+    img.style.display = '';
+    if (!wasUnrendered) { img.classList.add('img-loaded'); return; }
+    requestAnimationFrame(() => requestAnimationFrame(() => img.classList.add('img-loaded')));
+  };
+  // A memory-cached image can already be complete by the time we get here, in
+  // which case onload will never fire again — reveal it directly.
+  if (img.complete && img.naturalWidth > 0) { reveal(); return; }
+  img.onload = reveal;
+}
+
 function loadChannelLogo() {
   const img = document.getElementById('channel-logo');
   img.src = 'https://yt3.googleusercontent.com/wgn0tWnbhuvuDVMJZ-LBzOZpL0YwLVhwAVKIeWSwv9IpB91IvStBUQg_HSWg8sLWpqsYp7sa=s176-c-k-c0x00ffffff-no-rj';
-  img.onload = () => { img.style.display = ''; };
+  _fadeInOnLoad(img);
 }
 
 async function fetchVersion() {
@@ -2291,8 +2548,7 @@ async function fetchCapabilities() {
   if (!box) return;
   let d;
   try {
-    const r = await fetch(`${API}/capabilities`);
-    d = await r.json();
+    d = await getCapabilities();
   } catch {
     return;   // a diagnostic must never break the page it is diagnosing
   }
@@ -2575,11 +2831,13 @@ async function fetchInfo() {
     if (info.thumbnail) {
       thumbEl.src = info.thumbnail;
       thumbEl.style.display = '';
+      _fadeInOnLoad(thumbEl);
     } else {
       // Never leave src="" — an empty src resolves to the page URL, which fires
       // a pointless request and paints a broken-image glyph.
       thumbEl.removeAttribute('src');
       thumbEl.style.display = 'none';
+      thumbEl.classList.remove('img-loaded');   // so the next real thumbnail fades
     }
     document.getElementById('video-title').textContent = info.is_playlist
       ? 'Playlist: ' + info.title + ' (' + info.count + ' videos)'
@@ -2597,6 +2855,7 @@ async function fetchInfo() {
       const o = document.createElement('option');
       o.value = f.id; o.textContent = `[${f.id}] ${f.label}`;
       o.dataset.filesize = f.filesize || 0;
+      o.dataset.hdr = isHdrFormat(f) ? '1' : '';   // #51 — drives the 8-bit warning
       vSel.appendChild(o);
     });
     const aSel = document.getElementById('audio-format');
@@ -2619,7 +2878,15 @@ async function fetchInfo() {
       _playlistEntries = [];
       document.getElementById('playlist-select').style.display = 'none';
     }
-    document.getElementById('video-info').classList.add('visible');
+    // A CSS animation does not replay when its class is already present, and by
+    // the second Fetch Info it always is. The block's whole contents have just
+    // been rewritten after another 1-3s wait, so it should read as an arrival
+    // again: clear the animation, force a style flush, let the class re-apply it.
+    const infoEl = document.getElementById('video-info');
+    infoEl.style.animation = 'none';
+    void infoEl.offsetWidth;            // flush — without this the two writes coalesce
+    infoEl.style.animation = '';
+    infoEl.classList.add('visible');
     document.getElementById('queue-add-btn').style.display = '';
     autoSelectPreset();
     log('Loaded: ' + info.title, 'info');
@@ -2650,6 +2917,7 @@ async function runOneItem(item, opts) {
     form.append('files', JSON.stringify([item.path]));
     form.append('cq', opts.cq);
     form.append('maxrate', opts.maxrate);
+    appendEncodeOverrides(form, opts);
     form.append('shutdown', 'false');
     form.append('output_dir', opts.outputDir);
     form.append('tune_mode', opts.tuneMode);
@@ -2666,6 +2934,7 @@ async function runOneItem(item, opts) {
     form.append('convert', opts.convert);
     form.append('cq', opts.cq);
     form.append('maxrate', opts.maxrate);
+    appendEncodeOverrides(form, opts);
     form.append('pipeline', opts.pipeline);
     form.append('delete_cache', opts.deleteCacheVal);
     form.append('shutdown', 'false');
@@ -2750,6 +3019,7 @@ async function runBatch(items, opts) {
   form.append('convert', opts.convert);
   form.append('cq', opts.cq);
   form.append('maxrate', opts.maxrate);
+  appendEncodeOverrides(form, opts);
   form.append('pipeline', 'true');
   form.append('delete_cache', opts.deleteCacheVal);
   form.append('shutdown', 'false');
@@ -2846,6 +3116,10 @@ async function startDownload() {
   const opts = {
     cq: document.getElementById('cq-select').value,
     maxrate: document.getElementById('maxrate').value,
+    // #51 — "" for all three means auto, which is what an untouched panel sends.
+    preset: document.getElementById('enc-speed-select').value,
+    tune: document.getElementById('tune-select').value,
+    pixFmt: document.getElementById('pixfmt-select').value,
     convert: document.getElementById('convert-toggle').checked ? 'true' : 'false',
     pipeline: document.getElementById('pipeline-check').checked ? 'true' : 'false',
     deleteCacheVal: document.getElementById('delete-cache-check').checked ? 'true' : 'false',
@@ -3059,10 +3333,43 @@ function runShutdownCountdown(seconds) {
       const m = Math.floor(s / 60);
       return m + ':' + String(s % 60).padStart(2, '0');
     }
+    // Exit along the entry path (see .shutdown-overlay.closing), 180ms.
+    //
+    // transitionend alone is not safe here and this is the one place in the
+    // file where that really bites: a full-screen overlay that never leaves
+    // blocks the whole UI at the exact moment the PC is about to power off.
+    // The event can simply not arrive — a zero-length transition, a detached
+    // element, a dropped event — so a timer removes the node unconditionally
+    // and whichever path arrives first wins. `removed` makes the removal
+    // idempotent; `closing` makes a second teardown() a no-op.
+    const EXIT_MS = 180;
     function teardown() {
       if (timer) { clearInterval(timer); timer = null; }
       const el = document.getElementById('shutdown-overlay');
-      if (el && el.parentNode) el.parentNode.removeChild(el);
+      if (!el || !el.parentNode) return;
+      if (el.classList.contains('closing')) return;
+
+      let removed = false;
+      let fallback = null;
+      function remove() {
+        if (removed) return;
+        removed = true;
+        if (fallback !== null) { clearTimeout(fallback); fallback = null; }
+        el.removeEventListener('transitionend', onEnd);
+        if (el.parentNode) el.parentNode.removeChild(el);
+      }
+      function onEnd(e) { if (e.target === el) remove(); }
+
+      el.addEventListener('transitionend', onEnd);
+      fallback = setTimeout(remove, EXIT_MS + 80);
+      // Two steps, not one. A CSS animation wins over a transition on the same
+      // property, and the entry fadeUp's `both` fill is still applying opacity
+      // and transform — dropping it in the same style change as .closing makes
+      // the exit snap instead of animate. So: drop the animation, flush, then
+      // apply the closing state so the transition has a "before" to run from.
+      el.style.animation = 'none';
+      void el.offsetWidth;
+      el.classList.add('closing');
     }
 
     countEl.textContent = fmt(remaining);
