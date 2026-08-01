@@ -38,6 +38,13 @@ cd fetchforge
 ./launch.sh        # Windows: launch.bat
 ```
 
+> On Windows, `launch.bat` creates the `.venv` with whatever `python` resolves to
+> on `PATH` (or `%PYTHON%` if you set it). If that interpreter is the Microsoft
+> Store build of Python, the venv inherits its `%LOCALAPPDATA%` filesystem
+> virtualization — relevant because the NVENC-ffmpeg auto-provision cache also
+> lives under `%LOCALAPPDATA%\FetchForge\ffmpeg`. Prefer a python.org install
+> (or set `PYTHON` to one) if you hit path-resolution oddities.
+
 > The **Update yt-dlp** button adapts to how yt-dlp was installed: it runs
 > `pip install -U "yt-dlp[default]"` when yt-dlp lives in the app's own
 > environment (the normal pip/venv install), self-updates the bundled
