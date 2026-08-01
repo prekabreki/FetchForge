@@ -19,12 +19,23 @@
     --accent3: #4dd0a0;
     --accent4: #64b5f6;
     --text: #e8e4df;
-    --text2: #8a8696;
-    --muted: #5e5b6a;
+    /* Neutral ramp is contrast-checked against every surface it lands on.
+       Worst case is --surface2 (#22262f): text 12.0:1, text2 6.0:1, muted 4.6:1.
+       Do not darken these without re-running the ratios. */
+    --text2: #a5a0b2;
+    --muted: #8e8b9b;
     --mono: 'JetBrains Mono', monospace;
     --sans: 'Outfit', sans-serif;
     --radius: 10px;
     --radius-sm: 7px;
+
+    /* Motion: built-in CSS easings are too weak to read as intentional. */
+    --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+    --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+
+    /* Explicit stacking scale — no ad-hoc z-index values. */
+    --z-sticky: 30;
+    --z-overlay: 50;
   }
 
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -53,7 +64,7 @@
     margin-bottom: 32px;
     padding-bottom: 20px;
     border-bottom: 1px solid var(--border);
-    animation: fadeUp 0.4s ease both;
+    animation: fadeUp 0.4s var(--ease-out) both;
   }
 
   .header-brand {
@@ -92,7 +103,7 @@
     line-height: 1.6;
     margin-top: -12px;
     margin-bottom: 28px;
-    max-width: 680px;
+    max-width: 68ch;
   }
   .hero-blurb strong { color: var(--text); font-weight: 600; }
 
@@ -120,16 +131,16 @@
     border-color: var(--border2);
   }
 
+  /* Static, not pulsing: this dot reports a fact ("server answered /version"),
+     it is not live-changing data, so animating it forever is decoration. The
+     colour plus the adjacent version string already carry the state. */
   .dot {
     width: 7px; height: 7px;
     border-radius: 50%;
     background: var(--accent3);
     box-shadow: 0 0 6px rgba(77,208,160,0.5);
-    animation: pulse 2.5s infinite;
   }
-  .dot.warn { background: var(--accent2); box-shadow: 0 0 6px rgba(239,83,80,0.5); animation: none; }
-
-  @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:0.3;} }
+  .dot.warn { background: var(--accent2); box-shadow: 0 0 6px rgba(239,83,80,0.5); }
 
   .card {
     background: var(--surface);
@@ -137,7 +148,7 @@
     border-radius: var(--radius);
     margin-bottom: 14px;
     transition: border-color 0.2s ease;
-    animation: fadeUp 0.4s ease both;
+    animation: fadeUp 0.4s var(--ease-out) both;
   }
 
   .card:nth-child(2) { animation-delay: 0.03s; }
@@ -217,7 +228,9 @@
     cursor: pointer;
     padding: 11px 22px;
     border-radius: var(--radius-sm);
-    transition: all 0.15s ease;
+    transition: background-color 0.15s ease, border-color 0.15s ease,
+                color 0.15s ease, box-shadow 0.15s ease,
+                transform 0.15s var(--ease-out);
     white-space: nowrap;
     position: relative;
     overflow: hidden;
@@ -225,17 +238,36 @@
 
   .btn::after { display: none; }
 
+  /* Dark-on-colour throughout: #fff on --accent2 is only 3.5:1, #111 is 5.4:1
+     and matches how the primary/success buttons already treat their fills. */
   .btn-primary { background: var(--accent); color: #111; }
-  .btn-primary:hover { background: #f0b429; transform: translateY(-1px); box-shadow: 0 4px 16px rgba(232,160,35,0.25); }
+  .btn-primary:hover { background: #f0b429; }
   .btn-success { background: var(--accent3); color: #111; }
-  .btn-success:hover { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(77,208,160,0.25); }
-  .btn-danger { background: var(--accent2); color: #fff; }
-  .btn-danger:hover { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(239,83,80,0.25); }
+  .btn-danger { background: var(--accent2); color: #111; }
   .btn-outline { background: transparent; color: var(--text2); border: 1px solid var(--border2); }
-  .btn-outline:hover { border-color: var(--accent); color: var(--accent); transform: translateY(-1px); }
+  .btn-outline:hover { border-color: var(--accent); color: var(--accent); }
   .btn:disabled { opacity: 0.3; cursor: not-allowed; transform: none !important; box-shadow: none !important; }
   .btn-sm { padding: 7px 14px; font-size: 11px; }
-  .btn:active:not(:disabled) { transform: translateY(0px) scale(0.98); }
+  .btn:active:not(:disabled) { transform: scale(0.98); }
+
+  /* Hover *motion* only where there is a real pointer — touch fires hover on
+     tap, so an ungated lift sticks after the finger lifts. */
+  @media (hover: hover) and (pointer: fine) {
+    .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(232,160,35,0.25); }
+    .btn-success:hover { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(77,208,160,0.25); }
+    .btn-danger:hover  { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(239,83,80,0.25); }
+    .btn-outline:hover { transform: translateY(-1px); }
+    .preset-card:hover { transform: translateY(-1px); }
+    .thumb:hover { transform: scale(1.03); }
+  }
+
+  /* Every focusable control gets one visible ring. The inputs below replace the
+     UA outline with their own; everything else uses this. */
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 3px;
+  }
 
   .cookies-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
 
@@ -253,7 +285,11 @@
     padding: 10px 12px;
     resize: vertical;
   }
-  .cookies-paste-row textarea:focus { outline: none; border-color: var(--accent); }
+  .cookies-paste-row textarea:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(232,160,35,0.15);
+  }
   .cookies-paste-actions { display: flex; align-items: center; gap: 12px; margin-top: 8px; flex-wrap: wrap; }
   .cookies-paste-hint { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
 
@@ -283,9 +319,8 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
     box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-    transition: transform 0.2s ease;
+    transition: transform 0.2s var(--ease-out);
   }
-  .thumb:hover { transform: scale(1.03); }
 
   .video-meta { flex: 1; min-width: 0; }
 
@@ -311,7 +346,7 @@
 
   .field-label {
     font-family: var(--mono);
-    font-size: 10px;
+    font-size: 11px;
     letter-spacing: 1.5px;
     color: var(--muted);
     text-transform: uppercase;
@@ -328,7 +363,7 @@
     outline: none;
     cursor: pointer;
     appearance: none;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%235e5b6a'/%3E%3C/svg%3E");
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%238e8b9b'/%3E%3C/svg%3E");
     background-repeat: no-repeat;
     background-position: right 10px center;
     width: 100%;
@@ -350,13 +385,14 @@
     border: 1px solid var(--border);
     padding: 14px 16px;
     cursor: pointer;
-    transition: all 0.2s ease;
+    transition: border-color 0.2s ease, background-color 0.2s ease,
+                box-shadow 0.2s ease, transform 0.2s var(--ease-out);
     display: block;
     position: relative;
     border-radius: var(--radius-sm);
   }
 
-  .preset-card:hover { border-color: var(--border2); transform: translateY(-1px); }
+  .preset-card:hover { border-color: var(--border2); }
   .preset-card.selected { border-color: var(--accent); background: rgba(232,160,35,0.06); box-shadow: 0 0 0 1px var(--accent); }
   .preset-card input[type="radio"] { position: absolute; opacity: 0; width: 0; height: 0; }
 
@@ -375,7 +411,7 @@
 
   .preset-tag {
     font-family: var(--mono);
-    font-size: 10px;
+    font-size: 11px;
     color: var(--muted);
     background: var(--surface);
     padding: 3px 8px;
@@ -422,7 +458,7 @@
   .slider {
     position: absolute; inset: 0;
     background: var(--border2);
-    cursor: pointer; transition: 0.25s ease; border-radius: 12px;
+    cursor: pointer; transition: background-color 0.25s ease; border-radius: 12px;
   }
   .slider:before {
     content: '';
@@ -430,7 +466,8 @@
     height: 18px; width: 18px;
     left: 3px; bottom: 3px;
     background: var(--surface);
-    transition: 0.25s ease; border-radius: 50%;
+    transition: transform 0.25s var(--ease-out), background-color 0.25s ease;
+    border-radius: 50%;
     box-shadow: 0 1px 3px rgba(0,0,0,0.3);
   }
   input:checked + .slider { background: var(--accent); }
@@ -452,7 +489,7 @@
   }
   .chart-lbl {
     font-family: var(--mono);
-    font-size: 10px;
+    font-size: 11px;
     letter-spacing: 1.5px;
     color: var(--muted);
     text-transform: uppercase;
@@ -474,11 +511,13 @@
     background: var(--muted);
     transition: background 0.3s ease, box-shadow 0.3s ease;
   }
-  .phase-dot.idle       { background: var(--muted); box-shadow: none; animation: none; }
-  .phase-dot.downloading { background: var(--accent3); box-shadow: 0 0 8px rgba(78,205,196,0.6); animation: phasePulse 1.5s ease infinite; }
-  .phase-dot.converting  { background: var(--accent); box-shadow: 0 0 8px rgba(124,92,252,0.6); animation: phasePulse 1.5s ease infinite; }
-  .phase-dot.done        { background: #68d391; box-shadow: 0 0 8px rgba(104,211,145,0.6); animation: none; }
-  .phase-dot.error       { background: var(--accent2); box-shadow: 0 0 8px rgba(240,98,146,0.5); animation: none; }
+  /* Each glow matches its own dot. These previously carried leftover teal/
+     purple/pink values from a retired palette, so an amber dot glowed violet. */
+  .phase-dot.idle        { background: var(--muted);   box-shadow: none; animation: none; }
+  .phase-dot.downloading { background: var(--accent3); box-shadow: 0 0 8px rgba(77,208,160,0.6); animation: phasePulse 1.5s ease infinite; }
+  .phase-dot.converting  { background: var(--accent);  box-shadow: 0 0 8px rgba(232,160,35,0.6); animation: phasePulse 1.5s ease infinite; }
+  .phase-dot.done        { background: #68d391;        box-shadow: 0 0 8px rgba(104,211,145,0.6); animation: none; }
+  .phase-dot.error       { background: var(--accent2); box-shadow: 0 0 8px rgba(239,83,80,0.5); animation: none; }
   @keyframes phasePulse {
     0%, 100% { opacity: 1; transform: scale(1); }
     50% { opacity: 0.5; transform: scale(0.8); }
@@ -510,7 +549,7 @@
   }
   .phase-label.transitioning { animation: phaseFlash 0.35s ease-out; }
   @keyframes phaseGlow {
-    0% { box-shadow: inset 0 0 0 1px rgba(124,92,252,0.3); }
+    0% { box-shadow: inset 0 0 0 1px rgba(232,160,35,0.3); }
     100% { box-shadow: inset 0 0 0 1px transparent; }
   }
   .phase-row.glow { animation: phaseGlow 0.6s ease-out; }
@@ -534,16 +573,19 @@
     box-shadow: 0 0 10px rgba(232,160,35,0.35);
   }
 
-  /* F4: Phase-aware bar colors */
+  /* F4: Phase-aware bar colors. The converting ramp used to run
+     #6c4ce0 → amber → #b794f4, i.e. violet into the accent and back out —
+     a leftover from a retired purple palette. Every ramp now stays in the
+     hue of the accent it represents. */
   .bar-fill.phase-downloading {
     background: linear-gradient(90deg, #2a9d8f, var(--accent3), #6ee7c0);
     background-size: 200% 100%;
-    box-shadow: 0 0 10px rgba(78,205,196,0.35);
+    box-shadow: 0 0 10px rgba(77,208,160,0.35);
   }
   .bar-fill.phase-converting {
-    background: linear-gradient(90deg, #6c4ce0, var(--accent), #b794f4);
+    background: linear-gradient(90deg, #d4891a, var(--accent), #f0c050);
     background-size: 200% 100%;
-    box-shadow: 0 0 10px rgba(124,92,252,0.35);
+    box-shadow: 0 0 10px rgba(232,160,35,0.35);
   }
   .bar-fill.phase-done {
     background: linear-gradient(90deg, #48bb78, #68d391, #9ae6b4);
@@ -553,7 +595,7 @@
   .bar-fill.phase-error {
     background: linear-gradient(90deg, #c53030, var(--accent2), #fc8181);
     background-size: 200% 100%;
-    box-shadow: 0 0 10px rgba(240,98,146,0.35);
+    box-shadow: 0 0 10px rgba(239,83,80,0.35);
   }
 
   @keyframes shimmer {
@@ -602,18 +644,17 @@
     animation: celebrationRise 1.4s ease-out forwards;
     pointer-events: none;
   }
+  /* Success green, not the retired violet, and no rainbow: hue-rotating the
+     bar threw away the phase colour that had just finished earning its meaning
+     (and animating `filter` is off the GPU). A brightness lift reads as
+     "finished" without repainting the semantics. */
   @keyframes cardGlow {
-    0%  { box-shadow: 0 2px 12px rgba(124,92,252,0.06), 0 1px 3px rgba(0,0,0,0.04); }
-    30% { box-shadow: 0 0 24px 4px rgba(104,211,145,0.3), 0 2px 12px rgba(124,92,252,0.06); }
-    100%{ box-shadow: 0 2px 12px rgba(124,92,252,0.06), 0 1px 3px rgba(0,0,0,0.04); }
+    0%  { box-shadow: 0 0 0 0 rgba(104,211,145,0); }
+    30% { box-shadow: 0 0 24px 4px rgba(104,211,145,0.3); }
+    100%{ box-shadow: 0 0 0 0 rgba(104,211,145,0); }
   }
   .card.celebrating { animation: cardGlow 1.5s ease-out; }
-  @keyframes barRainbow {
-    0%  { filter: hue-rotate(0deg) brightness(1.1); }
-    50% { filter: hue-rotate(90deg) brightness(1.2); }
-    100%{ filter: hue-rotate(0deg) brightness(1); }
-  }
-  .bar-fill.celebrating { animation: barRainbow 1.2s ease, shimmer 2.5s ease infinite; }
+  .bar-fill.celebrating { animation: shimmer 2.5s ease infinite; }
 
   .progress-stats {
     display: flex; gap: 24px;
@@ -643,7 +684,7 @@
   }
   .size-tracker-label {
     font-family: var(--mono);
-    font-size: 10px;
+    font-size: 11px;
     letter-spacing: 1.5px;
     text-transform: uppercase;
     color: var(--muted);
@@ -654,11 +695,14 @@
     font-weight: 700;
     transition: color 0.3s ease;
   }
+  /* overflow must stay visible: .size-tracker-mark is deliberately taller than
+     the bar (top/bottom: -2px) so the 1:1 reference line reads as a tick above
+     and below it. Clipping here silently flattened it into the track. */
   .size-tracker-bar {
     height: 6px;
     background: var(--bg);
     border-radius: 3px;
-    overflow: hidden;
+    overflow: visible;
     position: relative;
     margin-bottom: 5px;
   }
@@ -687,7 +731,7 @@
   .st-green  { color: #48bb78; }
   .st-teal   { color: #38b2ac; }
   .st-orange { color: #ed8936; }
-  .st-red    { color: #e53e3e; }
+  .st-red    { color: #f56565; }  /* #e53e3e was 3.7:1 on --surface2 */
   .st-fill-green  { background: linear-gradient(90deg, #48bb78, #68d391); }
   .st-fill-teal   { background: linear-gradient(90deg, #38b2ac, #4ecdc4); }
   .st-fill-orange { background: linear-gradient(90deg, #ed8936, #f6ad55); }
@@ -743,8 +787,8 @@
     align-items: center;
     justify-content: space-between;
     font-family: var(--mono);
-    font-size: 10px;
-    letter-spacing: 2px;
+    font-size: 11px;
+    letter-spacing: 1.5px;
     color: var(--muted);
     text-transform: uppercase;
     margin-bottom: 8px;
@@ -756,7 +800,7 @@
   .history-header-right { display: flex; align-items: center; gap: 12px; }
 
   .history-clear {
-    font-size: 10px;
+    font-size: 11px;
     color: var(--accent2);
     cursor: pointer;
     letter-spacing: 1px;
@@ -813,7 +857,7 @@
 
   .history-sub {
     font-family: var(--mono);
-    font-size: 10px;
+    font-size: 11px;
     color: var(--muted);
   }
 
@@ -821,7 +865,7 @@
   .shutdown-overlay {
     position: fixed;
     inset: 0;
-    z-index: 9999;
+    z-index: var(--z-overlay);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -866,7 +910,7 @@
   .failure-panel {
     position: sticky;
     top: 8px;
-    z-index: 50;
+    z-index: var(--z-sticky);
     display: none;
     background: var(--surface);
     border: 1px solid var(--accent2);
@@ -939,7 +983,7 @@
   .failure-item.permanent .failure-item-cat { color: var(--accent2); }
   .failure-item-cat {
     font-family: var(--mono);
-    font-size: 10px;
+    font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 1px;
     font-weight: 700;
@@ -958,6 +1002,43 @@
     margin-bottom: 12px;
     line-height: 1.5;
   }
+
+  /* ---------------------------------------------------------------------------
+     Reduced motion. Deliberately "gentler", not "off": the fades, colour
+     changes and progress-bar widths carry information about a long-running job
+     and are kept. What goes is movement for its own sake — travel, scaling,
+     the confetti, the shimmer, and the indeterminate bar's sideways loop.
+     The indeterminate bar still has to say "working", so it breathes on
+     opacity instead of sliding.
+     --------------------------------------------------------------------------- */
+  @media (prefers-reduced-motion: reduce) {
+    @keyframes fadeUp          { from { opacity: 0; } to { opacity: 1; } }
+    @keyframes phaseFlash      { from { opacity: 0.3; } to { opacity: 1; } }
+    @keyframes phasePulse      { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+    @keyframes softBreathe     { 0%, 100% { opacity: 0.45; } 50% { opacity: 1; } }
+
+    /* purely decorative — nothing is lost by dropping these outright */
+    .bar-fill,
+    .bar-fill.celebrating,
+    .card.celebrating { animation: none; }
+    .confetti-particle { display: none; }
+
+    /* the one indeterminate state that must keep signalling activity */
+    .bar-indeterminate .bar-fill {
+      animation: softBreathe 1.8s ease-in-out infinite;
+      transform: none;
+      width: 100%;
+    }
+
+    /* strip hover/press travel, keep the colour feedback */
+    .btn:hover, .btn-primary:hover, .btn-success:hover,
+    .btn-danger:hover, .btn-outline:hover,
+    .preset-card:hover, .thumb:hover,
+    .btn:active:not(:disabled) { transform: none; }
+
+    /* stagger exists only to sequence movement */
+    .card, .encode-pill { animation-delay: 0s !important; }
+  }
 </style>
 </head>
 <body>
@@ -969,7 +1050,7 @@
         <div><span style="color:#76b900">Fetch</span><span style="color:#f3f3f3">Forge</span></div>
         <div><span style="color:#f3f3f3">You</span><span style="color:#cc0000">Tube</span> Downloader</div>
       </div>
-      <img id="channel-logo" class="channel-logo" src="" alt="" style="display:none;">
+      <img id="channel-logo" class="channel-logo" alt="" style="display:none;">
     </div>
     <div class="header-status">
       <div class="status-pill"><span class="dot"></span><span id="ytdlp-version-label">yt-dlp: checking...</span></div>
@@ -1025,17 +1106,17 @@
       </div>
 
       <div id="history-panel" class="history-panel hidden">
-        <div class="history-header" onclick="toggleHistory()">
+        <div class="history-header" onclick="toggleHistory()" role="button" tabindex="0" aria-expanded="false" aria-controls="history-list">
           <span><span id="history-arrow">&#9656;</span> <span id="history-toggle-label">Recent</span></span>
           <div class="history-header-right">
-            <span class="history-clear" onclick="event.stopPropagation(); clearHistory()">&#10005; Clear</span>
+            <span class="history-clear" onclick="event.stopPropagation(); clearHistory()" role="button" tabindex="0" aria-label="Clear download history">&#10005; Clear</span>
           </div>
         </div>
         <div id="history-list" class="history-list hidden"></div>
       </div>
 
       <div id="video-info" class="video-info">
-        <img id="thumb" class="thumb" src="" alt="">
+        <img id="thumb" class="thumb" alt="" style="display:none;">
         <div class="video-meta">
           <div class="video-title" id="video-title"></div>
           <div class="meta-line" id="video-uploader"></div>
@@ -1052,10 +1133,10 @@
           </div>
           <div id="playlist-select" style="display:none;margin-top:12px;">
             <div style="display:flex;align-items:center;gap:14px;margin-bottom:6px;flex-wrap:wrap;">
-              <span style="font-family:var(--mono);font-size:10px;letter-spacing:2px;color:var(--muted);">PLAYLIST — <span id="playlist-sel-count">0</span>/<span id="playlist-total">0</span> selected</span>
-              <span style="color:var(--accent);cursor:pointer;font-size:11px;" onclick="playlistSelectAll(true)">select all</span>
-              <span style="color:var(--accent);cursor:pointer;font-size:11px;" onclick="playlistSelectAll(false)">select none</span>
-              <span style="color:var(--accent);cursor:pointer;font-size:11px;" onclick="playlistInvert()">invert</span>
+              <span style="font-family:var(--mono);font-size: 11px;letter-spacing:1.5px;color:var(--muted);">PLAYLIST — <span id="playlist-sel-count">0</span>/<span id="playlist-total">0</span> selected</span>
+              <span style="color:var(--accent);cursor:pointer;font-size:11px;" onclick="playlistSelectAll(true)" role="button" tabindex="0">select all</span>
+              <span style="color:var(--accent);cursor:pointer;font-size:11px;" onclick="playlistSelectAll(false)" role="button" tabindex="0">select none</span>
+              <span style="color:var(--accent);cursor:pointer;font-size:11px;" onclick="playlistInvert()" role="button" tabindex="0">invert</span>
             </div>
             <div id="playlist-items" style="max-height:260px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;"></div>
           </div>
@@ -1067,9 +1148,9 @@
 
       <!-- Download queue -->
       <div id="dl-queue-section" style="display:none; margin-top:14px;">
-        <div style="font-family:var(--mono);font-size:10px;letter-spacing:2px;color:var(--muted);margin-bottom:8px;">
+        <div style="font-family:var(--mono);font-size: 11px;letter-spacing:1.5px;color:var(--muted);margin-bottom:8px;">
           JOB QUEUE — <span id="dl-queue-count">0</span> item(s)
-          <span style="float:right;cursor:pointer;color:var(--accent2);" onclick="clearDlQueue()">✕ Clear</span>
+          <span style="float:right;cursor:pointer;color:var(--accent2);" onclick="clearDlQueue()" role="button" tabindex="0" aria-label="Clear the job queue">✕ Clear</span>
         </div>
         <div id="dl-queue-items" style="
           background:var(--bg);
@@ -1174,7 +1255,7 @@
         </div>
 
         <div id="video-only-options">
-        <div class="advanced-toggle" onclick="toggleAdvanced()">
+        <div class="advanced-toggle" onclick="toggleAdvanced()" role="button" tabindex="0" aria-expanded="false" aria-controls="advanced-section">
           <span id="adv-arrow">▶</span> Advanced settings
         </div>
 
@@ -1261,9 +1342,9 @@
 
       <!-- File list -->
       <div id="local-file-list" style="display:none; margin-bottom:12px;">
-        <div style="font-family:var(--mono);font-size:10px;letter-spacing:2px;color:var(--muted);margin-bottom:8px;">
+        <div style="font-family:var(--mono);font-size: 11px;letter-spacing:1.5px;color:var(--muted);margin-bottom:8px;">
           FILES QUEUED — <span id="local-file-count">0</span> file(s)
-          <span style="float:right;cursor:pointer;color:var(--accent2);" onclick="clearLocalFiles()">✕ Clear</span>
+          <span style="float:right;cursor:pointer;color:var(--accent2);" onclick="clearLocalFiles()" role="button" tabindex="0" aria-label="Clear the local file list">✕ Clear</span>
         </div>
         <div id="local-file-items" style="
           background:var(--bg);
@@ -1316,10 +1397,10 @@
   </div>
 
   <!-- FAILURE SUMMARY (sticky, survives the session) -->
-  <div id="failure-panel" class="failure-panel">
+  <div id="failure-panel" class="failure-panel" role="alert" aria-live="assertive">
     <div class="failure-panel-header">
       <span class="failure-panel-title">⚠ <span id="failure-panel-count">0</span> item(s) failed</span>
-      <span class="failure-panel-dismiss" onclick="dismissFailurePanel()" title="Dismiss">&#10005;</span>
+      <span class="failure-panel-dismiss" onclick="dismissFailurePanel()" title="Dismiss" role="button" tabindex="0" aria-label="Dismiss failure summary">&#10005;</span>
     </div>
     <ul id="failure-panel-list" class="failure-panel-list"></ul>
   </div>
@@ -1345,7 +1426,7 @@
 
         <div class="phase-row" id="phase-row">
           <span class="phase-dot idle" id="phase-dot"></span>
-          <div class="phase-label" id="phase-label">—</div>
+          <div class="phase-label" id="phase-label" role="status" aria-live="polite">—</div>
         </div>
         <div class="phase-file" id="phase-file"></div>
         <div class="bar-bg" id="bar-bg">
@@ -1393,11 +1474,11 @@
 
         <div id="charts-row" style="display:none;margin-top:12px;grid-template-columns:1fr 1fr;gap:10px;">
           <div class="chart-panel">
-            <div class="chart-lbl">Download <span style="opacity:.6;font-size:9px;">MiB/s</span></div>
+            <div class="chart-lbl">Download <span style="opacity:.6;font-size: 11px;">MiB/s</span></div>
             <canvas id="chart-dl" style="width:100%;height:90px;display:block;"></canvas>
           </div>
           <div class="chart-panel">
-            <div class="chart-lbl">Encode <span style="opacity:.6;font-size:9px;">speed ×</span></div>
+            <div class="chart-lbl">Encode <span style="opacity:.6;font-size: 11px;">speed ×</span></div>
             <canvas id="chart-enc" style="width:100%;height:90px;display:block;"></canvas>
           </div>
         </div>
@@ -1406,7 +1487,7 @@
 
       <div class="idle-msg" id="idle-msg">Waiting for job. Fetch a video or load local files and press Start.</div>
 
-      <div class="log-box" id="log-box"></div>
+      <div class="log-box" id="log-box" role="log" aria-live="polite" aria-label="Job log"></div>
 
       <div class="action-row">
         <button class="btn btn-success" id="start-btn" onclick="startDownload()">▶ Start Jobs</button>
@@ -1830,7 +1911,9 @@ function toggleAdvanced() {
   const sec = document.getElementById('advanced-section');
   const arr = document.getElementById('adv-arrow');
   sec.classList.toggle('open');
-  arr.textContent = sec.classList.contains('open') ? '▼' : '▶';
+  const open = sec.classList.contains('open');
+  arr.textContent = open ? '▼' : '▶';
+  document.querySelector('.advanced-toggle').setAttribute('aria-expanded', String(open));
 }
 
 function toggleConvert() {
@@ -1852,6 +1935,18 @@ fetchVersion();
 fetchAppVersion();
 loadHistory();
 updateYtdlp();
+// Several controls are div/span + onclick rather than <button> (they sit inside
+// other clickable rows, where a nested button would be invalid). They carry
+// role="button" tabindex="0", so this restores the keyboard activation a real
+// button would have given them for free.
+document.addEventListener('keydown', function (e) {
+  if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
+  const el = e.target;
+  if (!el || el.getAttribute('role') !== 'button' || el.tagName === 'BUTTON') return;
+  e.preventDefault();
+  el.click();
+});
+
 loadChannelLogo();
 
 // ---- HEARTBEAT ----
@@ -1890,7 +1985,7 @@ function renderHistory() {
       ? `<img class="history-thumb" src="${item.thumbnail}" alt="">`
       : `<div class="history-thumb-blank"></div>`;
     const sub = (item.is_playlist ? `Playlist \u00b7 ${item.count} videos \u00b7 ` : '') + (item.added ? item.added.replace('T', ' ') : '');
-    return `<div class="history-item" onclick="loadFromHistory(${i})">${thumb}<div class="history-meta"><div class="history-title">${item.title || item.url}</div><div class="history-sub">${sub}</div></div></div>`;
+    return `<div class="history-item" onclick="loadFromHistory(${i})" role="button" tabindex="0">${thumb}<div class="history-meta"><div class="history-title">${item.title || item.url}</div><div class="history-sub">${sub}</div></div></div>`;
   }).join('');
 }
 
@@ -1898,6 +1993,7 @@ function toggleHistory() {
   _historyOpen = !_historyOpen;
   document.getElementById('history-list').classList.toggle('hidden', !_historyOpen);
   document.getElementById('history-arrow').textContent = _historyOpen ? '\u25be' : '\u25b6';
+  document.querySelector('.history-header').setAttribute('aria-expanded', String(_historyOpen));
   document.getElementById('history-toggle-label').textContent = 'Recent (' + _historyItems.length + ')';
 }
 
@@ -2074,7 +2170,7 @@ function renderCookieFetchResult(d) {
       const count = c.error ? '<span style="color:var(--muted);">error</span>' : `${c.youtube_cookies} YT`;
       const canSwitch = !isSel && !c.error && c.youtube_cookies > 0;
       const action = canSwitch
-        ? ` <span style="color:var(--accent);cursor:pointer;text-decoration:underline;" onclick="useCookieSource(${i})">use this</span>`
+        ? ` <span style="color:var(--accent);cursor:pointer;text-decoration:underline;" onclick="useCookieSource(${i})" role="button" tabindex="0">use this</span>`
         : (isSel ? ' <span style="color:var(--accent);">✓</span>' : '');
       rows.push(`<div style="padding:2px 0;">• ${escapeHtml(c.browser)} / ${escapeHtml(c.display_name)} — ${count}${action}</div>`);
     });
@@ -2176,7 +2272,16 @@ async function fetchInfo() {
     const r = await fetch(`${API}/video-info?url=${encodeURIComponent(url)}`);
     if (!r.ok) { const d = await r.json(); log('Error: ' + d.error, 'error'); return; }
     const info = await r.json();
-    document.getElementById('thumb').src = info.thumbnail || '';
+    const thumbEl = document.getElementById('thumb');
+    if (info.thumbnail) {
+      thumbEl.src = info.thumbnail;
+      thumbEl.style.display = '';
+    } else {
+      // Never leave src="" — an empty src resolves to the page URL, which fires
+      // a pointless request and paints a broken-image glyph.
+      thumbEl.removeAttribute('src');
+      thumbEl.style.display = 'none';
+    }
     document.getElementById('video-title').textContent = info.is_playlist
       ? 'Playlist: ' + info.title + ' (' + info.count + ' videos)'
       : info.title;
@@ -3003,9 +3108,9 @@ function renderPlaylistSelect() {
     const dur = e.duration ? ' · ' + formatDuration(e.duration) : '';
     return `<label style="display:flex;align-items:center;gap:8px;padding:5px 10px;border-bottom:1px solid var(--border);cursor:pointer;">
       <input type="checkbox" ${e._checked ? 'checked' : ''} onchange="_playlistEntries[${i}]._checked=this.checked;updatePlaylistCount()">
-      <span style="color:var(--muted);font-size:10px;flex-shrink:0;width:28px;">${e.index}</span>
+      <span style="color:var(--muted);font-size: 11px;flex-shrink:0;width:28px;">${e.index}</span>
       <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeAttr(e.title)}">${escapeHtml(e.title)}</span>
-      <span style="color:var(--muted);font-size:10px;flex-shrink:0;">${dur}</span>
+      <span style="color:var(--muted);font-size: 11px;flex-shrink:0;">${dur}</span>
     </label>`;
   }).join('');
   updatePlaylistCount();
@@ -3088,17 +3193,17 @@ function renderDlQueue() {
   count.textContent = dlQueue.length;
   items.innerHTML = dlQueue.map((q, i) => {
     const tag = q.type === 'local'
-      ? '<span style="background:var(--accent3);color:#111;font-size:9px;padding:1px 5px;border-radius:3px;margin-right:6px;">ENC</span>'
-      : '<span style="background:var(--accent);color:#111;font-size:9px;padding:1px 5px;border-radius:3px;margin-right:6px;">DL</span>';
+      ? '<span style="background:var(--accent3);color:#111;font-size: 11px;padding:1px 5px;border-radius:3px;margin-right:6px;">ENC</span>'
+      : '<span style="background:var(--accent);color:#111;font-size: 11px;padding:1px 5px;border-radius:3px;margin-right:6px;">DL</span>';
     const fmtLabel = q.video_format
       ? `${q.video_format}+${q.audio_format}`
       : (currentMode === 'audio' ? `audio:${q.audio_format}` : `best+${q.audio_format}`);
     const detail = q.type === 'local'
-      ? `<span style="color:var(--muted);margin:0 12px;flex-shrink:0;font-size:10px;">${q.size_gb} GB</span>`
-      : `<span style="color:var(--muted);margin:0 12px;flex-shrink:0;font-size:10px;">${fmtLabel}${q.expected_size > 0 ? ' \u00b7 ' + (q.expected_size / 1024**3).toFixed(1) + 'GB' : ''}</span>`;
+      ? `<span style="color:var(--muted);margin:0 12px;flex-shrink:0;font-size: 11px;">${q.size_gb} GB</span>`
+      : `<span style="color:var(--muted);margin:0 12px;flex-shrink:0;font-size: 11px;">${fmtLabel}${q.expected_size > 0 ? ' \u00b7 ' + (q.expected_size / 1024**3).toFixed(1) + 'GB' : ''}</span>`;
     const tip = q.type === 'local' ? q.path : q.url;
     const tuneCtl = q.type === 'youtube'
-      ? `<select onchange="dlQueue[${i}].tune_mode=this.value" style="font-size:10px;margin:0 6px;">
+      ? `<select onchange="dlQueue[${i}].tune_mode=this.value" style="font-size: 11px;margin:0 6px;">
            <option value="uhq"${q.tune_mode !== 'hq' ? ' selected' : ''}>Excellent (Slow)</option>
            <option value="hq"${q.tune_mode === 'hq' ? ' selected' : ''}>Great (Fast)</option>
          </select>`
@@ -3106,14 +3211,14 @@ function renderDlQueue() {
     const dirCtl = q.type === 'youtube'
       ? `<input value="${escapeAttr(q.output_dir || '')}" placeholder="(default out)"
            onchange="dlQueue[${i}].output_dir=this.value.trim()"
-           style="font-size:10px;width:120px;margin-right:6px;">`
+           style="font-size: 11px;width:120px;margin-right:6px;">`
       : '';
     return `<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 10px;border-bottom:1px solid var(--border);">
       <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${tip}">${tag}${q.title}</span>
       ${detail}
       ${tuneCtl}
       ${dirCtl}
-      <span style="color:var(--accent2);cursor:pointer;flex-shrink:0;" onclick="removeDlQueue(${i})">&#10005;</span>
+      <span style="color:var(--accent2);cursor:pointer;flex-shrink:0;" onclick="removeDlQueue(${i})" role="button" tabindex="0" aria-label="Remove item from queue">&#10005;</span>
     </div>`;
   }).join('');
 }
@@ -3183,7 +3288,7 @@ function renderLocalFiles() {
     <div style="display:flex;justify-content:space-between;align-items:center;padding:5px 10px;border-bottom:1px solid var(--border);">
       <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${f.path}">${f.name}</span>
       <span style="color:var(--muted);margin:0 12px;flex-shrink:0;">${f.size_gb} GB</span>
-      <span style="color:var(--accent2);cursor:pointer;flex-shrink:0;" onclick="removeLocalFile(${i})">✕</span>
+      <span style="color:var(--accent2);cursor:pointer;flex-shrink:0;" onclick="removeLocalFile(${i})" role="button" tabindex="0" aria-label="Remove file from list">✕</span>
     </div>
   `).join('');
 }
