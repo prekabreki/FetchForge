@@ -193,6 +193,31 @@
   }
   .cap-warning-meta span { color: var(--text2); }
 
+  /* #54 — interface icons. One class, so every icon is sized off the type ramp
+     (1em) and painted by whatever it sits in. That inheritance is the whole
+     point: the emoji these replaced were colour glyphs from a system font, so
+     `color: var(--accent2)` on a Clear control never reached them. Geometry is
+     Lucide, defined once in the <symbol> sprite at the top of <body>. */
+  .icon {
+    width: 1em;
+    height: 1em;
+    flex: none;
+    vertical-align: -0.125em;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  .icon-sprite { display: none; }
+
+  /* Disclosure arrows are one chevron rotated, not two glyphs swapped: the
+     toggles used to assign textContent, which would wipe an SVG child. State
+     now lives on the container's aria-expanded, which those toggles already
+     maintain, so the arrow follows the thing screen readers are told. */
+  .icon-chevron { transition: transform 0.18s var(--ease-out); }
+  [aria-expanded="true"] .icon-chevron { transform: rotate(90deg); }
+
   .card {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -1210,10 +1235,31 @@
        than something this block forgot about. */
     .hold-confirm-fill { transition: clip-path 200ms var(--ease-out); }
     .hold-confirm.holding .hold-confirm-fill { transition: clip-path 700ms linear; }
+
+    /* The chevron still turns — the open/closed state is the message — it just
+       stops travelling there. */
+    .icon-chevron { transition: none; }
   }
 </style>
 </head>
 <body>
+
+<!-- #54 — icon sprite. Lucide geometry on a 24×24 grid, defined once and pulled
+     in with <use>, so the ✕ that recurs a dozen times over costs one element
+     each rather than a dozen copies of the same paths. Size, stroke and colour
+     all come from .icon; nothing here sets them. -->
+<svg class="icon-sprite" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="M12 5v14"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M6 3.5 20 12 6 20.5Z"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M16 13H8"/><path d="M16 17H8"/></symbol>
+  <symbol id="i-film" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 3v18"/><path d="M17 3v18"/><path d="M3 12h18"/><path d="M3 7.5h4"/><path d="M3 16.5h4"/><path d="M17 7.5h4"/><path d="M17 16.5h4"/></symbol>
+  <symbol id="i-music" viewBox="0 0 24 24"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></symbol>
+</svg>
+
 <div class="container">
 
   <header>
@@ -1298,9 +1344,9 @@
 
       <div id="history-panel" class="history-panel hidden">
         <div class="history-header" onclick="toggleHistory()" role="button" tabindex="0" aria-expanded="false" aria-controls="history-list">
-          <span><span id="history-arrow">&#9656;</span> <span id="history-toggle-label">Recent</span></span>
+          <span><svg class="icon icon-chevron" aria-hidden="true"><use href="#i-chevron"/></svg> <span id="history-toggle-label">Recent</span></span>
           <div class="history-header-right">
-            <span class="history-clear hold-confirm" data-hold-action="clearHistory" role="button" tabindex="0" aria-label="Clear download history" title="Hold to confirm (or press Enter twice)"><span class="hold-confirm-fill" aria-hidden="true"></span><span class="hold-confirm-label">&#10005; Clear</span></span>
+            <span class="history-clear hold-confirm" data-hold-action="clearHistory" role="button" tabindex="0" aria-label="Clear download history" title="Hold to confirm (or press Enter twice)"><span class="hold-confirm-fill" aria-hidden="true"></span><span class="hold-confirm-label"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg> Clear</span></span>
           </div>
         </div>
         <div id="history-list" class="history-list hidden"></div>
@@ -1332,7 +1378,7 @@
             <div id="playlist-items" style="max-height:260px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;"></div>
           </div>
           <div style="margin-top:10px;">
-            <button class="btn btn-outline" onclick="addToQueue()" id="queue-add-btn" style="display:none;">➕ Add to Queue</button>
+            <button class="btn btn-outline" onclick="addToQueue()" id="queue-add-btn" style="display:none;"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg> Add to Queue</button>
           </div>
         </div>
       </div>
@@ -1341,7 +1387,7 @@
       <div id="dl-queue-section" style="display:none; margin-top:14px;">
         <div style="font-family:var(--mono);font-size: 11px;letter-spacing:1.5px;color:var(--muted);margin-bottom:8px;">
           JOB QUEUE — <span id="dl-queue-count">0</span> item(s)
-          <span class="hold-confirm" style="float:right;color:var(--accent2);" data-hold-action="clearDlQueue" role="button" tabindex="0" aria-label="Clear the job queue" title="Hold to confirm (or press Enter twice)"><span class="hold-confirm-fill" aria-hidden="true"></span><span class="hold-confirm-label">✕ Clear</span></span>
+          <span class="hold-confirm" style="float:right;color:var(--accent2);" data-hold-action="clearDlQueue" role="button" tabindex="0" aria-label="Clear the job queue" title="Hold to confirm (or press Enter twice)"><span class="hold-confirm-fill" aria-hidden="true"></span><span class="hold-confirm-label"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg> Clear</span></span>
         </div>
         <div id="dl-queue-items" style="
           background:var(--bg);
@@ -1376,7 +1422,7 @@
         <div class="field-label">Output Directory</div>
         <div class="input-group" style="display:flex;gap:6px;">
           <input type="text" id="output-dir" placeholder="Default: downloads/converted (YouTube) or source/converted (local)" style="flex:1;" />
-          <button type="button" class="btn" style="white-space:nowrap;padding:0 14px;" onclick="browseOutputDir()">📁 Browse</button>
+          <button type="button" class="btn" style="white-space:nowrap;padding:0 14px;" onclick="browseOutputDir()"><svg class="icon" aria-hidden="true"><use href="#i-folder"/></svg> Browse</button>
         </div>
       </div>
 
@@ -1384,11 +1430,11 @@
       <div class="preset-grid" style="margin-bottom:14px;">
         <label class="preset-card selected" data-mode="video" onclick="selectMode('video')" style="padding:14px;">
           <input type="radio" name="convmode" checked>
-          <div class="preset-name" style="margin-bottom:0;">🎬 Video → H.265</div>
+          <div class="preset-name" style="margin-bottom:0;"><svg class="icon" aria-hidden="true"><use href="#i-film"/></svg> Video → H.265</div>
         </label>
         <label class="preset-card" data-mode="audio" onclick="selectMode('audio')" style="padding:14px;">
           <input type="radio" name="convmode">
-          <div class="preset-name" style="margin-bottom:0;">🎵 Audio extract</div>
+          <div class="preset-name" style="margin-bottom:0;"><svg class="icon" aria-hidden="true"><use href="#i-music"/></svg> Audio extract</div>
         </label>
       </div>
 
@@ -1447,7 +1493,7 @@
 
         <div id="video-only-options">
         <div class="advanced-toggle" onclick="toggleAdvanced()" role="button" tabindex="0" aria-expanded="false" aria-controls="advanced-section">
-          <span id="adv-arrow">▶</span> Advanced settings
+          <svg class="icon icon-chevron" aria-hidden="true"><use href="#i-chevron"/></svg> Advanced settings
         </div>
 
         <div class="advanced-section" id="advanced-section">
@@ -1566,8 +1612,8 @@
 
       <!-- Browse buttons -->
       <div style="display:flex;gap:8px;margin-bottom:12px;">
-        <button class="btn btn-outline" style="flex:1;padding:14px 12px;" onclick="browseLocalFiles()">📄 Browse Files</button>
-        <button class="btn btn-outline" style="flex:1;padding:14px 12px;" onclick="browseLocalFolder()">📁 Browse Folder</button>
+        <button class="btn btn-outline" style="flex:1;padding:14px 12px;" onclick="browseLocalFiles()"><svg class="icon" aria-hidden="true"><use href="#i-file"/></svg> Browse Files</button>
+        <button class="btn btn-outline" style="flex:1;padding:14px 12px;" onclick="browseLocalFolder()"><svg class="icon" aria-hidden="true"><use href="#i-folder"/></svg> Browse Folder</button>
       </div>
 
       <!-- Folder path input -->
@@ -1580,7 +1626,7 @@
       <div id="local-file-list" style="display:none; margin-bottom:12px;">
         <div style="font-family:var(--mono);font-size: 11px;letter-spacing:1.5px;color:var(--muted);margin-bottom:8px;">
           FILES QUEUED — <span id="local-file-count">0</span> file(s)
-          <span style="float:right;cursor:pointer;color:var(--accent2);" onclick="clearLocalFiles()" role="button" tabindex="0" aria-label="Clear the local file list">✕ Clear</span>
+          <span style="float:right;cursor:pointer;color:var(--accent2);" onclick="clearLocalFiles()" role="button" tabindex="0" aria-label="Clear the local file list"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg> Clear</span>
         </div>
         <div id="local-file-items" style="
           background:var(--bg);
@@ -1626,8 +1672,8 @@
       </div>
 
       <div class="action-row" style="gap:8px;">
-        <button class="btn btn-outline" onclick="addLocalToQueue()">➕ Add to Queue</button>
-        <button class="btn btn-success" id="local-convert-btn" onclick="startLocalConvert()">▶ Convert Now</button>
+        <button class="btn btn-outline" onclick="addLocalToQueue()"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg> Add to Queue</button>
+        <button class="btn btn-success" id="local-convert-btn" onclick="startLocalConvert()"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg> Convert Now</button>
       </div>
 
     </div>
@@ -1636,8 +1682,8 @@
   <!-- FAILURE SUMMARY (sticky, survives the session) -->
   <div id="failure-panel" class="failure-panel" role="alert" aria-live="assertive">
     <div class="failure-panel-header">
-      <span class="failure-panel-title">⚠ <span id="failure-panel-count">0</span> item(s) failed</span>
-      <span class="failure-panel-dismiss" onclick="dismissFailurePanel()" title="Dismiss" role="button" tabindex="0" aria-label="Dismiss failure summary">&#10005;</span>
+      <span class="failure-panel-title"><svg class="icon" aria-hidden="true"><use href="#i-alert"/></svg> <span id="failure-panel-count">0</span> item(s) failed</span>
+      <span class="failure-panel-dismiss" onclick="dismissFailurePanel()" title="Dismiss" role="button" tabindex="0" aria-label="Dismiss failure summary"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></span>
     </div>
     <ul id="failure-panel-list" class="failure-panel-list"></ul>
   </div>
@@ -1727,8 +1773,8 @@
       <div class="log-box" id="log-box" role="log" aria-live="polite" aria-label="Job log"></div>
 
       <div class="action-row">
-        <button class="btn btn-success" id="start-btn" onclick="startDownload()">▶ Start Jobs</button>
-        <button class="btn btn-danger hidden" id="cancel-btn" onclick="cancelJob()">✕ Cancel</button>
+        <button class="btn btn-success" id="start-btn" onclick="startDownload()"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg> Start Jobs</button>
+        <button class="btn btn-danger hidden" id="cancel-btn" onclick="cancelJob()"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg> Cancel</button>
       </div>
 
     </div>
@@ -2253,10 +2299,11 @@ function setSelectVal(id, val) {
 
 function toggleAdvanced() {
   const sec = document.getElementById('advanced-section');
-  const arr = document.getElementById('adv-arrow');
   sec.classList.toggle('open');
   const open = sec.classList.contains('open');
-  arr.textContent = open ? '▼' : '▶';
+  // aria-expanded is also what rotates the chevron (see .icon-chevron) — the
+  // arrow is no longer a glyph this function swaps, so nothing here writes to
+  // the toggle's children.
   document.querySelector('.advanced-toggle').setAttribute('aria-expanded', String(open));
 }
 
@@ -2358,7 +2405,10 @@ function _holdArm(el) {
   _armEl = el;
   el.classList.add('armed');
   const lbl = el.querySelector('.hold-confirm-label');
-  if (lbl) lbl.innerHTML = '&#10005; Confirm?';
+  // Same ✕ mark as the idle label, so arming changes the word and nothing else.
+  // The idle label is restored from dataset.idleLabel, which is the innerHTML
+  // captured at init and therefore already carries its own <svg><use>.
+  if (lbl) lbl.innerHTML = '<svg class="icon" aria-hidden="true"><use href="#i-x"/></svg> Confirm?';
   el.setAttribute('aria-label', 'Press Enter again to confirm: ' + el.dataset.idleAria);
   _armTimer = setTimeout(function () { _armTimer = null; _holdDisarm(); }, KEYARM_MS);
 }
@@ -2439,7 +2489,7 @@ function renderHistory() {
 function toggleHistory() {
   _historyOpen = !_historyOpen;
   document.getElementById('history-list').classList.toggle('hidden', !_historyOpen);
-  document.getElementById('history-arrow').textContent = _historyOpen ? '\u25be' : '\u25b6';
+  // Chevron rotation rides on aria-expanded (see .icon-chevron).
   document.querySelector('.history-header').setAttribute('aria-expanded', String(_historyOpen));
   document.getElementById('history-toggle-label').textContent = 'Recent (' + _historyItems.length + ')';
 }
@@ -3321,7 +3371,7 @@ function runShutdownCountdown(seconds) {
         '<div class="shutdown-overlay-title">Shutting down PC</div>' +
         '<div class="shutdown-overlay-count" id="shutdown-overlay-count">0:00</div>' +
         '<div class="shutdown-overlay-sub">All jobs are complete. The PC will power off when the timer reaches zero.</div>' +
-        '<button class="btn btn-danger" id="shutdown-cancel-btn">✕ Cancel Shutdown</button>' +
+        '<button class="btn btn-danger" id="shutdown-cancel-btn"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg> Cancel Shutdown</button>' +
       '</div>';
     document.body.appendChild(overlay);
 
@@ -3680,7 +3730,11 @@ function renderFailurePanel() {
   count.textContent = _failures.length;
   list.innerHTML = _failures.map(f => {
     const cls = f.permanent ? 'permanent' : 'transient';
-    const icon = f.permanent ? '✕' : '⚠';
+    // Permanent vs transient is carried by the mark alone, so unlike the
+    // decorative icons these get an accessible name rather than aria-hidden.
+    const icon = f.permanent
+      ? '<svg class="icon" role="img" aria-label="Permanent failure"><use href="#i-x"/></svg>'
+      : '<svg class="icon" role="img" aria-label="Will be retried"><use href="#i-alert"/></svg>';
     const reason = (f.reason || '').replace(/\s+/g, ' ').slice(0, 160);
     return '<li class="failure-item ' + cls + '">' +
       '<span class="failure-item-icon">' + icon + '</span>' +
@@ -3824,7 +3878,7 @@ function renderDlQueue() {
       ${detail}
       ${tuneCtl}
       ${dirCtl}
-      <span style="color:var(--accent2);cursor:pointer;flex-shrink:0;" onclick="removeDlQueue(${i})" role="button" tabindex="0" aria-label="Remove item from queue">&#10005;</span>
+      <span style="color:var(--accent2);cursor:pointer;flex-shrink:0;" onclick="removeDlQueue(${i})" role="button" tabindex="0" aria-label="Remove item from queue"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></span>
     </div>`;
   }).join('');
 }
@@ -3899,7 +3953,7 @@ function renderLocalFiles() {
     <div style="display:flex;justify-content:space-between;align-items:center;padding:5px 10px;border-bottom:1px solid var(--border);">
       <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${f.path}">${f.name}</span>
       <span style="color:var(--muted);margin:0 12px;flex-shrink:0;">${f.size_gb} GB</span>
-      <span style="color:var(--accent2);cursor:pointer;flex-shrink:0;" onclick="removeLocalFile(${i})" role="button" tabindex="0" aria-label="Remove file from list">✕</span>
+      <span style="color:var(--accent2);cursor:pointer;flex-shrink:0;" onclick="removeLocalFile(${i})" role="button" tabindex="0" aria-label="Remove file from list"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></span>
     </div>
   `).join('');
 }

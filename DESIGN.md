@@ -73,6 +73,26 @@ copy is 15px, secondary 13–14px.
   indeterminate bar keeps animating on opacity, because that loop is the message.
 - Celebration on job completion is in budget — it fires once per run.
 
+## Icons
+
+- Inline SVG only, never emoji, and never an icon font. The whole point is that
+  an icon inherits `currentColor` and the type ramp, so it can be tinted by
+  state — a red Clear, an amber pending, a muted chevron — which a colour glyph
+  from a system font cannot be.
+- One `<symbol>` sprite at the top of `<body>`; each use is
+  `<svg class="icon" aria-hidden="true"><use href="#i-name"/></svg>`. Geometry is
+  Lucide, 24×24 viewBox, stroked not filled.
+- `.icon` owns sizing and painting for every instance: `width/height: 1em` so
+  icons scale with their parent's `font-size`, `fill: none`,
+  `stroke: currentColor`, `stroke-width: 2`. Do not size an icon at a call site.
+- Decorative icons are `aria-hidden="true"` and the control carries the label.
+  Where the icon *is* the meaning — the failure rows' permanent-vs-retry marks —
+  it takes `role="img"` and an accessible name instead.
+- State that used to swap a glyph is expressed as a transform on one icon: the
+  disclosure chevrons rotate off `[aria-expanded="true"]` rather than being
+  rewritten in JS. Under reduced motion the rotation stays and only its
+  transition is dropped — the rotation is the state, not the travel.
+
 ## Layout
 
 - 900px max content width; body copy capped around 68ch.
@@ -86,9 +106,8 @@ copy is 15px, secondary 13–14px.
 - **Emoji standing in for icons.** Icons are inline SVG so they inherit
   `currentColor` and track the type ramp. Emoji are colour glyphs from a system
   font: they ignore `color`, so they cannot be tinted to match state, and they
-  render and align differently per platform. The current file still violates this
-  (`➕ 📄 📁 🎬 🎵 ✕ ▶`) — tracked in #54, and the rule is recorded here so the
-  violation reads as debt rather than as intent.
+  render and align differently per platform. Cleared in #54 — see the icon
+  convention below.
 - **The "AI product" gradient.** No purple-to-blue, no teal-to-purple. A retired
   violet palette left real traces here (an amber dot glowing violet, a converting
   bar that ramped through `#6c4ce0`); those are fixed, and new ones are bugs.
