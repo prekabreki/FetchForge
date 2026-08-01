@@ -1004,6 +1004,41 @@
   }
 
   /* ---------------------------------------------------------------------------
+     Hold-to-confirm. Two clears here are destructive and not undoable: one
+     wipes the server's history, the other throws away a hand-picked queue.
+     Both used to fire on a single click of an 11px span. Now the pointer path
+     needs a sustained 700ms press, and the fill is the progress report for it,
+     which is why it survives reduced motion below. Release early and the fill
+     snaps back in 200ms: slow while you are deciding, fast once you let go.
+     The keyboard path cannot hold, so it arms instead and takes a second
+     Enter/Space to fire.
+     --------------------------------------------------------------------------- */
+  .hold-confirm {
+    position: relative;
+    display: inline-block;
+    padding: 2px 6px;
+    border-radius: 4px;
+    overflow: hidden;
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  .hold-confirm-fill {
+    position: absolute;
+    inset: 0;
+    background: var(--accent2);
+    opacity: 0.32;
+    clip-path: inset(0 100% 0 0);
+    transition: clip-path 200ms var(--ease-out);
+    pointer-events: none;
+  }
+  .hold-confirm.holding .hold-confirm-fill,
+  .hold-confirm.armed .hold-confirm-fill { clip-path: inset(0); }
+  .hold-confirm.holding .hold-confirm-fill { transition: clip-path 700ms linear; }
+  .hold-confirm-label { position: relative; }
+  .hold-confirm.armed { box-shadow: inset 0 0 0 1px var(--accent2); }
+
+  /* ---------------------------------------------------------------------------
      Reduced motion. Deliberately "gentler", not "off": the fades, colour
      changes and progress-bar widths carry information about a long-running job
      and are kept. What goes is movement for its own sake — travel, scaling,
@@ -1038,6 +1073,13 @@
 
     /* stagger exists only to sequence movement */
     .card, .encode-pill { animation-delay: 0s !important; }
+
+    /* The hold-to-confirm fill is not decoration: it is the only readout of
+       how far through the 700ms press you are, and of the 200ms snap back on
+       release. Re-asserted here so it reads as a deliberate exemption rather
+       than something this block forgot about. */
+    .hold-confirm-fill { transition: clip-path 200ms var(--ease-out); }
+    .hold-confirm.holding .hold-confirm-fill { transition: clip-path 700ms linear; }
   }
 </style>
 </head>
@@ -1109,7 +1151,7 @@
         <div class="history-header" onclick="toggleHistory()" role="button" tabindex="0" aria-expanded="false" aria-controls="history-list">
           <span><span id="history-arrow">&#9656;</span> <span id="history-toggle-label">Recent</span></span>
           <div class="history-header-right">
-            <span class="history-clear" onclick="event.stopPropagation(); clearHistory()" role="button" tabindex="0" aria-label="Clear download history">&#10005; Clear</span>
+            <span class="history-clear hold-confirm" data-hold-action="clearHistory" role="button" tabindex="0" aria-label="Clear download history" title="Hold to confirm (or press Enter twice)"><span class="hold-confirm-fill" aria-hidden="true"></span><span class="hold-confirm-label">&#10005; Clear</span></span>
           </div>
         </div>
         <div id="history-list" class="history-list hidden"></div>
@@ -1150,7 +1192,7 @@
       <div id="dl-queue-section" style="display:none; margin-top:14px;">
         <div style="font-family:var(--mono);font-size: 11px;letter-spacing:1.5px;color:var(--muted);margin-bottom:8px;">
           JOB QUEUE — <span id="dl-queue-count">0</span> item(s)
-          <span style="float:right;cursor:pointer;color:var(--accent2);" onclick="clearDlQueue()" role="button" tabindex="0" aria-label="Clear the job queue">✕ Clear</span>
+          <span class="hold-confirm" style="float:right;color:var(--accent2);" data-hold-action="clearDlQueue" role="button" tabindex="0" aria-label="Clear the job queue" title="Hold to confirm (or press Enter twice)"><span class="hold-confirm-fill" aria-hidden="true"></span><span class="hold-confirm-label">✕ Clear</span></span>
         </div>
         <div id="dl-queue-items" style="
           background:var(--bg);
@@ -1359,9 +1401,10 @@
 
       <!-- Target Resolution + Sharpen are HIDDEN: the upscale/sharpen feature is not
            ready to ship (open work: #33 HDR passthrough through libplacebo, #34 scale_cuda
-           + sharpen on the Windows NVENC build, #35 skip the scaler at 1:1, #37 FSRCNNX
-           neural upscale; and cas=0.5 measured near-invisible — see
-           docs/research/upscale_research.md).
+           + sharpen on the Windows NVENC build, #37 FSRCNNX neural upscale — see
+           docs/research/upscale_research.md). Two of the original blockers are gone:
+           #35 now skips the scaler at 1:1, and cas is 0.72 rather than the 0.5 that
+           measured near-invisible (#39). #41 tracks re-enabling this UI.
            The elements stay in the DOM on purpose: startDownload() reads
            #target-res.value and #sharpen.checked for BOTH the download and local flows, so
            leaving them present makes every job send the off state (target_res=0,
@@ -1947,6 +1990,108 @@ document.addEventListener('keydown', function (e) {
   el.click();
 });
 
+// ---- HOLD-TO-CONFIRM ----
+// Guards the two clears that cannot be undone from the UI: history (a server
+// side DELETE) and the job queue (potentially 50 hand-picked entries). A plain
+// click does nothing at all. The pointer path wants HOLD_MS of sustained
+// press; pointerup, pointerleave and pointercancel each abort it, and the
+// abort has to leave no timer behind, because a timer that survives a release
+// would delete something later with nothing on screen to explain it.
+//
+// A hold has no keyboard analogue, so Enter/Space arms the control instead
+// (label flips to "Confirm?") and a second press within KEYARM_MS fires it.
+// Escape, blur or the timeout disarm it.
+const HOLD_MS = 700;      // must stay in step with the CSS fill duration
+const KEYARM_MS = 4000;   // how long a keyboard-armed control stays armed
+let _holdEl = null, _holdTimer = null;
+let _armEl = null, _armTimer = null;
+
+// Resolved at fire time, so this never depends on declaration order, and only
+// these two names are ever reachable from a data-hold-action attribute.
+function _holdInvoke(name) {
+  const allowed = { clearHistory: clearHistory, clearDlQueue: clearDlQueue };
+  if (!Object.prototype.hasOwnProperty.call(allowed, name)) return;   // never reach Object.prototype
+  const fn = allowed[name];
+  if (typeof fn === 'function') fn();
+}
+
+function _holdStop() {
+  if (_holdTimer !== null) { clearTimeout(_holdTimer); _holdTimer = null; }
+  if (_holdEl) { _holdEl.classList.remove('holding'); _holdEl = null; }
+}
+
+function _holdDisarm() {
+  if (_armTimer !== null) { clearTimeout(_armTimer); _armTimer = null; }
+  if (!_armEl) return;
+  const el = _armEl;
+  _armEl = null;
+  el.classList.remove('armed');
+  const lbl = el.querySelector('.hold-confirm-label');
+  if (lbl) lbl.innerHTML = lbl.dataset.idleLabel;
+  el.setAttribute('aria-label', el.dataset.idleAria);
+}
+
+function _holdFire(el) {
+  _holdStop();
+  _holdDisarm();
+  _holdInvoke(el.dataset.holdAction);
+}
+
+function _holdStart(el) {
+  _holdStop();      // a second pointerdown must replace the timer, never stack one
+  _holdDisarm();
+  _holdEl = el;
+  el.classList.add('holding');
+  _holdTimer = setTimeout(function () {
+    _holdTimer = null;
+    const target = _holdEl;
+    _holdStop();
+    if (target) _holdFire(target);
+  }, HOLD_MS);
+}
+
+function _holdArm(el) {
+  _holdStop();
+  _holdDisarm();
+  _armEl = el;
+  el.classList.add('armed');
+  const lbl = el.querySelector('.hold-confirm-label');
+  if (lbl) lbl.innerHTML = '&#10005; Confirm?';
+  el.setAttribute('aria-label', 'Press Enter again to confirm: ' + el.dataset.idleAria);
+  _armTimer = setTimeout(function () { _armTimer = null; _holdDisarm(); }, KEYARM_MS);
+}
+
+function _initHoldConfirm() {
+  document.querySelectorAll('.hold-confirm').forEach(function (el) {
+    const lbl = el.querySelector('.hold-confirm-label');
+    if (lbl) lbl.dataset.idleLabel = lbl.innerHTML;
+    el.dataset.idleAria = el.getAttribute('aria-label') || '';
+
+    el.addEventListener('pointerdown', function (e) {
+      if (e.button > 0) return;                 // primary button / touch / pen only
+      e.stopPropagation();                      // history clear sits inside a clickable row
+      _holdStart(el);
+    });
+    ['pointerup', 'pointerleave', 'pointercancel'].forEach(function (evt) {
+      el.addEventListener(evt, function () { if (_holdEl === el) _holdStop(); });
+    });
+    // The click that follows a press must not reach the surrounding row, and
+    // must never be the thing that clears.
+    el.addEventListener('click', function (e) { e.preventDefault(); e.stopPropagation(); });
+
+    el.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') { if (_armEl === el) { e.stopPropagation(); _holdDisarm(); } return; }
+      if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
+      e.preventDefault();
+      e.stopPropagation();                      // the generic role="button" bridge must not also fire
+      if (e.repeat) return;                     // holding Enter is not a second press
+      if (_armEl === el) _holdFire(el); else _holdArm(el);
+    });
+    el.addEventListener('blur', function () { if (_armEl === el) _holdDisarm(); });
+  });
+}
+_initHoldConfirm();
+
 loadChannelLogo();
 
 // ---- HEARTBEAT ----
@@ -2022,13 +2167,22 @@ async function saveToHistory(info, url) {
   } catch {}
 }
 
+// Reached only through the hold-to-confirm gesture (or a second keyboard
+// press). The list is emptied locally only after the server says it went, so a
+// failed DELETE leaves the panel honest instead of showing nothing while the
+// history still exists on disk.
 async function clearHistory() {
+  const n = _historyItems ? _historyItems.length : 0;
   try {
-    await fetch(`${API}/history`, { method: 'DELETE' });
+    const r = await fetch(`${API}/history`, { method: 'DELETE' });
+    if (!r.ok) { log(`Could not clear history: server returned ${r.status}.`, 'error'); return; }
     _historyItems = [];
     _historyOpen = false;
     renderHistory();
-  } catch {}
+    log(`Download history cleared (${n} entr${n === 1 ? 'y' : 'ies'}).`, 'info');
+  } catch {
+    log('Could not clear history: no response from the server.', 'error');
+  }
 }
 
 function loadChannelLogo() {
@@ -3228,9 +3382,14 @@ function removeDlQueue(idx) {
   renderDlQueue();
 }
 
+// Reached only through the hold-to-confirm gesture (or a second keyboard
+// press) — the queue can hold dozens of hand-picked entries and nothing here
+// restores them.
 function clearDlQueue() {
+  const n = dlQueue.length;
   dlQueue = [];
   renderDlQueue();
+  log(`Job queue cleared (${n} item${n === 1 ? '' : 's'} removed).`, 'info');
 }
 
 // ---- LOCAL CONVERSION ----

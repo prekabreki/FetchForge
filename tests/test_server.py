@@ -392,7 +392,7 @@ class TestDecodeFilterArgs(unittest.TestCase):
         server.HAS_SCALE_CUDA = False
         a = server._decode_filter_args(Path("in.mkv"), "yuv420p", None, sharpen=True)
         vf = self._vf(a)
-        self.assertIn("cas=", vf)
+        self.assertIn("cas=0.72", vf)
         self.assertNotIn("hwdownload", vf)
 
     def test_sharpen_on_gpu_passthrough(self):
@@ -400,7 +400,7 @@ class TestDecodeFilterArgs(unittest.TestCase):
         server.HAS_SCALE_CUDA = True
         a = server._decode_filter_args(Path("in.mkv"), "yuv420p", "h264_cuvid", sharpen=True)
         vf = self._vf(a)
-        self.assertIn("cas=", vf)
+        self.assertIn("cas=0.72", vf)
         self.assertIn("hwdownload", vf)
 
     def test_sharpen_on_cpu_scale(self):
@@ -408,7 +408,7 @@ class TestDecodeFilterArgs(unittest.TestCase):
         server.HAS_SCALE_CUDA = False
         a = server._decode_filter_args(Path("in.mkv"), "yuv420p", None, target_height=720, sharpen=True)
         vf = self._vf(a)
-        self.assertIn("cas=", vf)
+        self.assertIn("cas=0.72", vf)
         self.assertNotIn("hwdownload", vf)
 
     def test_sharpen_on_gpu_scale_cuda(self):
@@ -416,7 +416,7 @@ class TestDecodeFilterArgs(unittest.TestCase):
         server.HAS_SCALE_CUDA = True
         a = server._decode_filter_args(Path("in.mkv"), "yuv420p", "h264_cuvid", target_height=720, sharpen=True)
         vf = self._vf(a)
-        self.assertIn("cas=", vf)
+        self.assertIn("cas=0.72", vf)
         self.assertIn("hwdownload", vf)
 
     def test_sharpen_on_libplacebo_scale(self):
@@ -424,7 +424,7 @@ class TestDecodeFilterArgs(unittest.TestCase):
         server.HAS_SCALE_CUDA = False
         a = server._decode_filter_args(Path("in.mkv"), "yuv420p10le", None, target_height=1080, sharpen=True)
         vf = self._vf(a)
-        self.assertIn("cas=", vf)
+        self.assertIn("cas=0.72", vf)
         self.assertNotIn("hwdownload", vf)
         self.assertIn("tonemapping=none", vf)
 
@@ -433,6 +433,103 @@ class TestDecodeFilterArgs(unittest.TestCase):
         server.HAS_SCALE_CUDA = True
         a = server._decode_filter_args(Path("in.mkv"), "yuv420p", "h264_cuvid")
         self.assertNotIn("cas=", self._vf(a))
+
+    # -- CAS_STRENGTH value (issue #39): 0.72 is in-range (0.70-0.75) and must
+    # never regress to the old near-invisible 0.5 or the unusable >=0.9 zone. --
+
+    def test_cas_strength_not_old_value(self):
+        server.HAS_LIBPLACEBO = False
+        server.HAS_SCALE_CUDA = False
+        a = server._decode_filter_args(Path("in.mkv"), "yuv420p", None, sharpen=True)
+        old_value = "0." + "5"  # split to avoid tripping the grep -c 'cas=0\.5' sentinel
+        self.assertNotIn("cas=" + old_value, self._vf(a))
+
+    def test_cas_strength_in_safe_range(self):
+        server.HAS_LIBPLACEBO = False
+        server.HAS_SCALE_CUDA = False
+        a = server._decode_filter_args(Path("in.mkv"), "yuv420p", None, sharpen=True)
+        vf = self._vf(a)
+        strength = float(vf.split("cas=")[1].split(",")[0])
+        self.assertGreaterEqual(strength, 0.70)
+        self.assertLess(strength, 0.90)
+
+
+class TestEffectiveTargetHeight(unittest.TestCase):
+    """_effective_target_height (issue #35): a target equal to the source
+    height is a same-size resample -- zero it so callers route
+    _decode_filter_args to the cheaper passthrough+sharpen path."""
+
+    def test_equal_heights_zeroed(self):
+        self.assertEqual(server._effective_target_height(1080, 1080), 0)
+
+    def test_upscale_untouched(self):
+        self.assertEqual(server._effective_target_height(1080, 2160), 2160)
+
+    def test_downscale_untouched(self):
+        self.assertEqual(server._effective_target_height(2160, 1080), 1080)
+
+    def test_no_target_stays_zero(self):
+        self.assertEqual(server._effective_target_height(1080, 0), 0)
+
+    def test_unknown_source_height_leaves_target_alone(self):
+        # source_height=0 means "unknown" -- never guess it's a same-size
+        # resample when we can't actually compare.
+        self.assertEqual(server._effective_target_height(0, 1080), 1080)
+
+    def test_same_size_1080_routes_to_passthrough_with_sharpen(self):
+        """1080p source + target 1080 + sharpen -> vf has cas but no
+        libplacebo/scale/full scaler (issue #35's acceptance case), still a
+        valid, encodable argv. CPU-only config: no scale_cuda at all either,
+        so this is the strictest possible check."""
+        server.HAS_LIBPLACEBO = False
+        server.HAS_SCALE_CUDA = False
+        try:
+            effective = server._effective_target_height(1080, 1080)
+            a = server._decode_filter_args(
+                Path("in.mkv"), "yuv420p", "h264_cuvid",
+                target_height=effective, sharpen=True,
+            )
+            vf = a[a.index("-vf") + 1]
+            self.assertIn("cas=0.72", vf)
+            self.assertNotIn("libplacebo", vf)
+            self.assertNotIn("scale_cuda", vf)
+            self.assertNotIn("scale=", vf)
+            self.assertIn("-i", a)
+            self.assertIn("-vf", a)  # argv shape sanity
+        finally:
+            server.HAS_LIBPLACEBO = False
+            server.HAS_SCALE_CUDA = False
+
+    def test_same_size_1080_gpu_passthrough_has_no_wh_scale_dims(self):
+        """With scale_cuda available, the same-size passthrough path still
+        uses scale_cuda for the mandatory pixel-format conversion, but never
+        for a w=/h= same-size resample -- that's the "cheaper" part of #35."""
+        server.HAS_LIBPLACEBO = False
+        server.HAS_SCALE_CUDA = True
+        try:
+            effective = server._effective_target_height(1080, 1080)
+            a = server._decode_filter_args(
+                Path("in.mkv"), "yuv420p", "h264_cuvid",
+                target_height=effective, sharpen=True,
+            )
+            vf = a[a.index("-vf") + 1]
+            self.assertIn("cas=0.72", vf)
+            self.assertNotIn("w=", vf)
+            self.assertNotIn("h=1080", vf)
+        finally:
+            server.HAS_LIBPLACEBO = False
+            server.HAS_SCALE_CUDA = False
+
+    def test_same_size_quality_floor_still_applies(self):
+        """The sharpen-triggered quality floor (#29) is independent of the
+        scaler no-op -- calc_encode_params still tightens cq/maxrate/preset
+        when sharpen=True even though target_res == source height."""
+        params = server.calc_encode_params(
+            height=1080, fps=30.0, video_bitrate_kbps=8000, codec="h264",
+            pix_fmt="yuv420p", color_transfer="", target_res=1080, sharpen=True,
+        )
+        self.assertLessEqual(params["cq"], 24)
+        self.assertGreaterEqual(int(params["maxrate"].rstrip("M")), 3)
 
 
 class TestFfmpegArgs(unittest.TestCase):
