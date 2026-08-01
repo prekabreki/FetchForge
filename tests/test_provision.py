@@ -1,5 +1,6 @@
 import os
 import unittest
+from pathlib import Path
 from unittest import mock
 from fetchforge import provision
 
@@ -19,7 +20,11 @@ class TestUsePreservesPath(unittest.TestCase):
         with mock.patch("shutil.which", return_value=None), \
              mock.patch.dict(os.environ, {"PATH": "/venv/bin:/usr/bin"}, clear=True):
             provision._use("/opt/ff/ffmpeg")
-            self.assertTrue(os.environ["PATH"].startswith("/opt/ff" + os.pathsep))
+            # _use() resolves the path before splitting off the parent dir, so the
+            # expected prefix must go through the same resolve() (adds a drive
+            # letter on Windows) rather than a hardcoded POSIX literal.
+            expected_dir = str(Path("/opt/ff/ffmpeg").resolve().parent)
+            self.assertTrue(os.environ["PATH"].startswith(expected_dir + os.pathsep))
 
 
 class TestNvencDetection(unittest.TestCase):
@@ -169,7 +174,10 @@ class TestEnsureFfmpeg(unittest.TestCase):
             os.environ["PATH"] = "/orig/bin"
             result = provision._use("/opt/ff/ffmpeg")
             self.assertEqual(result, "/opt/ff/ffmpeg")           # returns path unchanged
-            self.assertTrue(os.environ["PATH"].startswith("/opt/ff" + os.pathsep))  # dir prepended
+            # Derived (not hardcoded) expected prefix: _use() resolves the path
+            # before taking .parent, which adds a drive letter on Windows.
+            expected_dir = str(Path("/opt/ff/ffmpeg").resolve().parent)
+            self.assertTrue(os.environ["PATH"].startswith(expected_dir + os.pathsep))  # dir prepended
             self.assertIn("/orig/bin", os.environ["PATH"])       # original PATH preserved
         finally:
             os.environ["PATH"] = orig                            # never leak PATH mutation
