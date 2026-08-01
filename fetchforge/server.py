@@ -898,8 +898,56 @@ current_dl_process: Optional[asyncio.subprocess.Process] = None
 # WHOLE job (no next item, no retry) — not just the one process it happened to catch.
 # Cleared at the start of every new /download and /convert-local stream.
 _cancel_requested = asyncio.Event()
-_nvenc_tune: str = "uhq"  # Verified at startup; falls back to "hq" on older drivers
+# Verified at startup by _probe_nvenc_tune(); falls back to "hq" whenever the probe
+# fails, whatever the reason (old ffmpeg build, driver rejection, or anything else).
+_nvenc_tune: str = "uhq"
+# Why the uhq probe landed where it did — one of the _TUNE_* constants below. Stored
+# alongside _nvenc_tune so the cause can be surfaced later without re-probing.
+_nvenc_tune_cause: str = "supported"
+
+# Probe outcomes. "ffmpeg_too_old" and "driver_rejected" have the same effect (fall
+# back to "hq") but completely different remedies, so they must not be conflated:
+#   ffmpeg_too_old  — ffmpeg rejected the *option name*; the build predates the uhq
+#                     NVENC tune (added in ffmpeg 7.1). The driver never saw it.
+#   driver_rejected — ffmpeg knows -tune uhq; the driver/GPU refused the config.
+#   probe_failed    — the probe failed for some other/unrecognised reason. Degrade to
+#                     "hq" anyway: never leave "uhq" on a setup that just failed.
+_TUNE_SUPPORTED = "supported"
+_TUNE_FFMPEG_TOO_OLD = "ffmpeg_too_old"
+_TUNE_DRIVER_REJECTED = "driver_rejected"
+_TUNE_PROBE_FAILED = "probe_failed"
 _MAX_CONSECUTIVE_ENCODE_FAILURES = 3  # pipeline mode: bail out if the encoder is fundamentally broken
+
+
+def _classify_tune_probe(stderr: str) -> str:
+    """Classify the -tune uhq probe's stderr into one of the _TUNE_* outcomes. Pure —
+    no I/O, no globals — so every branch is unit-testable without ffmpeg or a GPU.
+
+    Order matters: an ffmpeg that predates the uhq tune rejects the *option name*
+    ("Unable to parse option value" / "Error setting option tune") and the driver is
+    never consulted, so that signature is checked first. Only once ffmpeg has accepted
+    the option can "InitializeEncoder failed" / "invalid param" mean the driver said no.
+
+    Anything else that still looks like a failed run is _TUNE_PROBE_FAILED, not
+    supported — an unrecognised failure must never be read as a working uhq."""
+    err = stderr or ""
+    if "Unable to parse option value" in err or "Error setting option tune" in err:
+        return _TUNE_FFMPEG_TOO_OLD
+    if "InitializeEncoder failed" in err or "invalid param" in err:
+        return _TUNE_DRIVER_REJECTED
+    # Generic ffmpeg failure markers: the probe blew up in a way we don't have a
+    # specific remedy for. Still a failure, so still degrade to "hq".
+    generic_failures = (
+        "Conversion failed",
+        "Error while opening encoder",
+        "Error initializing output stream",
+        "Unknown encoder",
+        "Cannot load nvcuda",
+        "No NVENC capable devices found",
+    )
+    if any(marker in err for marker in generic_failures):
+        return _TUNE_PROBE_FAILED
+    return _TUNE_SUPPORTED
 
 
 async def _probe_nvenc_tune():
@@ -908,7 +956,7 @@ async def _probe_nvenc_tune():
     (RTX 3060, RTX 4080). uhq manages B-frames internally; passing -bf overrides this
     and causes InitializeEncoder failed: invalid param (8). The probe tests uhq without
     -bf, which is how it's actually used in encodes."""
-    global _nvenc_tune
+    global _nvenc_tune, _nvenc_tune_cause
     proc = await asyncio.create_subprocess_exec(
         get_ffmpeg(), "-f", "lavfi", "-i", "nullsrc=s=1920x1080:d=0.1",
         "-vframes", "3",
@@ -927,12 +975,28 @@ async def _probe_nvenc_tune():
     )
     _, stderr = await proc.communicate()
     err = stderr.decode(errors="replace")
-    if "InitializeEncoder failed" in err or "Unable to parse option value" in err or "invalid param" in err:
-        _nvenc_tune = "hq"
-        logger.info("hevc_nvenc: 'uhq' not supported on this driver — using 'hq' + AQ")
-    else:
+    cause = _classify_tune_probe(err)
+    # Belt and braces: a non-zero exit means the probe failed even if none of the
+    # known markers appeared in stderr. Never report "supported" on a failed run.
+    if cause == _TUNE_SUPPORTED and proc.returncode not in (0, None):
+        cause = _TUNE_PROBE_FAILED
+
+    _nvenc_tune_cause = cause
+    if cause == _TUNE_SUPPORTED:
         _nvenc_tune = "uhq"
         logger.info("hevc_nvenc: 'uhq' supported")
+    else:
+        _nvenc_tune = "hq"
+        if cause == _TUNE_FFMPEG_TOO_OLD:
+            logger.info("hevc_nvenc: this ffmpeg build does not know the 'uhq' tune "
+                        "(added in ffmpeg 7.1) — using 'hq' + AQ. Update ffmpeg to "
+                        "enable it; your GPU driver is not the problem.")
+        elif cause == _TUNE_DRIVER_REJECTED:
+            logger.info("hevc_nvenc: 'uhq' not supported on this driver — using 'hq' + AQ. "
+                        "Update the NVIDIA driver to enable it.")
+        else:
+            logger.info("hevc_nvenc: 'uhq' probe failed for an unrecognised reason — "
+                        "using 'hq' + AQ")
 
 
 def build_video_ffmpeg_args(input_file: Path, output_file: Path, params: dict,
