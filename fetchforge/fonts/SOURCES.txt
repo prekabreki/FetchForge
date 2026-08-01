@@ -1,0 +1,82 @@
+FetchForge vendored webfonts — provenance and licence
+=====================================================
+
+These four .woff2 files are byte-for-byte the files Google Fonts served to
+`fetchforge/index.html` before it stopped using the CDN (see issue #53). They
+are vendored so the UI keeps its real typefaces with no network at all — this
+is a localhost tool and local conversion works offline.
+
+They are NOT re-generated or re-compressed. Re-encoding them with fontTools was
+measured and made Outfit ~15% LARGER, so the upstream bytes win. Keeping the
+upstream bytes also guarantees rendering is identical to the CDN.
+
+Fetched: 2026-08-01
+
+
+Outfit
+------
+  Upstream project : https://github.com/Outfitio/Outfit-Fonts
+  Google Fonts dir : https://github.com/google/fonts/tree/main/ofl/outfit
+  Font version     : 1.100 (gftools 0.9.27)
+  Google API rev   : v15
+  Licence          : SIL Open Font License 1.1 -> OFL-Outfit.txt
+  Copyright        : Copyright 2021 The Outfit Project Authors
+
+  outfit-latin.woff2      32292 B  https://fonts.gstatic.com/s/outfit/v15/QGYvz_MVcBeNP4NJtEtq.woff2
+  outfit-latin-ext.woff2  14808 B  https://fonts.gstatic.com/s/outfit/v15/QGYvz_MVcBeNP4NJuktqQ4E.woff2
+
+
+JetBrains Mono
+--------------
+  Upstream project : https://github.com/JetBrains/JetBrainsMono
+  Google Fonts dir : https://github.com/google/fonts/tree/main/ofl/jetbrainsmono
+  Font version     : 2.211
+  Google API rev   : v24
+  Licence          : SIL Open Font License 1.1 -> OFL-JetBrainsMono.txt
+  Copyright        : Copyright 2020 The JetBrains Mono Project Authors
+
+  jetbrains-mono-latin.woff2      31432 B  https://fonts.gstatic.com/s/jetbrainsmono/v24/tDbv2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8yKwBNntkaToggR7BYRbKPxDcwg.woff2
+  jetbrains-mono-latin-ext.woff2  11624 B  https://fonts.gstatic.com/s/jetbrainsmono/v24/tDbv2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8yKwBNntkaToggR7BYRbKPx7cwhsk.woff2
+
+
+Subsetting
+----------
+Unicode: latin + latin-ext only. The other subsets Google offers (cyrillic,
+cyrillic-ext, greek, vietnamese) are dropped. latin-ext is kept because the UI
+renders arbitrary YouTube video titles and Windows filesystem paths, which
+routinely carry accented characters; its `unicode-range` means the browser only
+downloads it when such a character actually appears, so an ASCII page still
+costs only the two latin files (62.2 KiB).
+
+Weight: both files are VARIABLE fonts, and Google does NOT clip the wght axis
+to the weights you request in the CSS2 URL — the URL only decides which
+@font-face blocks it emits. The shipped Outfit spans wght 100-900 and the
+shipped JetBrains Mono spans wght 400-800 on disk, regardless.
+
+That makes the @font-face `font-weight` range in index.html load-bearing, not
+decorative:
+
+  Outfit          400 800   the weights the CSS actually asks for are 400
+                            (body default), 600, 700 and 800. 500 is never
+                            requested on the sans face.
+  JetBrains Mono  400 500   deliberately narrower than the file supports. Mono
+                            rules that ask for 700 (.card-num, .size-tracker-pct,
+                            .failure-item-cat, .shutdown-overlay-count) clamp to
+                            500, exactly as they did against the CDN. Widening
+                            this to 400 800 would silently make them heavier.
+
+
+Regenerating
+------------
+Ask the CSS2 API with a modern-browser User-Agent (it serves woff2 only to
+browsers that support it) and download the URLs it returns:
+
+  curl -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+    (KHTML, like Gecko) Chrome/120.0 Safari/537.36" \
+    "https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800\
+&family=JetBrains+Mono:wght@400;500&display=swap"
+
+Re-download the licences alongside any font refresh:
+
+  https://raw.githubusercontent.com/google/fonts/main/ofl/outfit/OFL.txt
+  https://raw.githubusercontent.com/google/fonts/main/ofl/jetbrainsmono/OFL.txt

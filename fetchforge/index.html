@@ -5,9 +5,59 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="dlpr-token" content="__DLPR_TOKEN__">
 <title>FetchForge — YouTube Downloader & H.265 Converter</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<!-- Fonts are served by this process from fetchforge/fonts/, not by a CDN. This is
+     a localhost tool and local conversion works with no network at all; the CDN
+     version fell back to system fonts offline, which DESIGN.md does not allow.
+     The two latin files are always needed, so preload them to skip the swap flash. -->
+<link rel="preload" as="font" type="font/woff2" href="/fonts/outfit-latin.woff2" crossorigin>
+<link rel="preload" as="font" type="font/woff2" href="/fonts/jetbrains-mono-latin.woff2" crossorigin>
 <style>
+  /* Vendored from Google Fonts, byte-identical to what the CDN served. Provenance,
+     licences and the subsetting rationale: fetchforge/fonts/SOURCES.txt.
+
+     Both files are VARIABLE fonts whose wght axis on disk is wider than we use
+     (Outfit 100-900, JetBrains Mono 400-800). The ranges below are therefore
+     load-bearing — they reproduce the CDN's font matching exactly. In particular
+     JetBrains Mono is pinned to 400 500 even though the file goes to 800: the
+     mono rules that ask for 700 clamp to 500 today, and widening this range
+     would silently make them heavier.
+
+     latin-ext is a separate face on purpose. Video titles and Windows paths carry
+     accented characters, but unicode-range means it is only fetched when one
+     actually appears. */
+  @font-face {
+    font-family: 'Outfit';
+    font-style: normal;
+    font-weight: 400 800;
+    font-display: swap;
+    src: url('/fonts/outfit-latin.woff2') format('woff2');
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+  }
+  @font-face {
+    font-family: 'Outfit';
+    font-style: normal;
+    font-weight: 400 800;
+    font-display: swap;
+    src: url('/fonts/outfit-latin-ext.woff2') format('woff2');
+    unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+  }
+  @font-face {
+    font-family: 'JetBrains Mono';
+    font-style: normal;
+    font-weight: 400 500;
+    font-display: swap;
+    src: url('/fonts/jetbrains-mono-latin.woff2') format('woff2');
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+  }
+  @font-face {
+    font-family: 'JetBrains Mono';
+    font-style: normal;
+    font-weight: 400 500;
+    font-display: swap;
+    src: url('/fonts/jetbrains-mono-latin-ext.woff2') format('woff2');
+    unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+  }
+
   :root {
     --bg: #111318;
     --surface: #1a1d25;
