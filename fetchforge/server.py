@@ -515,6 +515,24 @@ def _video_format_selector(vf: str, af: str, prefer_picked: bool) -> str:
     return fallback
 
 
+def _audio_format_selector(af: str) -> str:
+    """Build yt-dlp's -f for an audio-only download.
+
+    The video path has had a best-available fallback since #13; audio never did,
+    so a bare itag went straight to yt-dlp and any video lacking it hard-failed
+    with "Requested format is not available" in about four seconds. That is not
+    hypothetical: a playlist's audio pick is read from the FIRST entry only, and
+    the `-drc` (dynamic-range-compressed) variants YouTube offers on some videos
+    are absent on most, so one picked `140-drc` can fail a whole 110-item queue.
+
+    Unlike resolution, audio itags are near-universal (140/251 are on almost
+    everything), so the pick is usually representative and worth honouring even
+    for a playlist -- we keep it and append the fallback, rather than discarding
+    it the way the video selector must for a mixed 720p/1080p list."""
+    fallback = "ba/b"
+    return "{}/{}".format(af, fallback) if af else fallback
+
+
 def _resolve_batch_items(items_json: str):
     """Parse the client `items` payload into the structures the pipeline
     consumes. Returns (video_urls, video_titles, video_durations, per_item)
@@ -2235,7 +2253,7 @@ async def download(
         # no merge to MKV. Output filename detection swaps from [Merger] to [download] Destination.
         def _yt_format_args() -> list:
             if is_audio:
-                return ["-f", audio_format]
+                return ["-f", _audio_format_selector(audio_format)]
             # Single video honors the explicit pick (with a best-available
             # fallback); a multi-video playlist always grabs the highest
             # available per video (mixed 720p/1080p lists — issue #13).
