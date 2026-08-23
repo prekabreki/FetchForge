@@ -232,6 +232,14 @@
     line-height: 1.6;
   }
   .cap-warning-list strong { color: var(--text); font-weight: 600; }
+  /* The "your GPU is fine" line. Body colour, not --accent: it is the one part of
+     this banner that is reassurance rather than warning, and colouring it amber
+     with everything else is what let the whole box read as "NVENC is broken". */
+  .cap-warning-note {
+    font-size: 13px;
+    color: var(--text2);
+    margin: 0 0 8px;
+  }
   /* Mono, because a filesystem path is instrument data. Long Windows paths must
      wrap rather than push the page sideways. */
   .cap-warning-meta {
@@ -1339,6 +1347,7 @@
     <div>
       <div class="cap-warning-head" id="cap-warning-head"></div>
       <ul class="cap-warning-list" id="cap-warning-list"></ul>
+      <div class="cap-warning-note" id="cap-warning-note" hidden></div>
       <div class="cap-warning-meta">
         ffmpeg in use: <span id="cap-warning-path"></span><br>
         reported version: <span id="cap-warning-version"></span>
@@ -2668,6 +2677,9 @@ async function fetchCapabilities() {
       ' — ' + [it.impact, it.remedy].filter(Boolean).join(' ')));
     list.appendChild(li);
   });
+  const note = document.getElementById('cap-warning-note');
+  note.textContent = w.reassurance || '';
+  note.hidden = !w.reassurance;
   document.getElementById('cap-warning-path').textContent = w.ffmpeg_path;
   document.getElementById('cap-warning-version').textContent = w.ffmpeg_version;
   box.hidden = false;
