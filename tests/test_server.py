@@ -73,6 +73,25 @@ class TestVideoFormatSelector(unittest.TestCase):
                          "bv*+ba/b")
 
 
+class TestAudioFormatSelector(unittest.TestCase):
+    """The audio twin of the above. A bare itag hard-failed every video that
+    lacked it -- a `140-drc` pick read from a playlist's first entry failed a
+    110-item audio queue in four seconds each, because the `-drc` variants are
+    absent on most videos."""
+
+    def test_pick_is_honoured_with_a_fallback(self):
+        self.assertEqual(server._audio_format_selector("140-drc"), "140-drc/ba/b")
+
+    def test_no_pick_falls_back_to_best_audio(self):
+        self.assertEqual(server._audio_format_selector(""), "ba/b")
+
+    def test_selector_is_never_a_bare_itag(self):
+        """The regression itself: whatever we emit must carry a fallback, or a
+        video missing the itag dies on 'Requested format is not available'."""
+        for pick in ("140", "140-drc", "251", ""):
+            self.assertIn("/", server._audio_format_selector(pick))
+
+
 class TestCookieFetch(unittest.TestCase):
     """Issue #12: browser cookie scanning — profile enumeration + counting."""
 

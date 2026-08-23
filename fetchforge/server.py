@@ -515,6 +515,24 @@ def _video_format_selector(vf: str, af: str, prefer_picked: bool) -> str:
     return fallback
 
 
+def _audio_format_selector(af: str) -> str:
+    """Build yt-dlp's -f for an audio-only download.
+
+    The video path has had a best-available fallback since #13; audio never did,
+    so a bare itag went straight to yt-dlp and any video lacking it hard-failed
+    with "Requested format is not available" in about four seconds. That is not
+    hypothetical: a playlist's audio pick is read from the FIRST entry only, and
+    the `-drc` (dynamic-range-compressed) variants YouTube offers on some videos
+    are absent on most, so one picked `140-drc` can fail a whole 110-item queue.
+
+    Unlike resolution, audio itags are near-universal (140/251 are on almost
+    everything), so the pick is usually representative and worth honouring even
+    for a playlist -- we keep it and append the fallback, rather than discarding
+    it the way the video selector must for a mixed 720p/1080p list."""
+    fallback = "ba/b"
+    return "{}/{}".format(af, fallback) if af else fallback
+
+
 def _resolve_batch_items(items_json: str):
     """Parse the client `items` payload into the structures the pipeline
     consumes. Returns (video_urls, video_titles, video_durations, per_item)
@@ -1314,22 +1332,23 @@ def _uhq_capability(tune_cause: str) -> dict:
     different remedies: an ffmpeg that never knew the option and a driver that
     refused it must not be given the same advice."""
     if tune_cause == _TUNE_FFMPEG_TOO_OLD:
-        remedy = ("Update ffmpeg — the uhq tune arrived in ffmpeg 7.1. "
-                  "Your GPU driver is not the problem.")
+        remedy = ("Update ffmpeg. This mode arrived in ffmpeg 7.1. "
+                  "Your GPU driver is fine.")
     elif tune_cause == _TUNE_DRIVER_REJECTED:
-        remedy = ("Update the NVIDIA driver — this ffmpeg knows the uhq tune, "
-                  "the driver refused it.")
+        remedy = ("Update your NVIDIA driver. This ffmpeg has the mode; "
+                  "the driver turned it down.")
     elif tune_cause == _TUNE_SUPPORTED:
         remedy = ""
     else:
         remedy = ("Check the startup log for the hevc_nvenc probe output — the "
-                  "uhq probe failed for an unrecognised reason.")
+                  "test failed for a reason we do not recognise.")
     return {
         "key": "nvenc_uhq_tune",
-        "name": "NVENC 'uhq' archival tune",
+        "name": "Best-quality encode mode (uhq)",
         "ok": tune_cause == _TUNE_SUPPORTED,
         "cause": tune_cause,
-        "impact": "Encodes fall back to the 'hq' tune — faster, lower quality.",
+        "impact": "Encodes use the faster 'hq' mode instead — slightly lower "
+                  "quality.",
         "remedy": remedy,
     }
 
@@ -1348,22 +1367,24 @@ def build_capability_report(*, ffmpeg_path: str, ffmpeg_version: str,
         _uhq_capability(tune_cause),
         {
             "key": "scale_cuda",
-            "name": "GPU-resident pixel-format conversion (scale_cuda)",
+            "name": "Colour-format conversion on the GPU (scale_cuda)",
             "ok": bool(has_scale_cuda),
             "cause": "supported" if has_scale_cuda else "filter_missing",
-            "impact": "Format conversion falls back to the CPU — slower encodes.",
+            "impact": "That one step runs on the CPU instead — encodes are a "
+                      "bit slower.",
             "remedy": "" if has_scale_cuda else
-                      ("Use an ffmpeg built with --enable-libnpp (the Windows "
-                       "gyan.dev / BtbN builds have it)."),
+                      ("Only ffmpeg builds made with --enable-libnpp have it. "
+                       "The Windows gyan.dev and BtbN builds do; most Linux "
+                       "packages do not."),
         },
         {
             "key": "libplacebo",
-            "name": "High-quality scaler (libplacebo / ewa_lanczos)",
+            "name": "Best-quality resizing (libplacebo)",
             "ok": bool(has_libplacebo),
             "cause": "supported" if has_libplacebo else "filter_missing",
-            "impact": "Upscaling falls back to a lower-quality scaler.",
+            "impact": "Resizing uses a simpler, slightly softer scaler.",
             "remedy": "" if has_libplacebo else
-                      "Use an ffmpeg built with --enable-libplacebo.",
+                      "Only ffmpeg builds made with --enable-libplacebo have it.",
         },
     ]
 
@@ -1373,9 +1394,11 @@ def build_capability_report(*, ffmpeg_path: str, ffmpeg_version: str,
 
     warning = None
     if failing:
-        noun = "capability" if len(failing) == 1 else "capabilities"
-        headline = "{} ffmpeg {} unavailable — FetchForge is using fallback paths".format(
-            len(failing), noun)
+        n = len(failing)
+        noun = "feature" if n == 1 else "features"
+        fallback = "a slower fallback" if n == 1 else "slower fallbacks"
+        headline = "ffmpeg is missing {} {} — FetchForge is using {}".format(
+            n, noun, fallback)
         # The path is the headline fact: the whole confusion this warning exists
         # to end was not knowing *which* ffmpeg was in use.
         text = "{} | ffmpeg: {} ({}) | {}".format(
@@ -1387,6 +1410,12 @@ def build_capability_report(*, ffmpeg_path: str, ffmpeg_version: str,
             "ffmpeg_version": version,
             "items": [{"name": c["name"], "impact": c["impact"],
                        "remedy": c["remedy"]} for c in failing],
+            # Every one of these three is an EXTRA on top of NVENC encoding, which
+            # the ffmpeg preflight already required to be present. Read without
+            # this line the banner is easily taken to mean the GPU is not encoding
+            # at all — the exact misreading it caused in practice.
+            "reassurance": "GPU encoding itself is working — "
+                           "these are extras on top of it.",
             "text": text,
         }
 
@@ -2235,7 +2264,7 @@ async def download(
         # no merge to MKV. Output filename detection swaps from [Merger] to [download] Destination.
         def _yt_format_args() -> list:
             if is_audio:
-                return ["-f", audio_format]
+                return ["-f", _audio_format_selector(audio_format)]
             # Single video honors the explicit pick (with a best-available
             # fallback); a multi-video playlist always grabs the highest
             # available per video (mixed 720p/1080p lists — issue #13).

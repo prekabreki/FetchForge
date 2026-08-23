@@ -113,7 +113,7 @@ class TestWarningComposition(unittest.TestCase):
     def test_unrecognised_probe_failure_still_warns(self):
         w = report(tune_cause=server._TUNE_PROBE_FAILED)["warning"]
         self.assertIsNotNone(w)
-        self.assertIn("unrecognised", w["text"])
+        self.assertIn("do not recognise", w["text"])
 
     def test_missing_scale_cuda_is_named_with_its_remedy(self):
         w = report(scale_cuda=False)["warning"]
@@ -132,11 +132,20 @@ class TestWarningComposition(unittest.TestCase):
         w = report(tune_cause=server._TUNE_FFMPEG_TOO_OLD,
                    scale_cuda=False, libplacebo=False)["warning"]
         self.assertEqual(len(w["items"]), 3)
-        self.assertIn("3 ffmpeg capabilities unavailable", w["headline"])
+        self.assertIn("ffmpeg is missing 3 features", w["headline"])
+        self.assertIn("slower fallbacks", w["headline"])
 
     def test_single_failure_headline_is_singular(self):
         w = report(scale_cuda=False)["warning"]
-        self.assertIn("1 ffmpeg capability unavailable", w["headline"])
+        self.assertIn("ffmpeg is missing 1 feature", w["headline"])
+        self.assertIn("a slower fallback", w["headline"])
+
+    def test_warning_says_gpu_encoding_still_works(self):
+        """All three capabilities are extras on top of NVENC, which the ffmpeg
+        preflight already required. Without this line the banner reads as "the
+        GPU is not encoding" -- the misreading it actually caused."""
+        w = report(scale_cuda=False)["warning"]
+        self.assertIn("GPU encoding itself is working", w["reassurance"])
 
     def test_unknown_path_is_labelled_not_blank(self):
         w = report(path="", scale_cuda=False)["warning"]
