@@ -100,13 +100,13 @@ class TestCookieFetch(unittest.TestCase):
             root = Path(d)
             (root / "Local State").write_text(json.dumps({
                 "profile": {"info_cache": {
-                    "Default": {"name": "Pétur Heima"},
-                    "Profile 1": {"name": "Pétur Vinna"},
+                    "Default": {"name": "Persónulegt"},
+                    "Profile 1": {"name": "Vinna"},
                 }}
             }), encoding="utf-8")
             profs = dict(server._chromium_profiles(root))
-            self.assertEqual(profs["Default"], "Pétur Heima")
-            self.assertEqual(profs["Profile 1"], "Pétur Vinna")
+            self.assertEqual(profs["Default"], "Persónulegt")
+            self.assertEqual(profs["Profile 1"], "Vinna")
 
     def test_chromium_profiles_fallback_scans_dirs(self):
         with tempfile.TemporaryDirectory() as d:

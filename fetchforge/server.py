@@ -1752,8 +1752,8 @@ def _firefox_root() -> Path:
 
 def _chromium_profiles(root: Path) -> list:
     """(profile_dir, display_name) pairs for a Chromium root. Reads
-    `Local State` → profile.info_cache for the dir→display-name map (so a named
-    "Pétur Heima" profile shows through), falling back to on-disk Default/Profile*
+    `Local State` → profile.info_cache for the dir→display-name map (so a profile
+    the user renamed in the browser shows through), falling back to on-disk Default/Profile*
     dirs, then to ("Default", "Default")."""
     info = {}
     ls = root / "Local State"
