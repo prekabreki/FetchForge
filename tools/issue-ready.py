@@ -106,8 +106,29 @@ def blocked_by(issue):
     """
     body = issue.get("body") or ""
     refs = set()
+    
+    # First, find all 'Blocked by' lines (inline form)
     for line in BLOCKED_BY_LINE_RE.finditer(body):
         refs |= _prefix_refs(line.group(1))
+    
+    # Second, check for '## Blocked by' heading followed by list items
+    blocked_by_heading_re = re.compile(r"(?im)^#{1,2}[ \t]*Blocked by[ \t]*$")
+    for match in blocked_by_heading_re.finditer(body):
+        section_start = match.end()
+        # Find the next heading (starts with #) after this one
+        remaining_text = body[section_start:]
+        next_heading = re.search(r"(?im)\n[ \t]*#{1,2}", remaining_text)
+        section_end = section_start + (next_heading.start() if next_heading else len(remaining_text))
+        
+        # Scan lines in the section for list items with issue references
+        section_lines = body[section_start:section_end].split('\n')
+        for line in section_lines:
+            # Match list bullets followed by #N (including numbered lists)
+            list_item_re = re.compile(r"^[ \t]*(?:[-*+][ \t]+|\d+[.)][ \t]+)#(\d+)")
+            m = list_item_re.match(line)
+            if m:
+                refs.add(int(m.group(1)))
+    
     return refs
 
 
