@@ -9,7 +9,7 @@ cd "$(dirname "$(readlink -f "$0")")"
 VENV=".venv"
 if [[ ! -d "$VENV" ]]; then
     echo "Creating virtualenv in $VENV ..."
-    python3 -m venv "$VENV"
+    "${PYTHON:-python3}" -m venv "$VENV"
 fi
 # shellcheck disable=SC1091
 source "$VENV/bin/activate"
@@ -18,8 +18,21 @@ source "$VENV/bin/activate"
 # Linux — it replaces the bundled yt-dlp.exe Windows ships. The [default] extra
 # pulls in yt-dlp-ejs, the local YouTube JS-challenge solver (version-matched to
 # yt-dlp), so n-sig solving works with node without fetching code at runtime.
-python -m pip show fetchforge >/dev/null 2>&1 || python -m pip install -e . || {
-    echo "Setup failed — ensure Python 3.12+ and pip are available." >&2; exit 1; }
+# The installed-check reads package metadata rather than `pip show`, and the
+# install falls back to uv / ensurepip: a venv created by `uv venv`/`uv sync`
+# has no pip, and relying on it made the launcher exit before starting.
+install_fetchforge() {
+    if python -m pip --version >/dev/null 2>&1; then
+        python -m pip install -e .
+    elif command -v uv >/dev/null 2>&1; then
+        uv pip install --python "$VENV/bin/python" -e .
+    else
+        python -m ensurepip --upgrade && python -m pip install -e .
+    fi
+}
+python -I -c "import importlib.metadata as m; m.version('fetchforge')" >/dev/null 2>&1 \
+    || install_fetchforge || {
+    echo "Setup failed — ensure Python 3.12+ and pip (or uv) are available." >&2; exit 1; }
 
 # ffmpeg/ffprobe come from the system; warn early if absent.
 command -v ffmpeg  >/dev/null 2>&1 || echo "WARNING: ffmpeg not found on PATH — install it (e.g. sudo dnf install ffmpeg)."
