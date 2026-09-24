@@ -144,6 +144,13 @@
     letter-spacing: -0.5px;
     color: var(--accent);
     line-height: 1.2;
+    min-width: 0;
+  }
+
+  /* The wordmark line must never break mid-word; the subtitle below it can wrap
+     onto a second line at narrow widths instead of forcing the flex row (and the
+     channel logo it shares with) past the viewport edge — see #64. */
+  .logo > div:first-child {
     white-space: nowrap;
   }
 
