@@ -631,5 +631,47 @@ class TestSseBuilders(unittest.TestCase):
                                      "bloat_pct": round(bloat, 1)}))
 
 
+class TestGetFormatsFailure(unittest.TestCase):
+    """#67 — a failed format fetch must carry a reason, not two silent empty lists."""
+
+    def _run(self, script):
+        # A stand-in yt-dlp: `python -c <script>` ignores the argv appended after it.
+        import asyncio, sys
+        with mock.patch.object(server, "get_ytdlp_argv", return_value=[sys.executable, "-c", script]), \
+             mock.patch.object(server, "cookie_args", return_value=[]), \
+             mock.patch.object(server, "NODE_ARGS", []):
+            return asyncio.run(server._get_formats("https://www.youtube.com/watch?v=00000000000"))
+
+    def test_nonzero_exit_returns_empty_lists_plus_reason(self):
+        script = ("import sys; "
+                  "sys.stderr.write('WARNING: [youtube] noise\\n'"
+                  "'ERROR: [youtube] 00000000000: Video unavailable\\n'); sys.exit(1)")
+        with self.assertLogs(server.logger, level="WARNING") as cm:
+            out = self._run(script)
+        self.assertEqual(out["video_formats"], [])
+        self.assertEqual(out["audio_formats"], [])
+        self.assertEqual(out["error"], "[youtube] 00000000000: Video unavailable")
+        self.assertIn("00000000000", cm.output[0])
+        self.assertIn("Video unavailable", cm.output[0])
+
+    def test_empty_stderr_still_gives_a_reason(self):
+        out = self._run("import sys; sys.exit(2)")
+        self.assertEqual(out["error"], "yt-dlp exited with code 2")
+
+    def test_success_path_has_no_error_key(self):
+        payload = json.dumps({"formats": [
+            {"format_id": "137", "ext": "mp4", "vcodec": "avc1", "acodec": "none", "height": 1080},
+            {"format_id": "140", "ext": "m4a", "vcodec": "none", "acodec": "mp4a", "abr": 128},
+        ]})
+        out = self._run("print({!r})".format(payload))
+        self.assertEqual(list(out), ["video_formats", "audio_formats"])
+        self.assertEqual([f["id"] for f in out["video_formats"]], ["137"])
+        self.assertEqual([f["id"] for f in out["audio_formats"]], ["140"])
+
+    def test_reason_is_trimmed(self):
+        reason = server._ytdlp_error_reason("ERROR: " + "x" * 5000, 1)
+        self.assertEqual(len(reason), server._YTDLP_REASON_MAX)
+
+
 if __name__ == "__main__":
     unittest.main()
