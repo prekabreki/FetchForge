@@ -2936,6 +2936,12 @@ function formatDuration(secs) {
   return [h,m,s].map(x=>String(x).padStart(2,'0')).join(':');
 }
 
+function clearFormatSelects() {
+  document.getElementById('video-format').innerHTML = '';
+  document.getElementById('audio-format').innerHTML = '';
+  _lastAudioFormats = [];
+}
+
 async function fetchInfo() {
   const url = document.getElementById('url-input').value.trim();
   if (!url) return;
@@ -2944,7 +2950,14 @@ async function fetchInfo() {
   log('Fetching video info...', 'info');
   try {
     const r = await fetch(`${API}/video-info?url=${encodeURIComponent(url)}`);
-    if (!r.ok) { const d = await r.json(); log('Error: ' + d.error, 'error'); return; }
+    if (!r.ok) {
+      // #67: a failed resolve must not leave the previous URL's itags selectable —
+      // a stale pick submitted with a new URL fails every queue item it touches.
+      clearFormatSelects();
+      const d = await r.json();
+      log('Error: ' + d.error, 'error');
+      return;
+    }
     const info = await r.json();
     const thumbEl = document.getElementById('thumb');
     if (info.thumbnail) {
@@ -2987,6 +3000,9 @@ async function fetchInfo() {
       aSel.appendChild(o);
     });
     _lastAudioFormats = info.audio_formats || [];
+    // #67: the title resolved but the format fetch did not — say why, rather
+    // than leaving two silently empty dropdowns.
+    if (info.error) log('Could not load formats: ' + info.error, 'error');
     // #15: a resolved playlist gets a per-video checklist (all checked); a
     // single video clears it and behaves as before.
     if (info.is_playlist && Array.isArray(info.entries) && info.entries.length) {

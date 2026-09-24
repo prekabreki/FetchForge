@@ -2087,6 +2087,25 @@ async def video_info(url: str):
         }
 
 
+_YTDLP_REASON_MAX = 300
+
+
+def _ytdlp_error_reason(stderr_text: str, returncode: int) -> str:
+    """Short, DOM-safe reason for a failed yt-dlp call: its last ``ERROR:`` line,
+    else its last non-empty line, capped at _YTDLP_REASON_MAX chars. Raw stderr
+    can run to pages of warnings, so it is never passed through wholesale."""
+    lines = [ln.strip() for ln in stderr_text.splitlines() if ln.strip()]
+    errors = [ln for ln in lines if ln.startswith("ERROR:")]
+    reason = (errors or lines or [""])[-1]
+    if reason.startswith("ERROR:"):
+        reason = reason[len("ERROR:"):].strip()
+    if not reason:
+        reason = "yt-dlp exited with code {}".format(returncode)
+    if len(reason) > _YTDLP_REASON_MAX:
+        reason = reason[:_YTDLP_REASON_MAX - 1] + "…"
+    return reason
+
+
 async def _get_formats(url: str) -> dict:
     args = [
         *get_ytdlp_argv(),
@@ -2105,7 +2124,11 @@ async def _get_formats(url: str) -> dict:
     )
     stdout, stderr = await proc.communicate()
     if proc.returncode != 0:
-        return {"video_formats": [], "audio_formats": []}
+        # #67: never fail silently — an empty pair with no reason renders as two
+        # blank dropdowns and hides bot checks, expired cookies, private videos.
+        reason = _ytdlp_error_reason(stderr.decode(errors="replace"), proc.returncode)
+        logger.warning("format fetch failed for %s: %s", url, reason)
+        return {"video_formats": [], "audio_formats": [], "error": reason}
 
     info = json.loads(stdout)
     formats = info.get("formats", [])

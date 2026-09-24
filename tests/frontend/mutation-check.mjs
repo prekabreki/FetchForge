@@ -75,6 +75,24 @@ const MUTATIONS = [
     file: 'queue-and-progress.test.mjs',
     expect: ['the job bar stays visible and advances across a 3-item queue of total:1 requests'],
   },
+  {
+    id: 'i67/clear-stale-formats',
+    guard: 'clearFormatSelects() on the failed-resolve path of fetchInfo()',
+    breaks: 'a failed resolve keeps the previous URL\'s itags, which then fail every queued item',
+    find: '      clearFormatSelects();\n      const d = await r.json();',
+    replace: '      const d = await r.json();',
+    file: 'format-fetch-errors.test.mjs',
+    expect: ['a failed resolve clears the previous video\'s formats'],
+  },
+  {
+    id: 'i67/show-format-error',
+    guard: 'the info.error log line in fetchInfo()',
+    breaks: 'a title-only resolve leaves two silently empty dropdowns with no reason',
+    find: "if (info.error) log('Could not load formats: ' + info.error, 'error');",
+    replace: '',
+    file: 'format-fetch-errors.test.mjs',
+    expect: ['a title-only resolve with a format error shows the reason'],
+  },
 ];
 
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
