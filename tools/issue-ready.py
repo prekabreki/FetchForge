@@ -2,7 +2,8 @@
 
 Prints unassigned, open GitHub issues NOT blocked by any other open issue and NOT parked
 behind a hold label, grouped by priority label (P0 -> P4 -> none). Reads 'Blocked by #N'
-(or 'Blocked by: #N', and every #N on the line for a comma-separated list) from bodies.
+(or 'Blocked by: #N', and every #N on the line for a comma-separated list) from bodies,
+plus the list form: a '## Blocked by' heading followed by '- #N' items.
 
 `deferred` is the hold label: real backlog that is not actionable YET -- data-gated, or
 waiting on an open design call. GitHub has only open/closed, so without a hold the same
@@ -49,6 +50,16 @@ LEADING_REF_RE = re.compile(r"[ \t]*#(\d+)")
 REF_SEPARATOR_RE = re.compile(r"[ \t]*(?:[,;/&+]|and\b)[ \t]*")
 # Whitespace alone continues the list ('#1 #2') but only when a ref really follows.
 REF_GAP_RE = re.compile(r"[ \t]+(?=#\d)")
+# The LIST form: a 'Blocked by' HEADING, then one blocker per list item until the next
+# heading. BLOCKED_BY_LINE_RE cannot see it -- the heading line has no refs after the
+# marker, so '## Blocked by\n- #12\n- #13' parsed as unblocked and was offered as ready
+# work while both blockers were open.
+BLOCKED_BY_HEADING_RE = re.compile(r"(?im)^[ \t]{0,3}#{1,6}[ \t]*Blocked by[ \t]*:?[ \t]*$")
+# Markdown needs a space after the hashes, so a line opening with '#41' is not a heading.
+NEXT_HEADING_RE = re.compile(r"(?m)^[ \t]{0,3}#{1,6}[ \t]")
+# Only an item that OPENS with refs counts ('- #12, #13'); '- needs #12 first' is prose,
+# the same rule the line form follows.
+LIST_ITEM_RE = re.compile(r"(?m)^[ \t]*(?:[-*+]|\d+[.)])[ \t]+(.*)$")
 
 
 def _prefix_refs(tail):
@@ -99,36 +110,22 @@ def priority_label(issue):
 
 
 def blocked_by(issue):
-    """Issue numbers declared by a 'Blocked by' line that OPENS its line.
+    """Issue numbers declared by a 'Blocked by' line that OPENS its line, or listed
+    under a 'Blocked by' heading.
 
     Only the leading run of '#N' refs counts -- see BLOCKED_BY_LINE_RE and
     _prefix_refs for the two false positives each rule was paid for.
     """
     body = issue.get("body") or ""
     refs = set()
-    
-    # First, find all 'Blocked by' lines (inline form)
     for line in BLOCKED_BY_LINE_RE.finditer(body):
         refs |= _prefix_refs(line.group(1))
-    
-    # Second, check for '## Blocked by' heading followed by list items
-    blocked_by_heading_re = re.compile(r"(?im)^#{1,2}[ \t]*Blocked by[ \t]*$")
-    for match in blocked_by_heading_re.finditer(body):
-        section_start = match.end()
-        # Find the next heading (starts with #) after this one
-        remaining_text = body[section_start:]
-        next_heading = re.search(r"(?im)\n[ \t]*#{1,2}", remaining_text)
-        section_end = section_start + (next_heading.start() if next_heading else len(remaining_text))
-        
-        # Scan lines in the section for list items with issue references
-        section_lines = body[section_start:section_end].split('\n')
-        for line in section_lines:
-            # Match list bullets followed by #N (including numbered lists)
-            list_item_re = re.compile(r"^[ \t]*(?:[-*+][ \t]+|\d+[.)][ \t]+)#(\d+)")
-            m = list_item_re.match(line)
-            if m:
-                refs.add(int(m.group(1)))
-    
+    for heading in BLOCKED_BY_HEADING_RE.finditer(body):
+        start = heading.end()
+        nxt = NEXT_HEADING_RE.search(body, start)
+        section = body[start:nxt.start() if nxt else len(body)]
+        for item in LIST_ITEM_RE.finditer(section):
+            refs |= _prefix_refs(item.group(1))
     return refs
 
 
