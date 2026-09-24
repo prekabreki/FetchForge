@@ -67,7 +67,7 @@ Cache (raw MKVs from yt-dlp, deleted after encode):
 | GET | `/history` | Returns last 50 history entries |
 | POST | `/history` | Saves a history entry (deduped by URL) |
 | DELETE | `/history` | Clears all history |
-| GET | `/video-info?url=` | Fetches title, duration, formats via yt-dlp. For a playlist also returns `entries` (`[{url, title, duration, index}]`) so the UI can offer a per-video checklist (#15) |
+| GET | `/video-info?url=` | Fetches title, duration, formats via yt-dlp. For a playlist also returns `entries` (`[{url, title, duration, index}]`) so the UI can offer a per-video checklist (#15). If yt-dlp's format fetch fails, both format lists come back empty with an `error` reason (#67); the UI logs it and clears any stale format picks |
 | POST | `/download` | Main SSE stream — download + encode |
 | POST | `/convert-local` | SSE stream — encode local files |
 | POST | `/probe-file` | ffprobe a local file, returns height + fps |
@@ -266,7 +266,7 @@ yield "data: {}\n\n".format(json.dumps({"msg": params["cq"]}))
 
 ## Versioning
 
-`fetchforge.__version__` in `fetchforge/__init__.py` (currently `"2.2.0"`), imported into `fetchforge/server.py` as `APP_VERSION` (`from fetchforge import __version__ as APP_VERSION`) and surfaced by `pyproject.toml`'s `dynamic = ["version"]` (`attr = "fetchforge.__version__"`) so the pip package version and the running app agree. Bump on every deploy. Displayed in the header as `v 2.2.0` with a green dot fetched from `GET /version` — confirms both HTML and server are fresh after a restart.
+`fetchforge.__version__` in `fetchforge/__init__.py` (currently `"2.2.1"`), imported into `fetchforge/server.py` as `APP_VERSION` (`from fetchforge import __version__ as APP_VERSION`) and surfaced by `pyproject.toml`'s `dynamic = ["version"]` (`attr = "fetchforge.__version__"`) so the pip package version and the running app agree. Bump on every deploy. Displayed in the header as `v 2.2.1` with a green dot fetched from `GET /version` — confirms both HTML and server are fresh after a restart.
 
 <!-- init-workspace:start -->
 ## Task tracking & work environment
