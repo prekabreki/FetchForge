@@ -340,6 +340,9 @@
   .card-body { padding: 20px; }
 
   .input-group { display: flex; gap: 8px; }
+  /* An input's auto minimum is its ~20ch intrinsic width, so flex:1 alone can't
+     shrink it and the row's button gets pushed off the card on a phone. */
+  .input-group input { min-width: 0; }
 
   input[type="url"], input[type="text"] {
     flex: 1;
@@ -461,6 +464,9 @@
   .thumb {
     width: 190px;
     flex-shrink: 0;
+    /* Without this the flex row stretches the thumbnail to the meta column's
+       height and object-fit:cover crops it into a tall sliver. */
+    align-self: flex-start;
     aspect-ratio: 16/9;
     object-fit: cover;
     border: 1px solid var(--border);
@@ -474,6 +480,12 @@
   .thumb.img-loaded { opacity: 1; }
 
   .video-meta { flex: 1; min-width: 0; }
+  /* On a phone, side by side leaves the meta column ~150px — the stream
+     dropdowns collapse to a bare "[". Stack the thumbnail above instead. */
+  @media (max-width: 520px) {
+    .video-info.visible { flex-direction: column; }
+    .thumb { width: 100%; }
+  }
 
   .video-title {
     font-family: var(--sans);
@@ -494,6 +506,41 @@
   }
 
   .field { display: flex; flex-direction: column; gap: 5px; }
+  /* A grid track's auto minimum is its content's intrinsic width, which for a
+     text input is ~20ch — enough to push the second column off the card. */
+  .format-row > .field { min-width: 0; }
+  .format-row input[type="text"] { width: 100%; min-width: 0; }
+  /* #76 — the hint spans both From/To columns and sits tight under them. */
+  .section-hint { grid-column: 1 / -1; margin-top: -6px; }
+  /* Job-queue row. Its tune <select> must not inherit the global width:100%,
+     or it eats the row and the title (the only flexible item) renders at zero
+     width — at every viewport, not just a phone. */
+  .queue-row {
+    display: flex; align-items: center; gap: 6px;
+    padding: 5px 10px; border-bottom: 1px solid var(--border);
+  }
+  .queue-title { flex: 1 1 0; min-width: 6em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .queue-detail { flex-shrink: 0; margin: 0 6px; color: var(--muted); font-size: 11px; }
+  .queue-range { color: var(--accent); }
+  .queue-row select { width: auto; flex-shrink: 0; font-size: 11px; padding: 4px 26px 4px 8px; background-position: right 8px center; }
+  .queue-row .queue-dir {   /* two classes, to outrank input[type="text"] */
+    flex: 0 0 120px; width: 120px;
+    background: var(--surface2); border: 1px solid var(--border); color: var(--text);
+    font-family: var(--mono); font-size: 11px; padding: 4px 6px;
+    border-radius: var(--radius-sm); outline: none;
+  }
+  .queue-row .queue-dir:focus { border-color: var(--accent); box-shadow: none; }
+  .queue-remove { color: var(--accent2); cursor: pointer; flex-shrink: 0; }
+  /* On a phone the fixed-width controls still leave the title too little room:
+     give it its own line and let the rest wrap beneath. */
+  @media (max-width: 520px) {
+    .queue-row { flex-wrap: wrap; row-gap: 6px; }
+    /* Title and its remove control share the first line; the rest wraps. */
+    .queue-title { order: -2; flex-basis: calc(100% - 2em); }
+    .queue-remove { order: -1; margin-left: auto; }
+    .queue-detail { flex-basis: 100%; margin-left: 0; }
+    .queue-row .queue-dir { flex: 1 1 0; width: auto; min-width: 0; }
+  }
 
   .field-label {
     font-family: var(--mono);
@@ -1434,6 +1481,17 @@
               <div class="field-label">Audio Stream</div>
               <select id="audio-format"></select>
             </div>
+          </div>
+          <div class="format-row" id="section-row">
+            <div class="field">
+              <label class="field-label" for="section-start">From</label>
+              <input type="text" id="section-start" placeholder="0:00" autocomplete="off" spellcheck="false" aria-describedby="section-hint">
+            </div>
+            <div class="field">
+              <label class="field-label" for="section-end">To</label>
+              <input type="text" id="section-end" placeholder="end" autocomplete="off" spellcheck="false" aria-describedby="section-hint">
+            </div>
+            <div class="field-hint section-hint" id="section-hint">Optional: capture only part of the video. SS, MM:SS or H:MM:SS; blank = start / end.</div>
           </div>
           <div id="playlist-select" style="display:none;margin-top:12px;">
             <div style="display:flex;align-items:center;gap:14px;margin-bottom:6px;flex-wrap:wrap;">
@@ -2937,6 +2995,58 @@ function formatDuration(secs) {
   return [h,m,s].map(x=>String(x).padStart(2,'0')).join(':');
 }
 
+// #76 — "SS", "MM:SS" or "H:MM:SS" → whole seconds; '' → null; NaN when unparseable.
+function parseTimecode(text) {
+  const t = text.trim();
+  if (!t) return null;
+  if (!/^\d+(:\d{1,2}){0,2}$/.test(t)) return NaN;
+  const parts = t.split(':').map(Number);
+  if (parts.slice(1).some(p => p > 59)) return NaN;
+  return parts.reduce((acc, p) => acc * 60 + p, 0);
+}
+
+function fmtClock(secs) {
+  const h = Math.floor(secs / 3600), m = Math.floor((secs % 3600) / 60), s = secs % 60;
+  const ss = String(s).padStart(2, '0');
+  return h ? `${h}:${String(m).padStart(2, '0')}:${ss}` : `${m}:${ss}`;
+}
+
+// Reads card #02's From/To fields against the fetched duration (0 = unknown).
+// Returns {section_start, section_end} — both null when no range applies —
+// or null after logging why the input is unusable, so callers queue nothing.
+function readSectionFields(duration) {
+  const start = parseTimecode(document.getElementById('section-start').value);
+  const end = parseTimecode(document.getElementById('section-end').value);
+  if (Number.isNaN(start) || Number.isNaN(end)) {
+    log('Time range: use SS, MM:SS or H:MM:SS.', 'error'); return null;
+  }
+  if (start !== null && end !== null && end <= start) {
+    log('Time range: "To" must be after "From".', 'error'); return null;
+  }
+  const limit = Math.ceil(duration || 0);
+  if (limit > 0 && ((start || 0) >= limit || (end !== null && end > limit))) {
+    log(`Time range: the video is only ${fmtClock(limit)} long.`, 'error'); return null;
+  }
+  if (!start && end === null) return { section_start: null, section_end: null };   // whole video
+  return { section_start: start || 0, section_end: end };
+}
+
+function clearSectionFields() {
+  document.getElementById('section-start').value = '';
+  document.getElementById('section-end').value = '';
+}
+
+function sectionLabel(q) {
+  if (q.section_start == null && q.section_end == null) return '';
+  return `${fmtClock(q.section_start || 0)}\u2013${q.section_end == null ? 'end' : fmtClock(q.section_end)}`;
+}
+
+function sameQueuedVideo(x, url, section) {
+  return x.type === 'youtube' && x.url === url
+    && (x.section_start ?? null) === section.section_start
+    && (x.section_end ?? null) === section.section_end;
+}
+
 function clearFormatSelects() {
   document.getElementById('video-format').innerHTML = '';
   document.getElementById('audio-format').innerHTML = '';
@@ -3014,6 +3124,9 @@ async function fetchInfo() {
       _playlistEntries = [];
       document.getElementById('playlist-select').style.display = 'none';
     }
+    // #76 — a range belongs to the video it was typed for, and is single-video only.
+    clearSectionFields();
+    document.getElementById('section-row').style.display = info.is_playlist ? 'none' : '';
     // A CSS animation does not replay when its class is already present, and by
     // the second Fetch Info it always is. The block's whole contents have just
     // been rewritten after another 1-3s wait, so it should read as an arrival
@@ -3077,6 +3190,8 @@ async function runOneItem(item, opts) {
     form.append('output_dir', opts.outputDir);
     form.append('tune_mode', opts.tuneMode);
     form.append('expected_size', String(item.expected_size || 0));
+    form.append('section_start', item.section_start == null ? '' : String(item.section_start));
+    form.append('section_end', item.section_end == null ? '' : String(item.section_end));
     form.append('mode', opts.mode);
     form.append('audio_preset', opts.audioPreset);
     form.append('target_res', opts.targetRes);
@@ -3137,6 +3252,8 @@ function toItemPayload(it) {
     tune_mode: it.tune_mode || currentTuneMode,
     title: it.title || it.url,
     duration: it.duration || 0,
+    section_start: it.section_start ?? null,
+    section_end: it.section_end ?? null,
   };
 }
 
@@ -3238,6 +3355,8 @@ async function startDownload() {
     if (!url) { log('Enter a URL first, or add items to the queue.', 'error'); return; }
     const needVideo = currentMode !== 'audio';
     if ((needVideo && !vf) || !af) { log('Fetch video info and select formats first.', 'error'); return; }
+    const section = readSectionFields(currentVideoDuration);
+    if (!section) return;
     dlQueue.push({
       type: 'youtube', url, title: url,
       video_format: needVideo ? vf : '', audio_format: af,
@@ -3245,6 +3364,7 @@ async function startDownload() {
       output_dir: document.getElementById('output-dir').value.trim(),
       tune_mode: currentTuneMode,
       duration: currentVideoDuration || 0,
+      ...section,
     });
     renderDlQueue();
   }
@@ -3912,7 +4032,10 @@ function addToQueue() {
   const title = document.getElementById('video-title').textContent || url;
   const needVideo = currentMode !== 'audio';
   if (!url || (needVideo && !vf) || !af) { log('Fetch video info and select formats first.', 'error'); return; }
-  if (dlQueue.find(x => x.type === 'youtube' && x.url === url)) { log('Already in queue.', 'info'); return; }
+  const section = readSectionFields(currentVideoDuration);
+  if (!section) return;
+  // Two different ranges of one video are two jobs; the same range twice is one.
+  if (dlQueue.find(x => sameQueuedVideo(x, url, section))) { log('Already in queue.', 'info'); return; }
   dlQueue.push({
     type: 'youtube', url, title,
     video_format: needVideo ? vf : '', audio_format: af,
@@ -3920,6 +4043,7 @@ function addToQueue() {
     output_dir: document.getElementById('output-dir').value.trim(),
     tune_mode: currentTuneMode,
     duration: currentVideoDuration || 0,   // captured from /video-info
+    ...section,
   });
   log('Queued: ' + title, 'info');
   renderDlQueue();
@@ -3927,6 +4051,7 @@ function addToQueue() {
   document.getElementById('url-input').value = '';
   document.getElementById('video-info').classList.remove('visible');
   document.getElementById('queue-add-btn').style.display = 'none';
+  clearSectionFields();
   currentVideoDuration = 0; // stale until the next /video-info fetch
 }
 
@@ -3945,26 +4070,25 @@ function renderDlQueue() {
       ? `${q.video_format}+${q.audio_format}`
       : (currentMode === 'audio' ? `audio:${q.audio_format}` : `best+${q.audio_format}`);
     const detail = q.type === 'local'
-      ? `<span style="color:var(--muted);margin:0 12px;flex-shrink:0;font-size: 11px;">${q.size_gb} GB</span>`
-      : `<span style="color:var(--muted);margin:0 12px;flex-shrink:0;font-size: 11px;">${fmtLabel}${q.expected_size > 0 ? ' \u00b7 ' + (q.expected_size / 1024**3).toFixed(1) + 'GB' : ''}</span>`;
+      ? `<span class="queue-detail">${q.size_gb} GB</span>`
+      : `<span class="queue-detail">${sectionLabel(q) ? `<span class="queue-range">${sectionLabel(q)}</span> \u00b7 ` : ''}${fmtLabel}${q.expected_size > 0 && !sectionLabel(q) ? ' \u00b7 ' + (q.expected_size / 1024**3).toFixed(1) + 'GB' : ''}</span>`;
     const tip = q.type === 'local' ? q.path : q.url;
     const tuneCtl = q.type === 'youtube'
-      ? `<select onchange="dlQueue[${i}].tune_mode=this.value" style="font-size: 11px;margin:0 6px;">
+      ? `<select onchange="dlQueue[${i}].tune_mode=this.value" aria-label="Encode quality">
            <option value="uhq"${q.tune_mode !== 'hq' ? ' selected' : ''}>Excellent (Slow)</option>
            <option value="hq"${q.tune_mode === 'hq' ? ' selected' : ''}>Great (Fast)</option>
          </select>`
       : '';
     const dirCtl = q.type === 'youtube'
-      ? `<input value="${escapeAttr(q.output_dir || '')}" placeholder="(default out)"
-           onchange="dlQueue[${i}].output_dir=this.value.trim()"
-           style="font-size: 11px;width:120px;margin-right:6px;">`
+      ? `<input type="text" class="queue-dir" value="${escapeAttr(q.output_dir || '')}" placeholder="(default out)"
+           aria-label="Output folder for this item" onchange="dlQueue[${i}].output_dir=this.value.trim()">`
       : '';
-    return `<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 10px;border-bottom:1px solid var(--border);">
-      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${tip}">${tag}${q.title}</span>
+    return `<div class="queue-row">
+      <span class="queue-title" title="${tip}">${tag}${q.title}</span>
       ${detail}
       ${tuneCtl}
       ${dirCtl}
-      <span style="color:var(--accent2);cursor:pointer;flex-shrink:0;" onclick="removeDlQueue(${i})" role="button" tabindex="0" aria-label="Remove item from queue"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></span>
+      <span class="queue-remove" onclick="removeDlQueue(${i})" role="button" tabindex="0" aria-label="Remove item from queue"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></span>
     </div>`;
   }).join('');
 }

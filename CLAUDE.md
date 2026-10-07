@@ -68,7 +68,7 @@ Cache (raw MKVs from yt-dlp, deleted after encode):
 | POST | `/history` | Saves a history entry (deduped by URL) |
 | DELETE | `/history` | Clears all history |
 | GET | `/video-info?url=` | Fetches title, duration, formats via yt-dlp. For a playlist also returns `entries` (`[{url, title, duration, index}]`) so the UI can offer a per-video checklist (#15). If yt-dlp's format fetch fails, both format lists come back empty with an `error` reason (#67); the UI logs it and clears any stale format picks |
-| POST | `/download` | Main SSE stream — download + encode |
+| POST | `/download` | Main SSE stream — download + encode. Optional `section_start`/`section_end` (whole seconds) capture a time range of a single video (#76); batch items carry the same two keys |
 | POST | `/convert-local` | SSE stream — encode local files |
 | POST | `/probe-file` | ffprobe a local file, returns height + fps |
 | POST | `/scan-folder` | Recursively lists video files in a folder |
@@ -102,6 +102,19 @@ Two modes controlled by the `pipeline` form field:
 - enc_worker `finally` block drains `file_q` **without deleting** queued MKVs — they were fully downloaded and should be preserved.
 - Both workers send SSE strings to `msg_q`; main generator drains `msg_q` and yields to SSE stream.
 - Each worker sends `None` sentinel when done; main generator counts 2 Nones before finishing.
+
+### Time-range capture (#76)
+A single video (or a batch item) can carry a section `(start_s, end_s|None)`, parsed and validated server-side by `parse_section()` (whole seconds only — it reaches an argv).
+yt-dlp fetches only that stretch with `section_ytdlp_args()`: `--download-sections "*S-E"` plus `--downloader-args ffmpeg_o:-copyts`.
+That is a **stream copy**, so the clip starts at the keyframe at or before `S`, and `-copyts` keeps YouTube's own timeline in the file.
+The encode step then cuts frame-exactly via `section_input_seek()` (`-ss S - file_start_time -t E-S` as *input* options, inserted before `-i` by the builders' `input_opts`).
+`--force-keyframes-at-cuts` is deliberately **not** used: it re-encodes on the CPU (41 s for a 30 s 720p clip) and adds a lossy generation before NVENC, while our encode decodes every frame anyway.
+Measured on a 4K60 HLS source: output exactly 30.000 s, first/last frames identical to the source at S and E.
+Section downloads print `[download] Destination:` and no `[Merger]` line, so both paths capture Destination when a section is set.
+The range is part of the `-o` template (`%(title)s_12m30s-18m00s.%(ext)s`, `section_suffix()`), so a clip never collides with, or is skip-matched against, the full video or another range; `_output_stem(stem, suffix)` keeps the suffix even past `sanitize()`'s 200-char cap.
+Completeness of a ranged download is `_section_download_is_complete()`: the file's packet timestamps (`_media_time_span()`) must cover the range ±2 s.
+Do **not** use ffprobe's format `duration` for that: on a Matroska/WebM file with a nonzero start it is the *end timestamp*, not the length.
+The size-based checks (`expected_size` ratios) are skipped for ranged items — the full video's size says nothing about a clip.
 
 ### Pre-download skip check
 Before downloading each video, `_predict_output_stem(title)` computes yt-dlp's exact `--restrict-filenames` output (via `yt_dlp.utils.sanitize_filename`, falling back to a regex approximation only when the package isn't importable — e.g. a Windows bundled `yt-dlp.exe`) then our `sanitize()`, and checks if `<dest>/<stem>_h265.mp4` already exists. If complete, the video is skipped. Using yt-dlp's own sanitizer avoids the accent/emoji divergence that could wrongly skip a wanted video.
@@ -209,7 +222,7 @@ Because the hidden launcher has no console to close, the server **self-exits whe
 
 1. **01 — yt-dlp** — version check + update button
 2. **02 — Authentication** — upload cookies.txt
-3. **03 — Video URL** — URL input, fetch info, format selection, history panel, add-to-queue. A resolved playlist renders a per-video checklist (`_playlistEntries`, all checked, select all/none/invert — #15); `addToQueue()` expands the checked entries into individual queue items with `video_format=""` so each takes the highest-available stream (#13) via batch/single mode
+3. **03 — Video URL** — URL input, fetch info, format selection, history panel, add-to-queue. A resolved playlist renders a per-video checklist (`_playlistEntries`, all checked, select all/none/invert — #15); `addToQueue()` expands the checked entries into individual queue items with `video_format=""` so each takes the highest-available stream (#13) via batch/single mode. Single videos get optional **From / To** fields (`#section-start`/`#section-end`, `SS`/`MM:SS`/`H:MM:SS`, hidden for playlists — #76); `readSectionFields()` validates against the fetched duration, and the queue dedupes on URL **plus** range, so two clips of one video are two jobs
 4. **04 — Conversion** — presets, advanced CQ/maxrate, pipeline/download-only/shutdown toggles, output dir
 5. **05 — Local Conversion** — browse files / browse folder / scan folder, file list, add to queue
 6. **06 — Progress** — overall job bar, per-video encode bar, phase label + filename, stats row, DL status row, size/bloat row, log box
@@ -268,7 +281,7 @@ yield "data: {}\n\n".format(json.dumps({"msg": params["cq"]}))
 
 ## Versioning
 
-`fetchforge.__version__` in `fetchforge/__init__.py` (currently `"2.2.2"`), imported into `fetchforge/server.py` as `APP_VERSION` (`from fetchforge import __version__ as APP_VERSION`) and surfaced by `pyproject.toml`'s `dynamic = ["version"]` (`attr = "fetchforge.__version__"`) so the pip package version and the running app agree. Bump on every deploy. Displayed in the header as `v 2.2.2` with a green dot fetched from `GET /version` — confirms both HTML and server are fresh after a restart.
+`fetchforge.__version__` in `fetchforge/__init__.py` (currently `"2.3.0"`), imported into `fetchforge/server.py` as `APP_VERSION` (`from fetchforge import __version__ as APP_VERSION`) and surfaced by `pyproject.toml`'s `dynamic = ["version"]` (`attr = "fetchforge.__version__"`) so the pip package version and the running app agree. Bump on every deploy. Displayed in the header as `v 2.3.0` with a green dot fetched from `GET /version` — confirms both HTML and server are fresh after a restart.
 
 <!-- init-workspace:start -->
 ## Task tracking & work environment

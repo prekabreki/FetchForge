@@ -1,3 +1,3 @@
 """FetchForge — download YouTube videos and transcode to H.265/HEVC with NVIDIA NVENC."""
 
-__version__ = "2.2.2"
+__version__ = "2.3.0"

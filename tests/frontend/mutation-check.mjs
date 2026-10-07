@@ -93,6 +93,33 @@ const MUTATIONS = [
     file: 'format-fetch-errors.test.mjs',
     expect: ['a title-only resolve with a format error shows the reason'],
   },
+  {
+    id: '76/range-order',
+    guard: 'the To-after-From check in readSectionFields()',
+    breaks: 'a reversed range is queued and only rejected by the server mid-run',
+    find: 'if (start !== null && end !== null && end <= start) {',
+    replace: 'if (false) {',
+    file: 'time-range.test.mjs',
+    expect: ['To before From is refused and nothing is queued or sent'],
+  },
+  {
+    id: '76/batch-item-range',
+    guard: 'section_start/section_end in toItemPayload()',
+    breaks: 'a pipelined batch silently downloads the whole video for a ranged item',
+    find: '    section_start: it.section_start ?? null,\n',
+    replace: '',
+    file: 'time-range.test.mjs',
+    expect: ['a pipelined batch carries each item its own range'],
+  },
+  {
+    id: '76/range-dedupe',
+    guard: 'the range-aware dedupe in addToQueue()',
+    breaks: 'a second range of the same video is refused as "Already in queue"',
+    find: "if (dlQueue.find(x => sameQueuedVideo(x, url, section))) {",
+    replace: "if (dlQueue.find(x => x.type === 'youtube' && x.url === url)) {",
+    file: 'time-range.test.mjs',
+    expect: ['the queue row shows the range, and two ranges of one video are two jobs'],
+  },
 ];
 
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
