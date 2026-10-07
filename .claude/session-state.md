@@ -1,11 +1,12 @@
 ---
 repo: FetchForge
 updated: 2026-10-07
-open_issues: [78, 79]
+open_issues: [78, 80]
 in_flight: []
 blocked_on: []
 ---
 
-Session shipped port fallback (#75, 8765 then up to 8784, reusing a running FetchForge) and time-range capture (#76 via PR #77, v2.3.0).
-Both open issues are yt-dlp resolution/update follow-ups found during #76 E2E, scoped and labelled `scoped` but not promoted to ready-for-agent.
-The repo's .venv yt-dlp was hand-upgraded with uv to 2026.08.19 (stale 2026.07.04 gave YouTube 403s); #79 is what makes the in-app button do that.
+Session tested handing scoped issues to DeepSeek without Claude in the loop, as a dry run for life after Claude Max.
+foreman-dispatch works under auto mode: #79 merged via PR #82 (c190bb7); #78's PR #81 was bounced for a vacuous test and the issue re-scoped in place (labels scoped+bounced, awaiting promotion to ready-for-agent).
+Root cause of the early failures: DeepSeek renamed deepseek-v4-flash to deepseek-flash; .foreman.local (gitignored) now uses deepseek/deepseek-flash.
+The lighter `ds-run` launcher (vibe-skills tools/ds-run) works when run by hand but auto mode's classifier blocks Claude from launching it.
