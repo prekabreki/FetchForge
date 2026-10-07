@@ -104,6 +104,37 @@ class SectionArgvTest(unittest.TestCase):
         self.assertEqual(len(cut), len(plain) + 2)
 
 
+class ClipDurationTest(unittest.TestCase):
+    def test_resolve_section_closed_range(self):
+        self.assertEqual(server._resolve_section((65, 95), 600.0), 95)
+
+    def test_resolve_section_open_ended_uses_full_duration(self):
+        self.assertEqual(server._resolve_section((65, None), 600.0), 600.0)
+
+    def test_resolve_section_open_ended_unknown_zero_duration(self):
+        self.assertIsNone(server._resolve_section((65, None), 0))
+
+    def test_resolve_section_open_ended_unknown_none_duration(self):
+        self.assertIsNone(server._resolve_section((65, None), None))
+
+    def test_clip_duration_closed_range(self):
+        result = server._clip_duration((65, 95), 600.0)
+        self.assertEqual(result, 30.0)
+        self.assertIsInstance(result, float)
+
+    def test_clip_duration_open_ended_uses_full_duration(self):
+        self.assertEqual(server._clip_duration((65, None), 600.0), 535.0)
+
+    def test_clip_duration_open_ended_unknown_duration(self):
+        self.assertIsNone(server._clip_duration((65, None), 0))
+
+    def test_clip_duration_zero_length_range(self):
+        self.assertIsNone(server._clip_duration((95, 95), 600.0))
+
+    def test_clip_duration_end_before_start(self):
+        self.assertIsNone(server._clip_duration((100, 95), 600.0))
+
+
 class BatchSectionTest(unittest.TestCase):
     def _items(self, **extra):
         return json.dumps([{"url": "https://youtu.be/AAA", "video_format": "137", "audio_format": "140",
