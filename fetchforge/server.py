@@ -309,6 +309,22 @@ def _ytdlp_in_this_env(ytdlp_argv: list) -> bool:
     return False
 
 
+def _ytdlp_upgrade_cmd() -> list | None:
+    """Command that upgrades the pip-dependency yt-dlp in this interpreter, or
+    None when neither pip nor uv is available to do it.
+
+    Mirrors launch.sh's pip -> uv ladder: a venv created by `uv venv`/`uv sync`
+    has no pip, so fall back to uv. uv is always pinned to this interpreter's
+    `--python` so the upgrade lands in the env yt-dlp actually runs from, not
+    whatever env uv would infer from the cwd."""
+    if importlib.util.find_spec("pip") is not None:
+        return [sys.executable, "-m", "pip", "install", "-U", "yt-dlp[default]"]
+    uv = shutil.which("uv")
+    if uv:
+        return [uv, "pip", "install", "--python", sys.executable, "-U", "yt-dlp[default]"]
+    return None
+
+
 def _resolve_node_args() -> list:
     """yt-dlp's JS runtime for solving challenges. Resolve node from PATH;
     fall back to the canonical Windows install location it always used."""
@@ -2170,7 +2186,15 @@ async def update_ytdlp():
     if IS_WINDOWS and ytdlp == [str(bundled)]:
         cmd = [*ytdlp, "-U"]
     elif _ytdlp_in_this_env(ytdlp):
-        cmd = [sys.executable, "-m", "pip", "install", "-U", "yt-dlp[default]"]
+        cmd = _ytdlp_upgrade_cmd()
+        if cmd is None:
+            return {"output": (
+                "yt-dlp is installed in this interpreter's environment, but "
+                "neither pip nor uv is available to upgrade it.\n"
+                "Install one of them, then run one of:\n"
+                '  {} -m pip install -U "yt-dlp[default]"\n'
+                '  uv pip install --python {} -U "yt-dlp[default]"'
+            ).format(sys.executable, sys.executable)}
     else:
         return {"output": (
             "yt-dlp here is a system/package-managed binary at {}.\n"
@@ -2184,9 +2208,11 @@ async def update_ytdlp():
         stderr=asyncio.subprocess.STDOUT,
     )
     stdout, _ = await proc.communicate()
-    # get_ytdlp_argv() is cached; a pip upgrade replaces the package in place,
-    # so the path stays valid and /ytdlp-version (a fresh subprocess) reports the
-    # new version without a server restart.
+    # get_ytdlp_argv() is cached; a successful upgrade can change which yt-dlp
+    # the resolver would pick (e.g. a console script appears), so drop the cache
+    # and let the next call re-resolve.
+    if proc.returncode == 0:
+        get_ytdlp_argv.cache_clear()
     return {"output": stdout.decode(errors="replace").strip()}
 
 
