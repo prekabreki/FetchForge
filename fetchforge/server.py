@@ -496,12 +496,160 @@ def _restrict_filename(title: str) -> str:
     return re.sub(r'[^A-Za-z0-9_.\-]', '_', title)
 
 
-def _predict_output_stem(title: str) -> str:
+def _output_stem(downloaded_stem: str, suffix: str = "") -> str:
+    """Output stem for a downloaded file. A time-range *suffix* (which the yt-dlp
+    -o template appended to the downloaded name) is kept intact even when the
+    title is long enough for sanitize()'s 200-char cap to bite — otherwise a
+    clip of a long-titled video would truncate to the full video's name."""
+    if not suffix:
+        return sanitize(downloaded_stem)
+    if downloaded_stem.endswith(suffix):
+        downloaded_stem = downloaded_stem[:-len(suffix)]
+    return sanitize(downloaded_stem)[:200 - len(suffix)].rstrip("_. ") + suffix
+
+
+def _predict_output_stem(title: str, suffix: str = "") -> str:
     """Predict the output file stem for a video title: yt-dlp's --restrict-filenames
     transform followed by our sanitize() — exactly what the post-download path
     derives from the real downloaded filename. Used to skip already-encoded videos
     without diverging from yt-dlp's actual output (H-8)."""
-    return sanitize(_restrict_filename(title))
+    return _output_stem(_restrict_filename(title), suffix)
+
+
+# ── Time-range (section) capture (#76) ────────────────────────────────────────
+# A section is (start_s, end_s) in whole seconds, end_s None = to the end of the
+# video. yt-dlp stream-copies just that stretch (no re-encode, so the copy starts
+# at the keyframe at or before start_s) and -copyts keeps YouTube's own timeline
+# in the file. The encode step then seeks frame-exactly to start_s and stops at
+# end_s — we decode every frame there anyway, so precision costs nothing, whereas
+# yt-dlp's --force-keyframes-at-cuts would add a slow CPU re-encode and a second
+# lossy generation before the NVENC one.
+_MAX_SECTION_SECS = 1_000_000
+
+
+def parse_section(start: str, end: str):
+    """(start_s, end_s|None) from the form's whole-second strings, or None when
+    no range applies ("" for both, or 0-to-end). ValueError on anything else —
+    these values end up in a subprocess argv."""
+    s, e = (start or "").strip(), (end or "").strip()
+    if not s and not e:
+        return None
+    for v in (s, e):
+        if v and not (v.isdigit() and int(v) <= _MAX_SECTION_SECS):
+            raise ValueError("time range must be whole seconds, got {!r}".format(v))
+    start_s = int(s) if s else 0
+    end_s = int(e) if e else None
+    if end_s is not None and end_s <= start_s:
+        raise ValueError("time range end ({}s) must be after its start ({}s)".format(end_s, start_s))
+    if start_s == 0 and end_s is None:
+        return None
+    return (start_s, end_s)
+
+
+def _fmt_section_time(secs: int) -> str:
+    h, rem = divmod(secs, 3600)
+    m, s = divmod(rem, 60)
+    return "{}h{:02d}m{:02d}s".format(h, m, s) if h else "{}m{:02d}s".format(m, s)
+
+
+def section_suffix(section) -> str:
+    """Filename marker for a section, e.g. "_12m30s-18m00s" / "_1h02m00s-end"."""
+    if not section:
+        return ""
+    start_s, end_s = section
+    return "_{}-{}".format(_fmt_section_time(start_s),
+                           _fmt_section_time(end_s) if end_s is not None else "end")
+
+
+def section_ytdlp_args(section) -> list:
+    """yt-dlp args to fetch only the section, timestamps preserved."""
+    if not section:
+        return []
+    start_s, end_s = section
+    return [
+        "--download-sections", "*{}-{}".format(start_s, end_s if end_s is not None else "inf"),
+        "--downloader-args", "ffmpeg_o:-copyts",
+    ]
+
+
+def section_input_seek(section, file_start_time: float) -> list:
+    """ffmpeg input options that cut a section download to exactly the section.
+    *file_start_time* is the file's own start (≤ start_s: the copy began at a
+    keyframe), and input -ss is relative to it."""
+    if not section:
+        return []
+    start_s, end_s = section
+    args = ["-ss", "{:.3f}".format(max(0.0, start_s - (file_start_time or 0.0)))]
+    if end_s is not None:
+        args += ["-t", str(end_s - start_s)]
+    return args
+
+
+def _with_input_options(argv: list, input_opts: list) -> list:
+    """Insert input options immediately before the (single) -i of an ffmpeg argv."""
+    if not input_opts:
+        return argv
+    i = argv.index("-i")
+    return argv[:i] + list(input_opts) + argv[i:]
+
+
+def _resolve_section(section, full_duration: float):
+    """The section's end as a number (the video's end when open-ended), or None
+    if it is open-ended and the video's duration is unknown."""
+    start_s, end_s = section
+    return end_s if end_s is not None else (full_duration or None)
+
+
+def _clip_duration(section, full_duration: float):
+    """Seconds the encode will produce from a section download (drives progress)."""
+    end = _resolve_section(section, full_duration)
+    return float(end - section[0]) if end is not None and end > section[0] else None
+
+
+async def _media_time_span(path: Path):
+    """(first, last) timestamp actually present in a media file, from its packets.
+    Format-level duration can't answer this: for a Matroska/WebM file with a
+    nonzero start (a -copyts section) ffprobe reports the END timestamp as its
+    "duration", and other containers report the length — packets mean one thing
+    everywhere. Reads packet headers only (no decode). None if unreadable."""
+    proc = await asyncio.create_subprocess_exec(
+        get_ffprobe(), "-v", "error",
+        "-show_entries", "packet=pts_time,duration_time",
+        "-of", "csv=p=0", str(path),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    out, _ = await proc.communicate()
+    first = last = None
+    for line in out.decode(errors="replace").splitlines():
+        pts, _, dur = line.partition(",")
+        try:
+            t = float(pts)
+        except ValueError:
+            continue   # N/A
+        try:
+            end = t + float(dur.strip(",") or 0)
+        except ValueError:
+            end = t
+        first = t if first is None else min(first, t)
+        last = end if last is None else max(last, end)
+    return (first, last) if first is not None else None
+
+
+async def _section_download_is_complete(path: Path, section, full_duration: float) -> bool:
+    """A section download is complete when the file's own timeline (-copyts)
+    covers the whole requested range, ±2s. Size and the full video's duration
+    say nothing about a clip, so _download_is_complete can't judge it."""
+    if not path.exists():
+        return False
+    need_end = _resolve_section(section, full_duration)
+    if need_end is None:
+        return False
+    span = await _media_time_span(path)
+    if span is None:
+        return False
+    t0, t1 = span
+    return t0 <= section[0] + 2.0 and t1 >= need_end - 2.0
 
 
 def _newest_new_file(cache_dir: Path, pre_existing: set, pattern: str = "*.mkv"):
@@ -551,8 +699,9 @@ def _audio_format_selector(af: str) -> str:
 def _resolve_batch_items(items_json: str):
     """Parse the client `items` payload into the structures the pipeline
     consumes. Returns (video_urls, video_titles, video_durations, per_item)
-    where per_item[i] carries the per-video format/output-dir/tune. Raises
-    ValueError on a non-http url (mirrors the single-url guard)."""
+    where per_item[i] carries the per-video format/output-dir/tune/section.
+    Raises ValueError on a non-http url (mirrors the single-url guard) or a bad
+    time range."""
     items = json.loads(items_json)
     video_urls, video_titles, video_durations, per_item = [], {}, {}, []
     for it in items:
@@ -568,6 +717,8 @@ def _resolve_batch_items(items_json: str):
             "expected_size": int(it.get("expected_size") or 0),
             "output_dir": it.get("output_dir", "") or "",
             "tune_mode": it.get("tune_mode", "uhq"),
+            "section": parse_section(str(it.get("section_start") or ""),
+                                     str(it.get("section_end") or "")),
         })
     return video_urls, video_titles, video_durations, per_item
 
@@ -745,14 +896,16 @@ def audio_output_ext(preset: str) -> str:
     return "wav" if preset == "wav" else "mp3"
 
 
-def build_audio_ffmpeg(input_file: Path, output_file: Path, preset: str) -> list:
+def build_audio_ffmpeg(input_file: Path, output_file: Path, preset: str,
+                       input_opts: list = ()) -> list:
     """ffmpeg args for audio extraction. -vn drops video; -progress pipe:1
-    matches the video encode flow so the UI parser stays unified."""
+    matches the video encode flow so the UI parser stays unified. *input_opts*
+    (e.g. section_input_seek) go immediately before -i."""
     if preset == "wav":
         codec_args = ["-c:a", "pcm_s16le"]
     else:
         codec_args = ["-c:a", "libmp3lame", "-b:a", "320k"]
-    return [
+    return _with_input_options([
         get_ffmpeg(), "-y",
         "-loglevel", "info",
         "-i", str(input_file),
@@ -761,7 +914,7 @@ def build_audio_ffmpeg(input_file: Path, output_file: Path, preset: str) -> list
         "-progress", "pipe:1",
         "-nostats",
         str(output_file),
-    ]
+    ], list(input_opts))
 
 
 async def _download_is_complete(path: Path, expected_bytes: int,
@@ -821,6 +974,7 @@ async def probe_video(path: Path) -> dict:
 
     return {
         "duration": duration,
+        "start_time": float(fmt.get("start_time", 0) or 0),
         "height": height,
         "fps": fps,
         "codec": vs.get("codec_name", "h264"),
@@ -1490,7 +1644,8 @@ def _refresh_capability_report() -> dict:
 
 def build_video_ffmpeg_args(input_file: Path, output_file: Path, params: dict,
                             effective_tune: str, codec: str,
-                            target_height: int = 0, sharpen: bool = False) -> list:
+                            target_height: int = 0, sharpen: bool = False,
+                            input_opts: list = ()) -> list:
     """Construct the hevc_nvenc ffmpeg argv. Pure (no I/O beyond the module-level
     capability probes) so it can be unit-tested with a fixture params dict. Single
     source of truth for the three former copies (H-2).
@@ -1498,6 +1653,7 @@ def build_video_ffmpeg_args(input_file: Path, output_file: Path, params: dict,
     *target_height* is forwarded to _decode_filter_args for optional scaling.
     When 0 (default) the filter chain is byte-identical to the original.
     *sharpen* appends a gentle CAS filter to the -vf chain.
+    *input_opts* (e.g. section_input_seek) go immediately before -i.
 
     params["tune"] (set by calc_encode_params, absent from hand-built fixtures)
     wins over *effective_tune*, so a validated user tune override cannot be lost
@@ -1506,7 +1662,7 @@ def build_video_ffmpeg_args(input_file: Path, output_file: Path, params: dict,
     # uhq requires p4+ minimum; p2 rejected — guard only needed for the uhq path.
     effective_preset = "p4" if (effective_tune == "uhq" and params["preset"] == "p2") else params["preset"]
     cuvid = _CUVID_DECODERS.get((codec or "").lower())
-    return [
+    return _with_input_options([
         get_ffmpeg(), "-y",
         "-loglevel", "info",
         *_decode_filter_args(input_file, params["pix_fmt"], cuvid, target_height, sharpen),
@@ -1528,7 +1684,7 @@ def build_video_ffmpeg_args(input_file: Path, output_file: Path, params: dict,
         "-progress", "pipe:1",
         "-nostats",
         str(output_file),
-    ]
+    ], list(input_opts))
 
 
 async def run_encode(ffmpeg_args: list, *, duration_secs, idx: int, total: int,
@@ -2216,6 +2372,10 @@ async def download(
     preset: str = Form(""),          # "" = auto, else p1–p7
     tune: str = Form(""),            # "" = auto, else hq | uhq
     pix_fmt: str = Form(""),         # "" = auto, else yuv420p | yuv420p10le
+    # Time range (#76), whole seconds; "" = from the start / to the end. Single
+    # video only — batch items carry their own section_start/section_end.
+    section_start: str = Form(""),
+    section_end: str = Form(""),
 ):
     async def stream():
         global current_process
@@ -2312,6 +2472,15 @@ async def download(
         def _yt_merge_args() -> list:
             return [] if is_audio else ["--merge-output-format", "mkv"]
 
+        def _section_for(vid_idx: int):
+            return per_item[vid_idx - 1]["section"] if batch else req_section
+
+        def _output_template(section) -> str:
+            # The range goes into the downloaded name so a clip never collides
+            # with (or is --no-overwrites-matched against) the full video or
+            # another range of it in the shared cache; the output stem inherits it.
+            return "%(title)s{}.%(ext)s".format(section_suffix(section))
+
         def _glob_downloaded(cache: Path) -> list:
             if is_audio:
                 return sorted(
@@ -2325,6 +2494,11 @@ async def download(
         # Skip the playlist resolve entirely — metadata came from /video-info.
         batch = items.strip() != ""
         per_item = []
+        try:
+            req_section = None if batch else parse_section(section_start, section_end)
+        except ValueError as exc:
+            yield sse_error("Bad time range: {}".format(exc))
+            return
         if batch:
             try:
                 video_urls, video_titles, video_durations, per_item = _resolve_batch_items(items)
@@ -2385,6 +2559,10 @@ async def download(
                 video_durations = {url: info.get("duration") or 0}
                 total_videos = 1
 
+            if req_section and total_videos > 1:
+                yield sse_error("A time range applies to a single video, not a playlist.")
+                return
+
         # ── Step 2 ────────────────────────────────────────────────────────────
         if (pipeline == "true" or batch) and total_videos >= 1 and convert == "true" and not is_audio and (batch or total_videos > 1):
             # ── Pipeline mode: downloader and encoder run concurrently ─────────
@@ -2439,12 +2617,16 @@ async def download(
                         item_dest = Path(cfg["output_dir"]) if (cfg and cfg["output_dir"]) else dest_dir
                         item_dest.mkdir(parents=True, exist_ok=True)
                         exp_bytes = cfg["expected_size"] if cfg else (int(expected_size) if expected_size else 0)
+                        section = _section_for(vid_idx)
+                        if section:
+                            exp_bytes = 0   # the full video's size says nothing about a clip
 
                         # Skip download if output MP4 already exists and looks complete
                         min_output = max(1024 * 1024, int(exp_bytes * 0.30))
                         vid_title = video_titles.get(vid_url, "")
                         if vid_title:
-                            predicted = item_dest / "{}_h265.mp4".format(_predict_output_stem(vid_title))
+                            predicted = item_dest / "{}_h265.mp4".format(
+                                _predict_output_stem(vid_title, section_suffix(section)))
                             if predicted.exists() and predicted.stat().st_size >= min_output:
                                 await msg_q.put(sse_log("{}Skipping \u2014 already encoded: {}".format(dl_label, predicted.name)))
                                 if batch:
@@ -2475,7 +2657,8 @@ async def download(
                             "--newline",
                             "--restrict-filenames",
                             "--paths", str(CACHE_DIR),
-                            "-o", "%(title)s.%(ext)s",
+                            "-o", _output_template(section),
+                            *section_ytdlp_args(section),
                         ]
                         dl_args += cookie_args()
                         dl_args += ["--", vid_url]
@@ -2511,9 +2694,14 @@ async def download(
                                 await msg_q.put(sse_dl_progress(float(dl_pct), dl_size, dl_speed, dl_eta, vid_idx, total_videos))
                             else:
                                 merger = re.search(r'\[Merger\] Merging formats into "(.+?)"', line)
+                                # A section download is written merged in one go:
+                                # no [Merger] line, only its Destination.
+                                dest = re.search(r'\[download\] Destination: (.+)', line) if section else None
                                 already = re.search(r'\[download\] (.+?) has already been downloaded', line)
                                 if merger:
                                     output_paths.add(merger.group(1))
+                                elif dest:
+                                    output_paths.add(dest.group(1).strip())
                                 elif already:
                                     output_paths.add(already.group(1))
                                 await msg_q.put(sse_log(line))
@@ -2549,7 +2737,9 @@ async def download(
                         expected_dur = video_durations.get(vid_url) or 0
 
                         if proc.returncode != 0:
-                            if mkv_files and await _download_is_complete(mkv_files[0], exp_bytes, expected_dur):
+                            if mkv_files and await (
+                                    _section_download_is_complete(mkv_files[0], section, expected_dur) if section
+                                    else _download_is_complete(mkv_files[0], exp_bytes, expected_dur)):
                                 await msg_q.put(sse_log("{}yt-dlp exited with errors but output file verified complete \u2014 continuing.".format(dl_label)))
                             else:
                                 # Batch: skip this bad video and keep going; single/playlist: abort.
@@ -2620,7 +2810,8 @@ async def download(
                         item_tune = cfg["tune_mode"] if cfg else tune_mode
                         item_dest.mkdir(parents=True, exist_ok=True)
 
-                        safe_stem = sanitize(input_file.stem)
+                        section = _section_for(vid_idx)
+                        safe_stem = _output_stem(input_file.stem, section_suffix(section))
                         output_file = item_dest / "{}_h265.mp4".format(safe_stem)
                         source_size = input_file.stat().st_size if input_file.exists() else 0
                         min_output = max(1024 * 1024, int(source_size * 0.30))
@@ -2643,6 +2834,9 @@ async def download(
 
                         src = await probe_video(input_file)
                         duration_secs = src.get("duration") or None
+                        seek = section_input_seek(section, src.get("start_time", 0.0))
+                        if section:
+                            duration_secs = _clip_duration(section, video_durations.get(video_urls[vid_idx - 1]) or 0)
                         if duration_secs:
                             await msg_q.put(sse_log("Duration: {:.1f}s".format(duration_secs)))
                         else:
@@ -2680,6 +2874,7 @@ async def download(
                             input_file, output_file, params, effective_tune, src.get("codec", ""),
                             target_height=_effective_target_height(src.get("height", 1080), _target_res),
                             sharpen=_sharpen,
+                            input_opts=seek,
                         )
                         enc_res: dict = {}
                         async for _s in run_encode(enc_args, duration_secs=duration_secs,
@@ -2774,11 +2969,13 @@ async def download(
                 # Skip download if output already exists and looks complete.
                 # Video: H.265 is 40-100% of source — 30% floor. Audio: WAV/MP3 size
                 # is unrelated to source bytes (WAV often >> source), so existence + 1MB suffices.
-                expected_bytes = int(expected_size) if expected_size else 0
+                section = req_section
+                # A clip's size is unrelated to the full video's reported size.
+                expected_bytes = 0 if section else (int(expected_size) if expected_size else 0)
                 min_output = 1024 * 1024 if is_audio else max(1024 * 1024, int(expected_bytes * 0.30))
                 vid_title = video_titles.get(vid_url, "")
                 if vid_title:
-                    predicted = _predicted_output(_predict_output_stem(vid_title))
+                    predicted = _predicted_output(_predict_output_stem(vid_title, section_suffix(section)))
                     if predicted.exists() and predicted.stat().st_size >= min_output:
                         yield sse_log(f'{label}Skipping \u2014 already encoded: {predicted.name}')
                         continue
@@ -2798,7 +2995,8 @@ async def download(
                     "--newline",
                     "--restrict-filenames",
                     "--paths", str(CACHE_DIR),
-                    "-o", "%(title)s.%(ext)s",
+                    "-o", _output_template(section),
+                    *section_ytdlp_args(section),
                 ]
                 dl_args += cookie_args()
                 dl_args += ["--", vid_url]
@@ -2828,8 +3026,9 @@ async def download(
                         yield _sse({"type": "progress", "pct": float(pct), "size": size, "speed": speed, "eta": eta})
                     else:
                         merger = re.search(r'\[Merger\] Merging formats into "(.+?)"', line)
-                        # Audio mode has no merger — capture the destination line instead.
-                        dest = re.search(r'\[download\] Destination: (.+)', line) if is_audio else None
+                        # Audio mode and section downloads have no merger — capture
+                        # the destination line instead.
+                        dest = re.search(r'\[download\] Destination: (.+)', line) if (is_audio or section) else None
                         already = re.search(r'\[download\] (.+?) has already been downloaded', line)
                         if merger:
                             output_paths.add(merger.group(1))
@@ -2864,11 +3063,12 @@ async def download(
                 if not mkv_files:
                     mkv_files = _glob_downloaded(CACHE_DIR)
 
-                expected_bytes = int(expected_size) if expected_size else 0
                 expected_dur = video_durations.get(vid_url) or 0
 
                 if proc.returncode != 0:
-                    if mkv_files and await _download_is_complete(mkv_files[0], expected_bytes, expected_dur):
+                    if mkv_files and await (
+                            _section_download_is_complete(mkv_files[0], section, expected_dur) if section
+                            else _download_is_complete(mkv_files[0], expected_bytes, expected_dur)):
                         yield sse_log(f'{label}yt-dlp exited with errors but output file verified complete — continuing.')
                     else:
                         size_note = ""
@@ -2885,7 +3085,7 @@ async def download(
                 if convert == "true" or is_audio:
                     input_file = mkv_files[0]
                     source_size = input_file.stat().st_size
-                    safe_stem = sanitize(input_file.stem)
+                    safe_stem = _output_stem(input_file.stem, section_suffix(section))
                     output_file = _predicted_output(safe_stem)
 
                     # Video: H.265 should be at least 30% of source. Audio: WAV/MP3 size
@@ -2912,13 +3112,16 @@ async def download(
 
                     src = await probe_video(input_file)
                     duration_secs = src.get("duration") or None
+                    seek = section_input_seek(section, src.get("start_time", 0.0))
+                    if section:
+                        duration_secs = _clip_duration(section, video_durations.get(vid_url) or 0)
                     if duration_secs:
                         yield sse_log(f'Duration: {duration_secs:.1f}s')
                     else:
                         yield sse_log('Could not read duration — progress bar will be indeterminate')
 
                     if is_audio:
-                        ffmpeg_args = build_audio_ffmpeg(input_file, output_file, audio_preset)
+                        ffmpeg_args = build_audio_ffmpeg(input_file, output_file, audio_preset, input_opts=seek)
                         enc_log = "Audio extract: {} → {}".format(audio_preset.upper(), output_file.name)
                         yield sse_log(enc_log)
                     else:
@@ -2954,6 +3157,7 @@ async def download(
                             input_file, output_file, params, effective_tune, src.get("codec", ""),
                             target_height=_effective_target_height(src.get("height", 1080), _target_res),
                             sharpen=_sharpen,
+                            input_opts=seek,
                         )
 
                     enc_res: dict = {}
