@@ -150,9 +150,21 @@ import uvicorn
 # requests succeed (CSRF) — e.g. powering off the box via /shutdown-now or
 # triggering downloads. These two origins are the only ones the real UI uses.
 HOST = "127.0.0.1"
-PORT = 8765
-APP_URL = "http://localhost:{}".format(PORT)
-ALLOWED_ORIGINS = [APP_URL, "http://{}:{}".format(HOST, PORT)]
+DEFAULT_PORT = 8765
+PORT_ATTEMPTS = 20       # 8765..8784: skip ports other programs hold
+PORT = DEFAULT_PORT      # the port actually served; run_server() settles it
+APP_URL = ""
+ALLOWED_ORIGINS: list = []   # mutated in place — CORSMiddleware keeps this list object
+
+
+def _set_port(port: int) -> None:
+    global PORT, APP_URL
+    PORT = port
+    APP_URL = "http://localhost:{}".format(port)
+    ALLOWED_ORIGINS[:] = [APP_URL, "http://{}:{}".format(HOST, port)]
+
+
+_set_port(DEFAULT_PORT)
 
 # Per-process secret, injected into the served HTML and required as a header on
 # the most dangerous endpoint (/shutdown-now). Regenerated every launch.
@@ -3344,8 +3356,12 @@ async def shutdown_now(request: Request):
     return {"ok": True}
 
 
-def _bind_listen_socket():
-    """Bind HOST:PORT up front, or return None if something already holds it.
+def _candidate_ports() -> range:
+    return range(DEFAULT_PORT, DEFAULT_PORT + PORT_ATTEMPTS)
+
+
+def _bind_listen_socket(port: int):
+    """Bind HOST:port up front, or return None if something already holds it.
 
     Binding before uvicorn starts means a busy port is known before the startup
     probes run and before the browser is pointed at whatever owns the port.
@@ -3359,18 +3375,18 @@ def _bind_listen_socket():
         # POSIX SO_REUSEADDR only skips TIME_WAIT from our own previous run.
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
-        sock.bind((HOST, PORT))
+        sock.bind((HOST, port))
     except OSError:
         sock.close()
         return None
     return sock
 
 
-def _running_fetchforge_version() -> Optional[str]:
-    """Version reported by a FetchForge already serving PORT, or None if the holder isn't one."""
+def _running_fetchforge_version(port: int) -> Optional[str]:
+    """Version reported by a FetchForge already serving port, or None if the holder isn't one."""
     import urllib.request
     try:
-        with urllib.request.urlopen("http://{}:{}/version".format(HOST, PORT), timeout=2) as r:
+        with urllib.request.urlopen("http://{}:{}/version".format(HOST, port), timeout=2) as r:
             data = json.loads(r.read())
     except (OSError, ValueError):
         return None
@@ -3379,25 +3395,36 @@ def _running_fetchforge_version() -> Optional[str]:
 
 
 def run_server(open_browser: bool = True) -> int:
-    """Serve the app until the heartbeat watchdog or Ctrl+C stops it; returns an exit code."""
+    """Serve the app until the heartbeat watchdog or Ctrl+C stops it; returns an exit code.
+
+    Walks _candidate_ports() in order: a port held by another FetchForge is reused
+    (a tab opens on it), a port held by anything else is skipped. A second launch
+    walks the same order, so it finds an instance that fell back to a later port.
+    """
     global _uvicorn_server
     import webbrowser
     _ensure_runtime_dirs()   # create cache/downloads/logs before anything writes to them
     _setup_logging()         # deferred here (not import time) so a bare import is side-effect-free
-    sock = _bind_listen_socket()
-    if sock is None:
-        running = _running_fetchforge_version()
+    ports = _candidate_ports()
+    sock = None
+    for port in ports:
+        sock = _bind_listen_socket(port)
+        if sock is not None:
+            break
+        running = _running_fetchforge_version(port)
         if running is not None:
+            _set_port(port)
             logger.info("FetchForge %s is already running at %s — opening it", running, APP_URL)
             if open_browser:
                 webbrowser.open(APP_URL)
             return 0
+        logger.info("Port %d is in use by another program — trying the next one", port)
+    if sock is None:
         logger.error(
-            "Port %d is already in use by another program, so FetchForge cannot start. "
-            "Stop that program and launch again (`ss -ltnp 'sport = :%d'` on Linux, "
-            "`netstat -ano | findstr :%d` on Windows shows which process holds it).",
-            PORT, PORT, PORT)
+            "Ports %d-%d are all in use by other programs, so FetchForge cannot start.",
+            ports[0], ports[-1])
         return 1
+    _set_port(port)
     logger.info("Starting FetchForge at %s", APP_URL)
     if open_browser:
         import threading
