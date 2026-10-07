@@ -194,6 +194,8 @@ All entry points end up at the same `server.run_server()`:
 
 Because the hidden launcher has no console to close, the server **self-exits when the browser tab goes away**. The page pings `GET /heartbeat` every 5s; `_heartbeat_watchdog()` (started in `lifespan`, runs every 5s) exits via `_uvicorn_server.should_exit = True` once no ping has arrived for `_HEARTBEAT_TIMEOUT` (30s). `_last_heartbeat` is initialized at launch, so the server also quits ~30s after start if no tab ever connects. The grace window (vs firing on tab-close directly) tolerates page refreshes and keeps the server up while any tab is open. `run_server()` builds an explicit `uvicorn.Server` (not `uvicorn.run`) so the watchdog can flip `should_exit`; it also opens the browser itself (1.5s delayed, via `threading.Timer`) so launchers/CLI don't need to. This is unrelated to `/shutdown-now` (which powers off the whole PC).
 
+**Port preflight.** `run_server()` binds `HOST:PORT` (`127.0.0.1:8765`) itself via `_bind_listen_socket()` *before* uvicorn starts, and hands uvicorn the bound socket (`Server.run(sockets=[sock])`). If the port is taken, nothing else runs: when the holder answers `GET /version` like a FetchForge, the launch just opens a tab on it and exits 0. Otherwise it logs which port is busy and exits 1 **without** opening the browser. Before this, an unrelated server on 8765 (e.g. a stray `python -m http.server 8765`) made the tab open on that server's 404 while uvicorn died with errno 98. The Windows socket uses `SO_EXCLUSIVEADDRUSE`, because Windows `SO_REUSEADDR` would allow binding over a live listener.
+
 ## yt-dlp setup
 
 - Node.js (yt-dlp JS runtime): `_resolve_node_args()` finds `node` on PATH, falling back to `C:\Program Files\nodejs\node.exe` on Windows; omitted if not found.
@@ -266,7 +268,7 @@ yield "data: {}\n\n".format(json.dumps({"msg": params["cq"]}))
 
 ## Versioning
 
-`fetchforge.__version__` in `fetchforge/__init__.py` (currently `"2.2.1"`), imported into `fetchforge/server.py` as `APP_VERSION` (`from fetchforge import __version__ as APP_VERSION`) and surfaced by `pyproject.toml`'s `dynamic = ["version"]` (`attr = "fetchforge.__version__"`) so the pip package version and the running app agree. Bump on every deploy. Displayed in the header as `v 2.2.1` with a green dot fetched from `GET /version` — confirms both HTML and server are fresh after a restart.
+`fetchforge.__version__` in `fetchforge/__init__.py` (currently `"2.2.2"`), imported into `fetchforge/server.py` as `APP_VERSION` (`from fetchforge import __version__ as APP_VERSION`) and surfaced by `pyproject.toml`'s `dynamic = ["version"]` (`attr = "fetchforge.__version__"`) so the pip package version and the running app agree. Bump on every deploy. Displayed in the header as `v 2.2.2` with a green dot fetched from `GET /version` — confirms both HTML and server are fresh after a restart.
 
 <!-- init-workspace:start -->
 ## Task tracking & work environment

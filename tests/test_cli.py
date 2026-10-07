@@ -6,7 +6,7 @@ from fetchforge import cli, provision
 class TestCli(unittest.TestCase):
     def test_main_runs_preflight_then_server(self):
         with mock.patch.object(provision, "ensure_ffmpeg", return_value="ffmpeg") as pre, \
-             mock.patch("fetchforge.server.run_server") as run:
+             mock.patch("fetchforge.server.run_server", return_value=0) as run:
             rc = cli.main([])
         pre.assert_called_once()
         run.assert_called_once()
@@ -16,7 +16,7 @@ class TestCli(unittest.TestCase):
         with mock.patch.object(provision, "ensure_ffmpeg",
                                side_effect=provision.ProvisionError("install ffmpeg")), \
              mock.patch("shutil.which", return_value=None), \
-             mock.patch("fetchforge.server.run_server") as run:
+             mock.patch("fetchforge.server.run_server", return_value=0) as run:
             rc = cli.main([])
         run.assert_not_called()
         self.assertEqual(rc, 1)
@@ -25,7 +25,7 @@ class TestCli(unittest.TestCase):
         with mock.patch.object(provision, "ensure_ffmpeg",
                                side_effect=provision.ProvisionError("no NVENC ffmpeg found")), \
              mock.patch("shutil.which", return_value="/usr/bin/ffmpeg"), \
-             mock.patch("fetchforge.server.run_server") as run:
+             mock.patch("fetchforge.server.run_server", return_value=0) as run:
             rc = cli.main([])
         run.assert_called_once()
         self.assertEqual(rc, 0)
@@ -34,10 +34,16 @@ class TestCli(unittest.TestCase):
         from unittest import mock
         manager = mock.Mock()
         with mock.patch.object(provision, "ensure_ffmpeg", return_value="ffmpeg") as pre, \
-             mock.patch("fetchforge.server.run_server") as run:
+             mock.patch("fetchforge.server.run_server", return_value=0) as run:
             manager.attach_mock(pre, "pre")
             manager.attach_mock(run, "run")
             rc = cli.main([])
         self.assertEqual(rc, 0)
         names = [c[0] for c in manager.mock_calls]
         self.assertLess(names.index("pre"), names.index("run"))  # ensure_ffmpeg before run_server
+
+
+    def test_main_propagates_server_exit_code(self):
+        with mock.patch.object(provision, "ensure_ffmpeg", return_value="ffmpeg"), \
+             mock.patch("fetchforge.server.run_server", return_value=1):
+            self.assertEqual(cli.main([]), 1)
