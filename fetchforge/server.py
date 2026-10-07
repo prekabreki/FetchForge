@@ -260,21 +260,24 @@ def get_ffprobe() -> str:
 
 @functools.cache
 def get_ytdlp_argv() -> list:
-    """argv prefix that runs yt-dlp — a console script when we can find one,
-    else this interpreter's importable `yt_dlp` module.
+    """argv prefix that runs yt-dlp — this interpreter's own copy when it has
+    one, else a console script found on PATH.
 
     yt-dlp is a pip dependency, but where pip puts its console script depends on
     the install shape: a venv's Scripts/bin, `--user`'s site base, or (Windows
     Store Python) a redirected LocalCache dir that is on none of the paths a
     tool search would guess. `python -m yt_dlp` is equivalent and needs no path
     guessing, so it's the fallback rather than an error.
+
+    Order matters because a system yt-dlp is often on PATH while the app was
+    installed into an inactive venv: the interpreter's own copy (console script
+    in sys.prefix, or the importable module) must win so `/update-ytdlp` upgrades
+    the one we actually run. PATH is consulted only when this interpreter has no
+    yt-dlp of its own.
     """
     bundled = PKG_DIR / "yt-dlp.exe"
     if IS_WINDOWS and bundled.exists():
         return [str(bundled)]
-    found = shutil.which("yt-dlp")
-    if found:
-        return [found]
     bindir = "Scripts" if IS_WINDOWS else "bin"
     for exe in ("yt-dlp", "yt-dlp.exe"):
         cand = Path(sys.prefix) / bindir / exe
@@ -282,6 +285,9 @@ def get_ytdlp_argv() -> list:
             return [str(cand)]
     if importlib.util.find_spec("yt_dlp") is not None:
         return [sys.executable, "-m", "yt_dlp"]
+    found = shutil.which("yt-dlp")
+    if found:
+        return [found]
     if bundled.exists():        # last resort (e.g. a manually-dropped binary)
         return [str(bundled)]
     raise RuntimeError(

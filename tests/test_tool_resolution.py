@@ -1,5 +1,7 @@
+import os
 import site
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -47,10 +49,34 @@ class TestYtdlpArgvResolution(unittest.TestCase):
             self.assertEqual(server.get_ytdlp_argv(),
                              ["/usr/bin/python3", "-m", "yt_dlp"])
 
-    def test_console_script_on_path_wins(self):
-        with mock.patch("shutil.which", return_value="/venv/bin/yt-dlp"), \
-             mock.patch.object(server, "IS_WINDOWS", False):
-            self.assertEqual(server.get_ytdlp_argv(), ["/venv/bin/yt-dlp"])
+    def test_console_script_on_path_is_fallback_only(self):
+        # Issue #78: PATH is consulted only when this interpreter has no yt-dlp
+        # of its own (a manual/system-only setup).
+        with mock.patch("shutil.which", return_value="/usr/bin/yt-dlp"), \
+             mock.patch.object(server, "IS_WINDOWS", False), \
+             mock.patch("importlib.util.find_spec", return_value=None), \
+             mock.patch.object(server, "sys") as fake_sys:
+            fake_sys.prefix = "/nonexistent-prefix"
+            self.assertEqual(server.get_ytdlp_argv(), ["/usr/bin/yt-dlp"])
+
+    def test_venv_copy_wins_over_path(self):
+        # Issue #78: a system yt-dlp on PATH must not shadow the copy shipped in
+        # this interpreter's own environment (the one /update-ytdlp upgrades).
+        with tempfile.TemporaryDirectory() as tmp:
+            env_prefix = Path(tmp) / "prefix"
+            (env_prefix / "bin").mkdir(parents=True)
+            (env_prefix / "bin" / "yt-dlp").write_text("#!/bin/sh\n")
+            path_dir = Path(tmp) / "pathbin"
+            path_dir.mkdir()
+            (path_dir / "yt-dlp").write_text("#!/bin/sh\n")
+            fake_path = str(path_dir) + os.pathsep + os.environ["PATH"]
+            with mock.patch.object(server, "IS_WINDOWS", False), \
+                 mock.patch.object(server, "sys") as fake_sys, \
+                 mock.patch.dict(os.environ, {"PATH": fake_path}):
+                fake_sys.prefix = str(env_prefix)
+                fake_sys.executable = "/usr/bin/python3"
+                self.assertEqual(server.get_ytdlp_argv(),
+                                 [str(env_prefix / "bin" / "yt-dlp")])
 
     def test_raises_only_when_module_is_absent_too(self):
         with mock.patch("shutil.which", return_value=None), \
