@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="dlpr-token" content="__DLPR_TOKEN__">
 <title>FetchForge — YouTube Downloader & H.265 Converter</title>
+<link rel="icon" href="data:,">
 <!-- Fonts are served by this process from fetchforge/fonts/, not by a CDN. This is
      a localhost tool and local conversion works with no network at all; the CDN
      version fell back to system fonts offline, which DESIGN.md does not allow.
@@ -1847,7 +1848,7 @@
   </div>
 
 <script>
-const API = 'http://localhost:8765';
+const API = location.origin;   // the server may fall back off 8765 when that port is taken
 
 let currentCQ = '0';
 let currentMaxrate = '';

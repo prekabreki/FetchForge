@@ -23,5 +23,4 @@ def main(argv: list[str] | None = None) -> int:
             return 1
     # Import after preflight so tool resolution sees a provisioned ffmpeg on PATH.
     from fetchforge import server
-    server.run_server(open_browser=True)
-    return 0
+    return server.run_server(open_browser=True)

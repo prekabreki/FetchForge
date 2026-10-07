@@ -149,7 +149,22 @@ import uvicorn
 # issue cross-origin requests to it. Without an origin check those drive-by
 # requests succeed (CSRF) — e.g. powering off the box via /shutdown-now or
 # triggering downloads. These two origins are the only ones the real UI uses.
-ALLOWED_ORIGINS = ["http://localhost:8765", "http://127.0.0.1:8765"]
+HOST = "127.0.0.1"
+DEFAULT_PORT = 8765
+PORT_ATTEMPTS = 20       # 8765..8784: skip ports other programs hold
+PORT = DEFAULT_PORT      # the port actually served; run_server() settles it
+APP_URL = ""
+ALLOWED_ORIGINS: list = []   # mutated in place — CORSMiddleware keeps this list object
+
+
+def _set_port(port: int) -> None:
+    global PORT, APP_URL
+    PORT = port
+    APP_URL = "http://localhost:{}".format(port)
+    ALLOWED_ORIGINS[:] = [APP_URL, "http://{}:{}".format(HOST, port)]
+
+
+_set_port(DEFAULT_PORT)
 
 # Per-process secret, injected into the served HTML and required as a header on
 # the most dangerous endpoint (/shutdown-now). Regenerated every launch.
@@ -3341,23 +3356,91 @@ async def shutdown_now(request: Request):
     return {"ok": True}
 
 
-def run_server(open_browser: bool = True) -> None:
+def _candidate_ports() -> range:
+    return range(DEFAULT_PORT, DEFAULT_PORT + PORT_ATTEMPTS)
+
+
+def _bind_listen_socket(port: int):
+    """Bind HOST:port up front, or return None if something already holds it.
+
+    Binding before uvicorn starts means a busy port is known before the startup
+    probes run and before the browser is pointed at whatever owns the port.
+    """
+    import socket
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    if os.name == "nt":
+        # Windows SO_REUSEADDR would let us bind over a live listener; this refuses it.
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    else:
+        # POSIX SO_REUSEADDR only skips TIME_WAIT from our own previous run.
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.bind((HOST, port))
+    except OSError:
+        sock.close()
+        return None
+    return sock
+
+
+def _running_fetchforge_version(port: int) -> Optional[str]:
+    """Version reported by a FetchForge already serving port, or None if the holder isn't one."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen("http://{}:{}/version".format(HOST, port), timeout=2) as r:
+            data = json.loads(r.read())
+    except (OSError, ValueError):
+        return None
+    version = data.get("version") if isinstance(data, dict) else None
+    return version if isinstance(version, str) else None
+
+
+def run_server(open_browser: bool = True) -> int:
+    """Serve the app until the heartbeat watchdog or Ctrl+C stops it; returns an exit code.
+
+    Walks _candidate_ports() in order: a port held by another FetchForge is reused
+    (a tab opens on it), a port held by anything else is skipped. A second launch
+    walks the same order, so it finds an instance that fell back to a later port.
+    """
     global _uvicorn_server
+    import webbrowser
     _ensure_runtime_dirs()   # create cache/downloads/logs before anything writes to them
     _setup_logging()         # deferred here (not import time) so a bare import is side-effect-free
-    logger.info("Starting FetchForge at http://localhost:8765")
+    ports = _candidate_ports()
+    sock = None
+    for port in ports:
+        sock = _bind_listen_socket(port)
+        if sock is not None:
+            break
+        running = _running_fetchforge_version(port)
+        if running is not None:
+            _set_port(port)
+            logger.info("FetchForge %s is already running at %s — opening it", running, APP_URL)
+            if open_browser:
+                webbrowser.open(APP_URL)
+            return 0
+        logger.info("Port %d is in use by another program — trying the next one", port)
+    if sock is None:
+        logger.error(
+            "Ports %d-%d are all in use by other programs, so FetchForge cannot start.",
+            ports[0], ports[-1])
+        return 1
+    _set_port(port)
+    logger.info("Starting FetchForge at %s", APP_URL)
     if open_browser:
-        import threading, webbrowser
-        threading.Timer(1.5, lambda: webbrowser.open("http://localhost:8765")).start()
-    config = uvicorn.Config(app, host="127.0.0.1", port=8765)
+        import threading
+        threading.Timer(1.5, lambda: webbrowser.open(APP_URL)).start()
+    config = uvicorn.Config(app, host=HOST, port=PORT)
     _uvicorn_server = uvicorn.Server(config)
     try:
-        _uvicorn_server.run()
+        _uvicorn_server.run(sockets=[sock])
     except Exception:
         # On a headless (no-console) launch this is the only place the failure is
         # visible — make sure it lands in logs/server.log before we die.
         logger.exception("Server exited with an unhandled exception")
         raise
+    finally:
+        sock.close()
+    return 0
 
 
 if __name__ == "__main__":

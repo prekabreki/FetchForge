@@ -1,6 +1,6 @@
 # FetchForge — YouTube Download + H.265 Convert Tool
 
-Local Python/FastAPI web app, packaged as the `fetchforge` pip package. Downloads YouTube videos (single or playlist) via yt-dlp, then either converts to H.265/MP4 using NVENC (NVIDIA GPU) or extracts audio to WAV/MP3. Runs at `http://localhost:8765`.
+Local Python/FastAPI web app, packaged as the `fetchforge` pip package. Downloads YouTube videos (single or playlist) via yt-dlp, then either converts to H.265/MP4 using NVENC (NVIDIA GPU) or extracts audio to WAV/MP3. Runs at `http://localhost:8765` (or the next free port up to 8784).
 
 ## Stack
 
@@ -194,6 +194,8 @@ All entry points end up at the same `server.run_server()`:
 
 Because the hidden launcher has no console to close, the server **self-exits when the browser tab goes away**. The page pings `GET /heartbeat` every 5s; `_heartbeat_watchdog()` (started in `lifespan`, runs every 5s) exits via `_uvicorn_server.should_exit = True` once no ping has arrived for `_HEARTBEAT_TIMEOUT` (30s). `_last_heartbeat` is initialized at launch, so the server also quits ~30s after start if no tab ever connects. The grace window (vs firing on tab-close directly) tolerates page refreshes and keeps the server up while any tab is open. `run_server()` builds an explicit `uvicorn.Server` (not `uvicorn.run`) so the watchdog can flip `should_exit`; it also opens the browser itself (1.5s delayed, via `threading.Timer`) so launchers/CLI don't need to. This is unrelated to `/shutdown-now` (which powers off the whole PC).
 
+**Port selection.** `run_server()` walks `_candidate_ports()` (`DEFAULT_PORT` 8765 through 8784) and binds each one itself via `_bind_listen_socket()` *before* uvicorn starts. It then hands uvicorn the bound socket (`Server.run(sockets=[sock])`). A port whose holder answers `GET /version` like a FetchForge is reused: the launch opens a tab on it and exits 0. Any other holder is skipped, so a second launch walks the same order and finds an instance that fell back to a later port. `_set_port()` rewrites `PORT`/`APP_URL` and mutates `ALLOWED_ORIGINS` **in place**, because `CORSMiddleware` keeps a reference to that list object. The frontend uses `API = location.origin`, so it follows the port. If all 20 ports are foreign, startup exits 1 without opening a browser. The Windows socket uses `SO_EXCLUSIVEADDRUSE`, because Windows `SO_REUSEADDR` would allow binding over a live listener.
+
 ## yt-dlp setup
 
 - Node.js (yt-dlp JS runtime): `_resolve_node_args()` finds `node` on PATH, falling back to `C:\Program Files\nodejs\node.exe` on Windows; omitted if not found.
@@ -266,7 +268,7 @@ yield "data: {}\n\n".format(json.dumps({"msg": params["cq"]}))
 
 ## Versioning
 
-`fetchforge.__version__` in `fetchforge/__init__.py` (currently `"2.2.1"`), imported into `fetchforge/server.py` as `APP_VERSION` (`from fetchforge import __version__ as APP_VERSION`) and surfaced by `pyproject.toml`'s `dynamic = ["version"]` (`attr = "fetchforge.__version__"`) so the pip package version and the running app agree. Bump on every deploy. Displayed in the header as `v 2.2.1` with a green dot fetched from `GET /version` — confirms both HTML and server are fresh after a restart.
+`fetchforge.__version__` in `fetchforge/__init__.py` (currently `"2.2.2"`), imported into `fetchforge/server.py` as `APP_VERSION` (`from fetchforge import __version__ as APP_VERSION`) and surfaced by `pyproject.toml`'s `dynamic = ["version"]` (`attr = "fetchforge.__version__"`) so the pip package version and the running app agree. Bump on every deploy. Displayed in the header as `v 2.2.2` with a green dot fetched from `GET /version` — confirms both HTML and server are fresh after a restart.
 
 <!-- init-workspace:start -->
 ## Task tracking & work environment

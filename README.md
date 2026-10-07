@@ -19,7 +19,8 @@ pip install fetchforge
 fetchforge
 ```
 
-The browser opens automatically at `http://localhost:8765`. On Windows, if an
+The browser opens automatically at `http://localhost:8765` (or the next free
+port, if another program already holds that one). On Windows, if an
 NVENC-capable ffmpeg isn't already present, FetchForge downloads one on first
 run. On Linux, install ffmpeg from your package manager first
 (`sudo dnf install ffmpeg` / `sudo apt install ffmpeg`) and make sure the NVIDIA
