@@ -2458,15 +2458,18 @@ async def download(
                 "--- Events ---",
                 "",
             ]
+            _allow_sleep()
             try:
                 await asyncio.to_thread(
                     log_path.write_text,
                     "\n".join(header_lines + _job_lines + [""]),
                     encoding="utf-8",
                 )
+            except asyncio.CancelledError:
+                logger.warning("Job log not written: stream cancelled before the log could be flushed")
+                raise
             except Exception as exc:
                 logger.warning("Log write failed: %s", exc)
-            _allow_sleep()
 
     async def _download_stream():
         global current_process
@@ -3361,15 +3364,18 @@ async def convert_local(
                 "--- Events ---",
                 "",
             ]
+            _allow_sleep()
             try:
                 await asyncio.to_thread(
                     log_path.write_text,
                     "\n".join(header_lines + _job_lines + [""]),
                     encoding="utf-8",
                 )
+            except asyncio.CancelledError:
+                logger.warning("Job log not written: stream cancelled before the log could be flushed")
+                raise
             except Exception as exc:
                 logger.warning("Log write failed: %s", exc)
-            _allow_sleep()
 
     async def _convert_local_stream():
         global current_process
