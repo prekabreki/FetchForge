@@ -7,7 +7,7 @@ the real dl_worker/enc_worker primitives (file_q maxsize=1, abort/enc_gone/cance
 Events, None sentinels, 2-None drain) plus the new per-item `item_done`/
 `item_failed` events and skip-and-continue-on-download-failure behaviour, so a
 change to that coordination can be regression-tested and a 5s wait_for turns any
-hang into a failure rather than a hung suite. (CLAUDE.md mandated gate.)"""
+hang into a failure rather than a hung suite. (AGENTS.md mandated gate.)"""
 import asyncio
 import json
 import unittest
