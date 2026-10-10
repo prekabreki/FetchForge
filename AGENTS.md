@@ -264,7 +264,7 @@ In audio mode:
 - The pipeline workers are **deadlock-prone**: validate any change to the dl/enc queue coordination with a small async simulation of the primitives (`file_q` maxsize=1, `abort`/`enc_gone`/`_cancel_requested`, sentinels) before shipping.
 - Live smoke test: `fetchforge` (or `.venv/bin/python -m fetchforge`), curl `http://127.0.0.1:8765`. **NEVER send a valid `X-DLPR-Token` to `POST /shutdown-now` when testing — it powers off the machine.** Test only the 403 (no/invalid token) path.
 
-Gotchas: this box runs **Linux** (the audit + much of this doc is Windows-flavored; the code was ported). `cookies.txt`, `history.json`, `logs/`, `downloads/` are gitignored and live in `STATE_DIR` (the cwd you launch from) — stage explicit paths (`git add fetchforge/server.py`), never `git add -A`; hitting `/history` etc. during tests pollutes the real `history.json`. Don't push to `master` (gated) — push a branch + PR; `Closes #N` in commits auto-closes issues on merge.
+Gotchas: this box runs **Linux** (the audit + much of this doc is Windows-flavored; the code was ported). `cookies.txt`, `history.json`, `logs/`, `downloads/` are gitignored and live in `STATE_DIR` (the cwd you launch from) — stage explicit paths (`git add fetchforge/server.py`), never `git add -A`; hitting `/history` etc. during tests pollutes the real `history.json`. `main` has no branch protection (checked 2026-10-10; the old `master` gate is gone), so pushes land directly; `Closes #N` in commits auto-closes issues on merge.
 
 ## Key Python gotcha
 
