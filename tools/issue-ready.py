@@ -1,7 +1,8 @@
 """The 'ready work' view (a 'bd ready' descendant). Cross-platform (Windows + Linux).
 
-Prints unassigned, open GitHub issues NOT blocked by any other open issue and NOT parked
-behind a hold label, grouped by priority label (P0 -> P4 -> none). Reads 'Blocked by #N'
+Prints open GitHub issues that are unclaimed (no assignee, no `in-progress` label), NOT
+blocked by any other open issue and NOT parked behind a hold label, grouped by priority
+label (P0 -> P4 -> none). Reads 'Blocked by #N'
 (or 'Blocked by: #N', and every #N on the line for a comma-separated list) from bodies,
 plus the list form: a '## Blocked by' heading followed by '- #N' items.
 
@@ -9,6 +10,11 @@ plus the list form: a '## Blocked by' heading followed by '- #N' items.
 waiting on an open design call. GitHub has only open/closed, so without a hold the same
 known-unactionable issues are offered every session and get re-triaged forever. (This is
 the one thing beads' `deferred` status did that open/closed cannot express.)
+
+In a foreman-onboarded repo two more labels hold an issue: `needs-human` (waiting on an
+intent call) and `needs-replan` (bounced; must be re-scoped before anyone works it). A
+foreman executor claims with the `in-progress` label rather than an assignee, so that
+label counts as a claim.
 """
 
 import argparse
@@ -21,11 +27,14 @@ import sys
 PRIORITIES = ["P0", "P1", "P2", "P3", "P4", "P?"]
 TYPE_LABELS = {"bug", "task", "chore", "epic", "feature"}
 # Labels that park an issue outside the ready view even when open and unassigned.
-HOLD_LABELS = {"deferred"}
+HOLD_LABELS = {"deferred", "needs-human", "needs-replan"}
+# Labels that mark an issue as claimed, exactly like an assignee.
+CLAIM_LABELS = {"in-progress"}
 # A 'Blocked by' DECLARATION, which must OPEN its line -- after at most 3 spaces of
 # indent, an optional list bullet ('-', '*', '+', or '1.'/'1)'), and optional bold. That
 # is the documented convention: gh-issues-writing's body template emits
-# '- Blocked by: #NN'. The colon is optional because both forms are in the wild.
+# 'Blocked by #NN' opening its own line. The colon is optional because older issues
+# carry the '- Blocked by: #NN' form.
 #
 # Matching 'Blocked by' ANYWHERE on the line (the previous shape) let prose ABOUT
 # blockers declare blockers. A body whose text read
@@ -138,8 +147,15 @@ def is_held(issue):
     return any(lab.get("name") in HOLD_LABELS for lab in issue.get("labels", []))
 
 
+def is_claimed(issue):
+    """True if an assignee or a claim label (`in-progress`) marks this issue as taken."""
+    if issue.get("assignees"):
+        return True
+    return any(lab.get("name") in CLAIM_LABELS for lab in issue.get("labels", []))
+
+
 def filter_ready(issues):
-    """Return unassigned, unheld issues not blocked by an open issue.
+    """Return unclaimed, unheld issues not blocked by an open issue.
 
     `issues` MUST be the full list of open issues — the blocked-by check derives
     the open-issue number set from it, so a filtered subset under-detects blocks.
@@ -148,7 +164,7 @@ def filter_ready(issues):
     open_numbers = {int(i["number"]) for i in issues}
     ready = []
     for i in issues:
-        if i.get("assignees"):
+        if is_claimed(i):
             continue
         if is_held(i):
             continue
@@ -161,8 +177,8 @@ def filter_ready(issues):
 def format_output(ready):
     if not ready:
         return (
-            "No ready issues. (All open issues are claimed, deferred, "
-            "or blocked by another open issue.)"
+            "No ready issues. (All open issues are claimed, held "
+            "(deferred / needs-human / needs-replan), or blocked by another open issue.)"
         )
     buckets = {p: [] for p in PRIORITIES}
     for i in ready:

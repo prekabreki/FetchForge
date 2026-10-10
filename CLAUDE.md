@@ -1,3 +1,5 @@
+@AGENTS.md
+
 # FetchForge — YouTube Download + H.265 Convert Tool
 
 Local Python/FastAPI web app, packaged as the `fetchforge` pip package. Downloads YouTube videos (single or playlist) via yt-dlp, then either converts to H.265/MP4 using NVENC (NVIDIA GPU) or extracts audio to WAV/MP3. Runs at `http://localhost:8765` (or the next free port up to 8784).
@@ -282,52 +284,6 @@ yield "data: {}\n\n".format(json.dumps({"msg": params["cq"]}))
 ## Versioning
 
 `fetchforge.__version__` in `fetchforge/__init__.py` (currently `"2.3.0"`), imported into `fetchforge/server.py` as `APP_VERSION` (`from fetchforge import __version__ as APP_VERSION`) and surfaced by `pyproject.toml`'s `dynamic = ["version"]` (`attr = "fetchforge.__version__"`) so the pip package version and the running app agree. Bump on every deploy. Displayed in the header as `v 2.3.0` with a green dot fetched from `GET /version` — confirms both HTML and server are fresh after a restart.
-
-<!-- init-workspace:start -->
-## Task tracking & work environment
-
-This repo tracks work with **GitHub Issues + the `gh` CLI**, and keeps durable project
-knowledge in **`.memories/`** (grep-friendly markdown). This section is managed by the
-`init-workspace` skill -- edit between the sentinels, or re-run the skill to refresh it.
-Codebase/architecture docs belong elsewhere in CLAUDE.md (run `/init` for those).
-
-### Issues
-
-```bash
-gh issue list --state open                       # all open
-gh issue list --state open --assignee @me        # your in-progress work
-python tools/issue-ready.py                        # ready: unassigned + open + not blocked
-gh issue view <N>
-gh issue create --title "..." --body "..." --label "P2,bug"
-gh issue edit <N> --add-assignee @me              # claim (assignment is the lock)
-gh issue close <N> --comment "<reason>"
-```
-
-- **Labels:** `P0`-`P4` priority; `bug`/`task`/`chore`/`epic`/`feature` type; `in-progress` status flag.
-- **Dependencies:** write `Blocks #N` / `Blocked by #N` lines in the issue body. `issue-ready.py` hides anything blocked by an open issue.
-- Use `gh` for task tracking -- not TodoWrite or markdown TODO lists.
-
-### Memories (`.memories/`)
-
-Durable, grep-friendly project knowledge -- one fact per file, committed and shared.
-
-- Each memory is `.memories/<kebab-key>.md`, opening with YAML frontmatter: `description:`
-  (one line, required -- feeds the index) and `type:` (optional, free-form).
-- `.memories/README.md` is an **auto-generated index** -- never hand-edit it. Add or change
-  a memory, then commit: the pre-commit hook runs `tools/memory-index.py` and stages the
-  refreshed index. Run it by hand any time.
-- Save a memory when a fact cost real effort to learn and isn't obvious from the code or
-  git history. One fact, one file. Link related memories with `[[other-key]]`.
-
-### Session completion
-
-Work is not complete until `git push` succeeds.
-
-1. File issues for any remaining follow-up work (`gh issue create`).
-2. Run quality gates if code changed (tests, linters, build).
-3. Update issue status -- close finished work, un-claim what you did not finish.
-4. `git pull --rebase` then `git push`; confirm `git status` is clean.
-<!-- init-workspace:end -->
 
 <!-- foreman:start (managed by foreman-init — edits inside will be overwritten) -->
 ## Foreman pipeline
