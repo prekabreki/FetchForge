@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import datetime
 import importlib.util
 import json
@@ -76,6 +77,34 @@ def _allow_sleep():
     if _awake_inhibitor is not None and _awake_inhibitor.poll() is None:
         _awake_inhibitor.terminate()
         _awake_inhibitor = None
+
+@contextlib.contextmanager
+def _wake_lock():
+    """Hold the wake lock for the body's lifetime: released exactly once, on any exit."""
+    _keep_awake()
+    try:
+        yield
+    finally:
+        _allow_sleep()
+
+async def _write_job_log(path, text):
+    """Write a job log off the event loop, logging (never raising) a failed write.
+
+    On a client disconnect the job's task is cancelled, and anyio re-delivers
+    that cancellation at every await until the task finishes, so the thread
+    hop is cancelled too. Write synchronously then: the log matters more than
+    a few ms of a cancelled stream's loop time.
+    """
+    try:
+        await asyncio.to_thread(path.write_text, text, encoding="utf-8")
+    except asyncio.CancelledError:
+        try:
+            path.write_text(text, encoding="utf-8")
+        except Exception as exc:
+            logger.warning("Log write failed: %s", exc)
+        raise
+    except Exception as exc:
+        logger.warning("Log write failed: %s", exc)
 
 
 # Heartbeat watchdog — auto-quit when the browser tab goes away.
@@ -2412,67 +2441,59 @@ async def download(
     async def stream():
         global current_process
         _cancel_requested.clear()   # fresh job — drop any stale cancel
-        _keep_awake()
-        _job_start = datetime.datetime.now()
-        _job_lines = []
+        with _wake_lock():
+            _job_start = datetime.datetime.now()
+            _job_lines = []
 
-        def _jlog(level, msg):
-            ts = datetime.datetime.now().strftime("%H:%M:%S")
-            _job_lines.append("[{}] [{}] {}".format(ts, level, msg))
+            def _jlog(level, msg):
+                ts = datetime.datetime.now().strftime("%H:%M:%S")
+                _job_lines.append("[{}] [{}] {}".format(ts, level, msg))
 
-        try:
-            async for chunk in _download_stream():
-                if chunk.startswith("data: "):
-                    try:
-                        evt = json.loads(chunk[6:].strip())
-                        t = evt.get("type", "")
-                        if t == "phase":
-                            _jlog("PHASE", evt.get("msg", ""))
-                        elif t == "log":
-                            _jlog("LOG", evt.get("msg", ""))
-                        elif t == "error":
-                            _jlog("ERROR", evt.get("msg", ""))
-                        elif t == "done":
-                            _jlog("DONE", evt.get("msg", ""))
-                        elif t == "video_start":
-                            _jlog("VIDEO", "Video {current}/{total}".format(**evt))
-                        elif t == "size_info":
-                            _jlog("SIZE", "source={source_mb}MB  output={output_mb}MB  bloat={bloat_pct:+.1f}%".format(**evt))
-                    except Exception:
-                        pass
-                yield chunk
-        finally:
-            elapsed = datetime.datetime.now() - _job_start
-            status = "CANCELLED"
-            for ln in reversed(_job_lines):
-                if "[ERROR]" in ln:
-                    status = "FAILED"
-                    break
-                if "[DONE]" in ln:
-                    status = "SUCCESS"
-                    break
-            ts_file = _job_start.strftime("%Y-%m-%d_%H-%M-%S")
-            log_path = LOGS_DIR / "{}_download.txt".format(ts_file)
-            header_lines = [
-                "=== FetchForge Job Log ===",
-                "Started : {}".format(_job_start.strftime("%Y-%m-%d %H:%M:%S")),
-                "Type    : YouTube Download",
-                "URL     : {}".format(url),
-                "Elapsed : {}".format(str(elapsed).split(".")[0]),
-                "Status  : {}".format(status),
-                "",
-                "--- Events ---",
-                "",
-            ]
             try:
-                await asyncio.to_thread(
-                    log_path.write_text,
-                    "\n".join(header_lines + _job_lines + [""]),
-                    encoding="utf-8",
-                )
-            except Exception as exc:
-                logger.warning("Log write failed: %s", exc)
-            _allow_sleep()
+                async for chunk in _download_stream():
+                    if chunk.startswith("data: "):
+                        try:
+                            evt = json.loads(chunk[6:].strip())
+                            t = evt.get("type", "")
+                            if t == "phase":
+                                _jlog("PHASE", evt.get("msg", ""))
+                            elif t == "log":
+                                _jlog("LOG", evt.get("msg", ""))
+                            elif t == "error":
+                                _jlog("ERROR", evt.get("msg", ""))
+                            elif t == "done":
+                                _jlog("DONE", evt.get("msg", ""))
+                            elif t == "video_start":
+                                _jlog("VIDEO", "Video {current}/{total}".format(**evt))
+                            elif t == "size_info":
+                                _jlog("SIZE", "source={source_mb}MB  output={output_mb}MB  bloat={bloat_pct:+.1f}%".format(**evt))
+                        except Exception:
+                            pass
+                    yield chunk
+            finally:
+                elapsed = datetime.datetime.now() - _job_start
+                status = "CANCELLED"
+                for ln in reversed(_job_lines):
+                    if "[ERROR]" in ln:
+                        status = "FAILED"
+                        break
+                    if "[DONE]" in ln:
+                        status = "SUCCESS"
+                        break
+                ts_file = _job_start.strftime("%Y-%m-%d_%H-%M-%S")
+                log_path = LOGS_DIR / "{}_download.txt".format(ts_file)
+                header_lines = [
+                    "=== FetchForge Job Log ===",
+                    "Started : {}".format(_job_start.strftime("%Y-%m-%d %H:%M:%S")),
+                    "Type    : YouTube Download",
+                    "URL     : {}".format(url),
+                    "Elapsed : {}".format(str(elapsed).split(".")[0]),
+                    "Status  : {}".format(status),
+                    "",
+                    "--- Events ---",
+                    "",
+                ]
+                await _write_job_log(log_path, "\n".join(header_lines + _job_lines + [""]))
 
     async def _download_stream():
         global current_process
@@ -3311,71 +3332,63 @@ async def convert_local(
     async def stream():
         global current_process
         _cancel_requested.clear()   # fresh job — drop any stale cancel
-        _keep_awake()
-        _job_start = datetime.datetime.now()
-        _job_lines = []
+        with _wake_lock():
+            _job_start = datetime.datetime.now()
+            _job_lines = []
 
-        def _jlog(level, msg):
-            ts = datetime.datetime.now().strftime("%H:%M:%S")
-            _job_lines.append("[{}] [{}] {}".format(ts, level, msg))
+            def _jlog(level, msg):
+                ts = datetime.datetime.now().strftime("%H:%M:%S")
+                _job_lines.append("[{}] [{}] {}".format(ts, level, msg))
 
-        try:
-            async for chunk in _convert_local_stream():
-                if chunk.startswith("data: "):
-                    try:
-                        evt = json.loads(chunk[6:].strip())
-                        t = evt.get("type", "")
-                        if t == "phase":
-                            _jlog("PHASE", evt.get("msg", ""))
-                        elif t == "log":
-                            _jlog("LOG", evt.get("msg", ""))
-                        elif t == "error":
-                            _jlog("ERROR", evt.get("msg", ""))
-                        elif t == "done":
-                            _jlog("DONE", evt.get("msg", ""))
-                        elif t == "video_start":
-                            _jlog("VIDEO", "Video {current}/{total}".format(**evt))
-                        elif t == "size_info":
-                            _jlog("SIZE", "source={source_mb}MB  output={output_mb}MB  bloat={bloat_pct:+.1f}%".format(**evt))
-                    except Exception:
-                        pass
-                yield chunk
-        finally:
-            elapsed = datetime.datetime.now() - _job_start
-            status = "CANCELLED"
-            for ln in reversed(_job_lines):
-                if "[ERROR]" in ln:
-                    status = "FAILED"
-                    break
-                if "[DONE]" in ln:
-                    status = "SUCCESS"
-                    break
-            ts_file = _job_start.strftime("%Y-%m-%d_%H-%M-%S")
-            log_path = LOGS_DIR / "{}_local.txt".format(ts_file)
             try:
-                file_list = json.loads(files)
-            except Exception:
-                file_list = [files]
-            header_lines = [
-                "=== FetchForge Job Log ===",
-                "Started : {}".format(_job_start.strftime("%Y-%m-%d %H:%M:%S")),
-                "Type    : Local Convert",
-                "Files   : {}".format(", ".join(str(f) for f in file_list)),
-                "Elapsed : {}".format(str(elapsed).split(".")[0]),
-                "Status  : {}".format(status),
-                "",
-                "--- Events ---",
-                "",
-            ]
-            try:
-                await asyncio.to_thread(
-                    log_path.write_text,
-                    "\n".join(header_lines + _job_lines + [""]),
-                    encoding="utf-8",
-                )
-            except Exception as exc:
-                logger.warning("Log write failed: %s", exc)
-            _allow_sleep()
+                async for chunk in _convert_local_stream():
+                    if chunk.startswith("data: "):
+                        try:
+                            evt = json.loads(chunk[6:].strip())
+                            t = evt.get("type", "")
+                            if t == "phase":
+                                _jlog("PHASE", evt.get("msg", ""))
+                            elif t == "log":
+                                _jlog("LOG", evt.get("msg", ""))
+                            elif t == "error":
+                                _jlog("ERROR", evt.get("msg", ""))
+                            elif t == "done":
+                                _jlog("DONE", evt.get("msg", ""))
+                            elif t == "video_start":
+                                _jlog("VIDEO", "Video {current}/{total}".format(**evt))
+                            elif t == "size_info":
+                                _jlog("SIZE", "source={source_mb}MB  output={output_mb}MB  bloat={bloat_pct:+.1f}%".format(**evt))
+                        except Exception:
+                            pass
+                    yield chunk
+            finally:
+                elapsed = datetime.datetime.now() - _job_start
+                status = "CANCELLED"
+                for ln in reversed(_job_lines):
+                    if "[ERROR]" in ln:
+                        status = "FAILED"
+                        break
+                    if "[DONE]" in ln:
+                        status = "SUCCESS"
+                        break
+                ts_file = _job_start.strftime("%Y-%m-%d_%H-%M-%S")
+                log_path = LOGS_DIR / "{}_local.txt".format(ts_file)
+                try:
+                    file_list = json.loads(files)
+                except Exception:
+                    file_list = [files]
+                header_lines = [
+                    "=== FetchForge Job Log ===",
+                    "Started : {}".format(_job_start.strftime("%Y-%m-%d %H:%M:%S")),
+                    "Type    : Local Convert",
+                    "Files   : {}".format(", ".join(str(f) for f in file_list)),
+                    "Elapsed : {}".format(str(elapsed).split(".")[0]),
+                    "Status  : {}".format(status),
+                    "",
+                    "--- Events ---",
+                    "",
+                ]
+                await _write_job_log(log_path, "\n".join(header_lines + _job_lines + [""]))
 
     async def _convert_local_stream():
         global current_process
