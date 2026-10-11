@@ -1,6 +1,9 @@
 import asyncio
+import os
+import shutil
 import site
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -48,10 +51,32 @@ class TestYtdlpArgvResolution(unittest.TestCase):
             self.assertEqual(server.get_ytdlp_argv(),
                              ["/usr/bin/python3", "-m", "yt_dlp"])
 
-    def test_console_script_on_path_wins(self):
+    def test_console_script_on_path_is_fallback_only(self):
         with mock.patch("shutil.which", return_value="/venv/bin/yt-dlp"), \
-             mock.patch.object(server, "IS_WINDOWS", False):
+             mock.patch("importlib.util.find_spec", return_value=None), \
+             mock.patch.object(server, "IS_WINDOWS", False), \
+             mock.patch.object(server, "sys") as fake_sys:
+            fake_sys.prefix = "/nonexistent-prefix"
             self.assertEqual(server.get_ytdlp_argv(), ["/venv/bin/yt-dlp"])
+
+    def test_venv_copy_wins_over_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            prefix = Path(td) / "prefix"
+            pathbin = Path(td) / "pathbin"
+            (prefix / "bin").mkdir(parents=True)
+            pathbin.mkdir(parents=True)
+            venv_ytdlp = prefix / "bin" / "yt-dlp"
+            path_ytdlp = pathbin / "yt-dlp"
+            venv_ytdlp.write_text("#!/bin/sh\n")
+            path_ytdlp.write_text("#!/bin/sh\n")
+            venv_ytdlp.chmod(0o755)
+            path_ytdlp.chmod(0o755)
+            with mock.patch.dict(os.environ, {"PATH": str(pathbin)}), \
+                 mock.patch.object(server, "IS_WINDOWS", False), \
+                 mock.patch.object(server, "sys") as fake_sys:
+                fake_sys.prefix = str(prefix)
+                self.assertEqual(shutil.which("yt-dlp"), str(path_ytdlp))
+                self.assertEqual(server.get_ytdlp_argv(), [str(venv_ytdlp)])
 
     def test_raises_only_when_module_is_absent_too(self):
         with mock.patch("shutil.which", return_value=None), \
