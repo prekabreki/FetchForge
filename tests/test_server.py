@@ -668,6 +668,24 @@ class TestGetFormatsFailure(unittest.TestCase):
         self.assertEqual([f["id"] for f in out["video_formats"]], ["137"])
         self.assertEqual([f["id"] for f in out["audio_formats"]], ["140"])
 
+    def test_dubbed_audio_tracks_are_labelled_and_original_sorts_first(self):
+        payload = json.dumps({"formats": [
+            {"format_id": "251-1", "ext": "webm", "vcodec": "none", "acodec": "opus", "abr": 140,
+             "language": "es", "language_preference": -1, "format_note": "Spanish (Spain), medium"},
+            {"format_id": "251-0", "ext": "webm", "vcodec": "none", "acodec": "opus", "abr": 126,
+             "language": "en-US", "language_preference": 10,
+             "format_note": "English (US) original (default), medium"},
+            {"format_id": "139-0", "ext": "m4a", "vcodec": "none", "acodec": "mp4a", "abr": 48,
+             "language": "en-US", "language_preference": 10,
+             "format_note": "English (US) original (default), low"},
+        ]})
+        out = self._run("print({!r})".format(payload))
+        audio = out["audio_formats"]
+        self.assertEqual([f["id"] for f in audio], ["251-0", "139-0", "251-1"])
+        self.assertTrue(audio[0]["label"].startswith("English (US) original (default) · opus"))
+        self.assertTrue(audio[2]["label"].startswith("Spanish (Spain) · opus"))
+        self.assertEqual(audio[2]["language"], "es")
+
     def test_reason_is_trimmed(self):
         reason = server._ytdlp_error_reason("ERROR: " + "x" * 5000, 1)
         self.assertEqual(len(reason), server._YTDLP_REASON_MAX)

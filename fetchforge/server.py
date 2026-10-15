@@ -2397,14 +2397,26 @@ async def _get_formats(url: str) -> dict:
             label = f"{acodec} {int(abr)}k" if abr else acodec
             if filesize:
                 label += f" ({filesize / 1024**2:.0f}MB)"
+            # Multi-language videos (YouTube auto-dubs) carry one format per
+            # track. yt-dlp puts the track name first in format_note
+            # ("Spanish (Spain), medium", "English (US) original (default), low"),
+            # so lead the label with it or the tracks are indistinguishable.
+            language = f.get("language")
+            if language:
+                track = note.split(",")[0].strip() or language
+                label = f"{track} · {label}"
             audio_formats.append({
                 "id": fid, "ext": ext, "label": label,
                 "abr": abr or 0, "acodec": acodec, "note": note,
-                "filesize": filesize or 0,
+                "filesize": filesize or 0, "language": language,
+                "language_preference": f.get("language_preference") or 0,
             })
 
     video_formats.sort(key=lambda x: (x["height"], x["fps"]), reverse=True)
-    audio_formats.sort(key=lambda x: x["abr"], reverse=True)
+    # Original-language track first (yt-dlp: 10 original, 5 default, -1 dub),
+    # so the pre-selected audio is never an auto-dub that happens to have a
+    # higher bitrate.
+    audio_formats.sort(key=lambda x: (x["language_preference"], x["abr"]), reverse=True)
     return {"video_formats": video_formats, "audio_formats": audio_formats}
 
 
