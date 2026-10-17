@@ -107,6 +107,33 @@ async def _write_job_log(path, text):
         logger.warning("Log write failed: %s", exc)
 
 
+def _terminate_if_running(proc) -> bool:
+    """Synchronously SIGTERM a subprocess that hasn't exited yet.
+
+    Synchronous on purpose: a finally running under a re-delivered anyio
+    cancellation must not await before the terminate, or the terminate never
+    runs (#87). Swallows the race where the process already died and was reaped
+    (ProcessLookupError). Returns True if a terminate was actually sent."""
+    if proc is None or proc.returncode is not None:
+        return False
+    try:
+        proc.terminate()
+    except Exception:
+        pass
+    return True
+
+
+async def _reap_tasks(*tasks) -> None:
+    """Await already-cancelled worker tasks to completion, immune to anyio
+    re-delivering the disconnect cancellation at every await (#87)."""
+    for _t in tasks:
+        while not _t.done():
+            try:
+                await asyncio.shield(_t)
+            except asyncio.CancelledError:
+                pass
+
+
 # Heartbeat watchdog — auto-quit when the browser tab goes away.
 # The page pings GET /heartbeat every few seconds; if no ping arrives within
 # _HEARTBEAT_TIMEOUT, the server self-exits. A grace window (rather than firing
@@ -1810,10 +1837,11 @@ async def run_encode(ffmpeg_args: list, *, duration_secs, idx: int, total: int,
                     progress_buf = {}
             elif line:
                 yield sse_log(line)
-    finally:
         await t_out
         await t_err
         await proc.wait()
+    finally:
+        _terminate_if_running(proc)
         current_process = None
         result["returncode"] = proc.returncode
 
@@ -2591,7 +2619,11 @@ async def download(
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            flat_out, flat_err = await flat_proc.communicate()
+            try:
+                flat_out, flat_err = await flat_proc.communicate()
+            finally:
+                _terminate_if_running(flat_proc)
+                await flat_proc.wait()
 
             if flat_proc.returncode != 0:
                 yield sse_error('Could not fetch video info: ' + flat_err.decode(errors='replace')[:300])
@@ -2742,37 +2774,41 @@ async def download(
                         current_dl_process = proc
                         output_paths = set()
 
-                        async for raw in proc.stdout:
-                            if _stopping():
-                                proc.terminate()
-                                break
-                            line = raw.decode(errors="replace").rstrip()
-                            _cw = _maybe_flag_stale_cookies(line)
-                            if _cw:
-                                await msg_q.put(sse_cookie_warning(_cw))
-                            m = re.search(
-                                r"\[download\]\s+([\d.]+)%\s+of\s+(\S+)\s+at\s+(.+?)\s+ETA\s+(\S+)",
-                                line
-                            )
-                            if m:
-                                dl_pct, dl_size, dl_speed, dl_eta = m.groups()
-                                await msg_q.put(sse_dl_progress(float(dl_pct), dl_size, dl_speed, dl_eta, vid_idx, total_videos))
-                            else:
-                                merger = re.search(r'\[Merger\] Merging formats into "(.+?)"', line)
-                                # A section download is written merged in one go:
-                                # no [Merger] line, only its Destination.
-                                dest = re.search(r'\[download\] Destination: (.+)', line) if section else None
-                                already = re.search(r'\[download\] (.+?) has already been downloaded', line)
-                                if merger:
-                                    output_paths.add(merger.group(1))
-                                elif dest:
-                                    output_paths.add(dest.group(1).strip())
-                                elif already:
-                                    output_paths.add(already.group(1))
-                                await msg_q.put(sse_log(line))
+                        try:
+                            async for raw in proc.stdout:
+                                if _stopping():
+                                    proc.terminate()
+                                    break
+                                line = raw.decode(errors="replace").rstrip()
+                                _cw = _maybe_flag_stale_cookies(line)
+                                if _cw:
+                                    await msg_q.put(sse_cookie_warning(_cw))
+                                m = re.search(
+                                    r"\[download\]\s+([\d.]+)%\s+of\s+(\S+)\s+at\s+(.+?)\s+ETA\s+(\S+)",
+                                    line
+                                )
+                                if m:
+                                    dl_pct, dl_size, dl_speed, dl_eta = m.groups()
+                                    await msg_q.put(sse_dl_progress(float(dl_pct), dl_size, dl_speed, dl_eta, vid_idx, total_videos))
+                                else:
+                                    merger = re.search(r'\[Merger\] Merging formats into "(.+?)"', line)
+                                    # A section download is written merged in one go:
+                                    # no [Merger] line, only its Destination.
+                                    dest = re.search(r'\[download\] Destination: (.+)', line) if section else None
+                                    already = re.search(r'\[download\] (.+?) has already been downloaded', line)
+                                    if merger:
+                                        output_paths.add(merger.group(1))
+                                    elif dest:
+                                        output_paths.add(dest.group(1).strip())
+                                    elif already:
+                                        output_paths.add(already.group(1))
+                                    await msg_q.put(sse_log(line))
 
-                        await proc.wait()
-                        current_dl_process = None
+                            await proc.wait()
+                        finally:
+                            _terminate_if_running(proc)
+                            current_dl_process = None
+                            await proc.wait()
 
                         if _cancel_requested.is_set():
                             break   # user cancelled — not a download failure
@@ -2998,30 +3034,39 @@ async def download(
             dl_task = asyncio.create_task(dl_worker())
             enc_task = asyncio.create_task(enc_worker())
 
-            done_count = 0
-            while done_count < 2:
-                msg = await msg_q.get()
-                if msg is None:
-                    done_count += 1
-                    continue
-                yield msg
+            try:
+                done_count = 0
+                while done_count < 2:
+                    msg = await msg_q.get()
+                    if msg is None:
+                        done_count += 1
+                        continue
+                    yield msg
 
-            # return_exceptions: a worker dying on an unexpected error must surface as
-            # a clean error event, not crash the SSE stream (both workers already sent
-            # their msg_q sentinel via finally, so the loop above has exited).
-            for _r in await asyncio.gather(dl_task, enc_task, return_exceptions=True):
-                if isinstance(_r, Exception):
-                    abort.set()
-                    yield sse_error("Pipeline worker error: {}".format(_r))
+                # return_exceptions: a worker dying on an unexpected error must surface as
+                # a clean error event, not crash the SSE stream (both workers already sent
+                # their msg_q sentinel via finally, so the loop above has exited).
+                for _r in await asyncio.gather(dl_task, enc_task, return_exceptions=True):
+                    if isinstance(_r, Exception):
+                        abort.set()
+                        yield sse_error("Pipeline worker error: {}".format(_r))
 
-            if _cancel_requested.is_set():
-                yield sse_cancelled('Cancelled by user.')
-            elif not abort.is_set():
-                yield sse_done('All done!')
-                if shutdown == "true":
-                    # Shutdown is client-driven: emit the event, the UI runs the
-                    # visible countdown and calls POST /shutdown-now itself.
-                    yield sse_shutdown('Shutting down in 60 seconds...')
+                if _cancel_requested.is_set():
+                    yield sse_cancelled('Cancelled by user.')
+                elif not abort.is_set():
+                    yield sse_done('All done!')
+                    if shutdown == "true":
+                        # Shutdown is client-driven: emit the event, the UI runs the
+                        # visible countdown and calls POST /shutdown-now itself.
+                        yield sse_shutdown('Shutting down in 60 seconds...')
+            finally:
+                # A client disconnect cancels this generator while the workers keep
+                # running as detached tasks. Cancel them so their own finallys
+                # terminate any in-flight yt-dlp/ffmpeg, then reap them (#87).
+                for _t in (dl_task, enc_task):
+                    if not _t.done():
+                        _t.cancel()
+                await _reap_tasks(dl_task, enc_task)
 
         else:
             # ── Sequential: download → convert → delete, one at a time ─────────
@@ -3074,37 +3119,41 @@ async def download(
                 current_process = proc
                 output_paths = set()
 
-                async for raw in proc.stdout:
-                    if _cancel_requested.is_set():
-                        proc.terminate()
-                        break
-                    line = raw.decode(errors="replace").rstrip()
-                    _cw = _maybe_flag_stale_cookies(line)
-                    if _cw:
-                        yield sse_cookie_warning(_cw)
-                    m = re.search(
-                        r"\[download\]\s+([\d.]+)%\s+of\s+([\S]+)\s+at\s+([\S]+)\s+ETA\s+([\S]+)",
-                        line
-                    )
-                    if m:
-                        pct, size, speed, eta = m.groups()
-                        yield _sse({"type": "progress", "pct": float(pct), "size": size, "speed": speed, "eta": eta})
-                    else:
-                        merger = re.search(r'\[Merger\] Merging formats into "(.+?)"', line)
-                        # Audio mode and section downloads have no merger — capture
-                        # the destination line instead.
-                        dest = re.search(r'\[download\] Destination: (.+)', line) if (is_audio or section) else None
-                        already = re.search(r'\[download\] (.+?) has already been downloaded', line)
-                        if merger:
-                            output_paths.add(merger.group(1))
-                        elif dest:
-                            output_paths.add(dest.group(1).strip())
-                        elif already:
-                            output_paths.add(already.group(1))
-                        yield sse_log(line)
+                try:
+                    async for raw in proc.stdout:
+                        if _cancel_requested.is_set():
+                            proc.terminate()
+                            break
+                        line = raw.decode(errors="replace").rstrip()
+                        _cw = _maybe_flag_stale_cookies(line)
+                        if _cw:
+                            yield sse_cookie_warning(_cw)
+                        m = re.search(
+                            r"\[download\]\s+([\d.]+)%\s+of\s+([\S]+)\s+at\s+([\S]+)\s+ETA\s+([\S]+)",
+                            line
+                        )
+                        if m:
+                            pct, size, speed, eta = m.groups()
+                            yield _sse({"type": "progress", "pct": float(pct), "size": size, "speed": speed, "eta": eta})
+                        else:
+                            merger = re.search(r'\[Merger\] Merging formats into "(.+?)"', line)
+                            # Audio mode and section downloads have no merger — capture
+                            # the destination line instead.
+                            dest = re.search(r'\[download\] Destination: (.+)', line) if (is_audio or section) else None
+                            already = re.search(r'\[download\] (.+?) has already been downloaded', line)
+                            if merger:
+                                output_paths.add(merger.group(1))
+                            elif dest:
+                                output_paths.add(dest.group(1).strip())
+                            elif already:
+                                output_paths.add(already.group(1))
+                            yield sse_log(line)
 
-                await proc.wait()
-                current_process = None
+                    await proc.wait()
+                finally:
+                    _terminate_if_running(proc)
+                    current_process = None
+                    await proc.wait()
 
                 if _cancel_requested.is_set():
                     break   # user cancelled — not a download failure
