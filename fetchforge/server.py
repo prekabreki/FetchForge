@@ -157,6 +157,8 @@ _INTER_ITEM_GRACE = 120          # seconds to stay alive after a job ends (> 45s
 _last_heartbeat: float = 0.0     # monotonic timestamp of the last ping
 _active_jobs = 0                 # count of /download + /convert-local SSE streams currently running
 _last_job_end: float = 0.0       # monotonic timestamp when the last job stream finished
+_job_admitted = False            # single-job admission (#89): True while a job owns the server
+_BUSY_MESSAGE = "Another download or conversion is already running. Wait for it to finish and try again."
 _uvicorn_server = None           # set in run_server(); lets the watchdog stop the server
 
 async def _heartbeat_watchdog():
@@ -181,18 +183,81 @@ async def _heartbeat_watchdog():
             return
 
 
-async def _tracked(agen):
-    """Wrap an SSE generator so the heartbeat watchdog knows a job is in flight.
-    Increments _active_jobs for the life of the stream and stamps _last_job_end
-    on completion/disconnect (the finally runs when Starlette closes the gen)."""
-    global _active_jobs, _last_job_end
-    _active_jobs += 1
-    try:
-        async for chunk in agen:
-            yield chunk
-    finally:
-        _active_jobs -= 1
+def _try_admit() -> bool:
+    """Atomically claim the single job slot (#89). Synchronous and await-free, so
+    the check-and-set cannot be interleaved with another request on the event
+    loop. Returns False when a /download or /convert-local job already runs."""
+    global _job_admitted
+    if _job_admitted:
+        return False
+    _job_admitted = True
+    return True
+
+
+def _release_admission() -> None:
+    """Release the single job slot. Idempotent and synchronous, so it runs even
+    under a re-delivered anyio cancellation (no awaits)."""
+    global _job_admitted
+    _job_admitted = False
+
+
+class _TrackedStream:
+    """Cold-safe async iterable wrapping an SSE generator.
+
+    Increments _active_jobs for the life of the stream, stamps _last_job_end, and
+    releases the single-job admission exactly once — on exhaustion, error,
+    cancellation, or close. It is a plain object (not a bare async generator) so
+    that aclose() releases admission even when the stream is closed before it is
+    ever iterated: a never-started async generator's finally never runs, which
+    would leak the admission held from the handler (#89)."""
+
+    def __init__(self, agen):
+        self._agen = agen
+        self._started = False
+        self._finished = False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        global _active_jobs
+        if not self._started:
+            self._started = True
+            _active_jobs += 1
+        try:
+            return await self._agen.__anext__()
+        except StopAsyncIteration:
+            self._finish()
+            raise
+        except asyncio.CancelledError:
+            self._finish()
+            raise
+        except BaseException:
+            self._finish()
+            raise
+
+    async def aclose(self):
+        self._finish()
+        aclose = getattr(self._agen, "aclose", None)
+        if aclose is not None:
+            await aclose()
+
+    def _finish(self):
+        global _active_jobs, _last_job_end
+        if self._finished:
+            return
+        self._finished = True
+        if self._started:
+            _active_jobs -= 1
         _last_job_end = time.monotonic()
+        _release_admission()
+
+
+def _tracked(agen):
+    """Wrap an SSE generator so the heartbeat watchdog knows a job is in flight
+    and the single-job admission is released when the stream ends (whether it
+    finished, errored, was cancelled, or was never consumed)."""
+    return _TrackedStream(agen)
 
 import secrets
 from contextlib import asynccontextmanager
@@ -2478,6 +2543,8 @@ async def download(
     section_start: str = Form(""),
     section_end: str = Form(""),
 ):
+    if not _try_admit():
+        return JSONResponse({"error": _BUSY_MESSAGE}, status_code=409)
     async def stream():
         global current_process
         _cancel_requested.clear()   # fresh job — drop any stale cancel
@@ -3390,6 +3457,8 @@ async def convert_local(
     tune: str = Form(""),            # "" = auto, else hq | uhq
     pix_fmt: str = Form(""),         # "" = auto, else yuv420p | yuv420p10le
 ):
+    if not _try_admit():
+        return JSONResponse({"error": _BUSY_MESSAGE}, status_code=409)
     async def stream():
         global current_process
         _cancel_requested.clear()   # fresh job — drop any stale cancel
