@@ -1932,6 +1932,57 @@ def build_video_ffmpeg_args(input_file: Path, output_file: Path, params: dict,
     ], list(input_opts))
 
 
+def _encode_plan(src: dict, input_file: Path, output_file: Path, opts: dict,
+                 input_opts=()) -> tuple:
+    """Build the encode params, ffmpeg argv, and log lines for one video job.
+
+    Single source of truth for the three former copies (H-2). *opts* carries the
+    request-level (or per-item) knobs: ``tune_mode``, ``cq``, ``maxrate``,
+    ``preset``, ``tune``, ``pix_fmt``, ``target_res``, ``sharpen``. *input_opts*
+    (e.g. section_input_seek) is forwarded to build_video_ffmpeg_args.
+
+    Returns ``(params, argv, logs)`` where *logs* is the "Encode params: ..."
+    line plus one "Override ..." line per non-applied override, in order. The
+    helper never emits SSE; callers yield / queue the strings themselves.
+    """
+    tune_mode = opts.get("tune_mode", "")
+    target_res = opts.get("target_res", 0)
+    sharpen = opts.get("sharpen", False)
+    effective_tune = "hq" if tune_mode == "hq" else _nvenc_tune
+    params = calc_encode_params(
+        height=src.get("height", 1080),
+        fps=src.get("fps", 30.0),
+        video_bitrate_kbps=src.get("video_bitrate_kbps", 0),
+        codec=src.get("codec", "h264"),
+        pix_fmt=src.get("pix_fmt", "yuv420p"),
+        color_transfer=src.get("color_transfer", ""),
+        cq_override=opts.get("cq", 0),
+        maxrate_override=opts.get("maxrate", ""),
+        nvenc_tune=effective_tune,
+        target_res=target_res,
+        sharpen=sharpen,
+        preset_override=opts.get("preset", ""),
+        tune_override=opts.get("tune", ""),
+        pix_fmt_override=opts.get("pix_fmt", ""),
+        probe_tune=_nvenc_tune,
+    )
+    effective_tune = params["tune"]   # post-validation/downgrade
+    logs = ["Encode params: CQ={} maxrate={} preset={} tune={} pix={}".format(
+        params["cq"], params["maxrate"], params["preset"], effective_tune, params["pix_fmt"]
+    )]
+    for _name, _rep in params["overrides"].items():
+        if _rep["status"] != "applied":
+            logs.append("Override {}={} {} → {}".format(
+                _name, _rep["requested"], _rep["status"], _rep["applied"]))
+    argv = build_video_ffmpeg_args(
+        input_file, output_file, params, effective_tune, src.get("codec", ""),
+        target_height=_effective_target_height(src.get("height", 1080), target_res),
+        sharpen=sharpen,
+        input_opts=input_opts,
+    )
+    return params, argv, logs
+
+
 async def run_encode(ffmpeg_args: list, *, duration_secs, idx: int, total: int,
                      result: dict):
     """Run one ffmpeg encode/extract, yielding SSE strings for progress + log.
@@ -3221,40 +3272,15 @@ async def download(
                 else:
                     await emit(sse_log("Could not read duration \u2014 progress bar will be indeterminate"))
 
-                effective_tune = "hq" if item_tune == "hq" else _nvenc_tune
-                params = calc_encode_params(
-                    height=src.get("height", 1080),
-                    fps=src.get("fps", 30.0),
-                    video_bitrate_kbps=src.get("video_bitrate_kbps", 0),
-                    codec=src.get("codec", "h264"),
-                    pix_fmt=src.get("pix_fmt", "yuv420p"),
-                    color_transfer=src.get("color_transfer", ""),
-                    cq_override=cq,
-                    maxrate_override=maxrate,
-                    nvenc_tune=effective_tune,
-                    target_res=_target_res,
-                    sharpen=_sharpen,
-                    preset_override=preset,
-                    tune_override=tune,
-                    pix_fmt_override=pix_fmt,
-                    probe_tune=_nvenc_tune,
-                )
-                effective_tune = params["tune"]   # post-validation/downgrade
-                enc_log = "Encode params: CQ={} maxrate={} preset={} tune={} pix={}".format(
-                    params["cq"], params["maxrate"], params["preset"], effective_tune, params["pix_fmt"]
-                )
-                await emit(sse_log(enc_log))
-                for _name, _rep in params["overrides"].items():
-                    if _rep["status"] != "applied":
-                        await emit(sse_log("Override {}={} {} → {}".format(
-                            _name, _rep["requested"], _rep["status"], _rep["applied"])))
-
-                enc_args = build_video_ffmpeg_args(
-                    input_file, output_file, params, effective_tune, src.get("codec", ""),
-                    target_height=_effective_target_height(src.get("height", 1080), _target_res),
-                    sharpen=_sharpen,
+                params, enc_args, enc_logs = _encode_plan(
+                    src, input_file, output_file,
+                    {"tune_mode": item_tune, "cq": cq, "maxrate": maxrate,
+                     "preset": preset, "tune": tune, "pix_fmt": pix_fmt,
+                     "target_res": _target_res, "sharpen": _sharpen},
                     input_opts=seek,
                 )
+                for _log in enc_logs:
+                    await emit(sse_log(_log))
                 enc_res: dict = {}
                 async for _s in run_encode(enc_args, duration_secs=duration_secs,
                                            idx=vid_idx, total=total_videos, result=enc_res):
@@ -3486,40 +3512,15 @@ async def download(
                         enc_log = "Audio extract: {} → {}".format(audio_preset.upper(), output_file.name)
                         yield sse_log(enc_log)
                     else:
-                        effective_tune = "hq" if tune_mode == "hq" else _nvenc_tune
-                        params = calc_encode_params(
-                            height=src.get("height", 1080),
-                            fps=src.get("fps", 30.0),
-                            video_bitrate_kbps=src.get("video_bitrate_kbps", 0),
-                            codec=src.get("codec", "h264"),
-                            pix_fmt=src.get("pix_fmt", "yuv420p"),
-                            color_transfer=src.get("color_transfer", ""),
-                            cq_override=cq,
-                            maxrate_override=maxrate,
-                            nvenc_tune=effective_tune,
-                            target_res=_target_res,
-                            sharpen=_sharpen,
-                            preset_override=preset,
-                            tune_override=tune,
-                            pix_fmt_override=pix_fmt,
-                            probe_tune=_nvenc_tune,
-                        )
-                        effective_tune = params["tune"]   # post-validation/downgrade
-                        enc_log = "Encode params: CQ={} maxrate={} preset={} tune={} pix={}".format(
-                            params["cq"], params["maxrate"], params["preset"], effective_tune, params["pix_fmt"]
-                        )
-                        yield sse_log(enc_log)
-                        for _name, _rep in params["overrides"].items():
-                            if _rep["status"] != "applied":
-                                yield sse_log("Override {}={} {} → {}".format(
-                                    _name, _rep["requested"], _rep["status"], _rep["applied"]))
-
-                        ffmpeg_args = build_video_ffmpeg_args(
-                            input_file, output_file, params, effective_tune, src.get("codec", ""),
-                            target_height=_effective_target_height(src.get("height", 1080), _target_res),
-                            sharpen=_sharpen,
+                        params, ffmpeg_args, enc_logs = _encode_plan(
+                            src, input_file, output_file,
+                            {"tune_mode": tune_mode, "cq": cq, "maxrate": maxrate,
+                             "preset": preset, "tune": tune, "pix_fmt": pix_fmt,
+                             "target_res": _target_res, "sharpen": _sharpen},
                             input_opts=seek,
                         )
+                        for _log in enc_logs:
+                            yield sse_log(_log)
 
                     enc_res: dict = {}
                     async for _s in run_encode(ffmpeg_args, duration_secs=duration_secs,
@@ -3776,39 +3777,14 @@ async def convert_local(
                 enc_log = "Audio extract: {} → {}".format(audio_preset.upper(), output_file.name)
                 yield sse_log(enc_log)
             else:
-                effective_tune = "hq" if tune_mode == "hq" else _nvenc_tune
-                params = calc_encode_params(
-                    height=src.get("height", 1080),
-                    fps=src.get("fps", 30.0),
-                    video_bitrate_kbps=src.get("video_bitrate_kbps", 0),
-                    codec=src.get("codec", "h264"),
-                    pix_fmt=src.get("pix_fmt", "yuv420p"),
-                    color_transfer=src.get("color_transfer", ""),
-                    cq_override=cq,
-                    maxrate_override=maxrate,
-                    nvenc_tune=effective_tune,
-                    target_res=_target_res,
-                    sharpen=_sharpen,
-                    preset_override=preset,
-                    tune_override=tune,
-                    pix_fmt_override=pix_fmt,
-                    probe_tune=_nvenc_tune,
+                params, ffmpeg_args, enc_logs = _encode_plan(
+                    src, input_file, output_file,
+                    {"tune_mode": tune_mode, "cq": cq, "maxrate": maxrate,
+                     "preset": preset, "tune": tune, "pix_fmt": pix_fmt,
+                     "target_res": _target_res, "sharpen": _sharpen},
                 )
-                effective_tune = params["tune"]   # post-validation/downgrade
-                enc_log = "Encode params: CQ={} maxrate={} preset={} tune={} pix={}".format(
-                    params["cq"], params["maxrate"], params["preset"], effective_tune, params["pix_fmt"]
-                )
-                yield sse_log(enc_log)
-                for _name, _rep in params["overrides"].items():
-                    if _rep["status"] != "applied":
-                        yield sse_log("Override {}={} {} → {}".format(
-                            _name, _rep["requested"], _rep["status"], _rep["applied"]))
-
-                ffmpeg_args = build_video_ffmpeg_args(
-                    input_file, output_file, params, effective_tune, src.get("codec", ""),
-                    target_height=_effective_target_height(src.get("height", 1080), _target_res),
-                    sharpen=_sharpen,
-                )
+                for _log in enc_logs:
+                    yield sse_log(_log)
 
             enc_res: dict = {}
             async for _s in run_encode(ffmpeg_args, duration_secs=duration_secs,
