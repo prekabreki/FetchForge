@@ -30,9 +30,20 @@ install_fetchforge() {
         python -m ensurepip --upgrade && python -m pip install -e .
     fi
 }
-python -I -c "import importlib.metadata as m; m.version('fetchforge')" >/dev/null 2>&1 \
-    || install_fetchforge || {
-    echo "Setup failed — ensure Python 3.12+ and pip (or uv) are available." >&2; exit 1; }
+# Reinstall when the package is missing, or when pyproject.toml is newer than the
+# stamp left by the last successful install — a pip install is otherwise skipped
+# forever, so a dependency added to pyproject.toml never reaches an existing venv.
+STAMP="$VENV/.fetchforge-installed"
+needs_install() {
+    python -I -c "import importlib.metadata as m; m.version('fetchforge')" >/dev/null 2>&1 || return 0
+    [[ -f "$STAMP" ]] || return 0
+    [[ pyproject.toml -nt "$STAMP" ]]
+}
+if needs_install; then
+    install_fetchforge || {
+        echo "Setup failed — ensure Python 3.12+ and pip (or uv) are available." >&2; exit 1; }
+    touch "$STAMP"
+fi
 
 # ffmpeg/ffprobe come from the system; warn early if absent.
 command -v ffmpeg  >/dev/null 2>&1 || echo "WARNING: ffmpeg not found on PATH — install it (e.g. sudo dnf install ffmpeg)."
