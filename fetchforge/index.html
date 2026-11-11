@@ -3167,52 +3167,21 @@ async function httpErrorText(r) {
   return 'HTTP ' + r.status;
 }
 
-// Returns true on success, false on error.
-// Dispatches to /download (youtube) or /convert-local (local) based on item.type.
-async function runOneItem(item, opts) {
-  let endpoint, form;
-
-  if (item.type === 'local') {
-    endpoint = `${API}/convert-local`;
-    form = new FormData();
-    form.append('files', JSON.stringify([item.path]));
-    form.append('cq', opts.cq);
-    form.append('maxrate', opts.maxrate);
-    appendEncodeOverrides(form, opts);
-    form.append('shutdown', 'false');
-    form.append('output_dir', opts.outputDir);
-    form.append('tune_mode', opts.tuneMode);
-    form.append('mode', opts.mode);
-    form.append('audio_preset', opts.audioPreset);
-    form.append('target_res', opts.targetRes);
-    form.append('sharpen', opts.sharpen);
-  } else {
-    endpoint = `${API}/download`;
-    form = new FormData();
-    form.append('url', item.url);
-    form.append('video_format', item.video_format || '');
-    form.append('audio_format', item.audio_format);
-    form.append('convert', opts.convert);
-    form.append('cq', opts.cq);
-    form.append('maxrate', opts.maxrate);
-    appendEncodeOverrides(form, opts);
-    form.append('pipeline', opts.pipeline);
-    form.append('delete_cache', opts.deleteCacheVal);
-    form.append('shutdown', 'false');
-    form.append('output_dir', opts.outputDir);
-    form.append('tune_mode', opts.tuneMode);
-    form.append('expected_size', String(item.expected_size || 0));
-    form.append('section_start', item.section_start == null ? '' : String(item.section_start));
-    form.append('section_end', item.section_end == null ? '' : String(item.section_end));
-    form.append('mode', opts.mode);
-    form.append('audio_preset', opts.audioPreset);
-    form.append('target_res', opts.targetRes);
-    form.append('sharpen', opts.sharpen);
-  }
-
-  let gotError = false;
+// The one SSE reader every request uses (#104). `items` are the queue items the
+// request covers; item_done/item_failed map back to them by 1-based idx so the
+// caller retries only what actually failed (#28). A non-OK response is a
+// failure carrying the server's error text (#95). A terminal `done` marks any
+// item still without an outcome successful: that is the legacy single-item
+// signal and /convert-local, which report no per-item events. Without `done`
+// (a dropped stream, or the encoder abort cap) an item with no outcome is
+// failed so it retries instead of being silently dropped.
+// Returns { results: Array<{item, ok, cancelled, error}> } in submission order.
+async function runSse(endpoint, form, items) {
+  let gotDone = false;
   let gotCancelled = false;
-  // Fresh AbortController per item so cancelJob() can abort the in-flight stream.
+  const outcome = new Map(); // idx (1-based) -> { ok, error? }
+  _lastErrorMsg = '';        // per-request, never a previous item's reason
+  // Fresh AbortController per request so cancelJob() can abort the in-flight stream.
   const controller = new AbortController();
   _currentController = controller;
 
@@ -3220,111 +3189,10 @@ async function runOneItem(item, opts) {
     const r = await fetch(endpoint, { method: 'POST', body: form, signal: controller.signal });
     if (!r.ok) {
       // A non-OK response (e.g. the 409 single-job guard) is JSON, not SSE, so
-      // its body has no data: lines. Without this check the item would read to
-      // the end with gotError false and be reported done although nothing ran.
+      // its body has no data: lines. Without this check the request would read
+      // to the end with no outcome although nothing ran.
       _lastErrorMsg = await httpErrorText(r);
       log(`✕ ${_lastErrorMsg}`, 'error');
-      gotError = true;
-    } else {
-      const reader = r.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        const lines = buf.split('\n');
-        buf = lines.pop();
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          const raw = line.slice(6).trim();
-          if (!raw) continue;
-          try {
-            const msg = JSON.parse(raw);
-            if (msg.type === 'error') gotError = true;
-            else if (msg.type === 'cancelled') gotCancelled = true;
-            handleMsg(msg);
-          } catch {}
-        }
-      }
-    }
-  } catch (e) {
-    // An aborted fetch (user hit Cancel) is terminal, not a retryable error.
-    if (e && e.name === 'AbortError') gotCancelled = true;
-    else {
-      // A rejected fetch or a mid-stream read error (server exited, connection
-      // reset) is a retryable failure. Letting it escape startDownload would
-      // leave the job flag set and the Cancel button/wake lock stuck.
-      _lastErrorMsg = (e && e.message) ? e.message : String(e);
-      log(`✕ ${_lastErrorMsg}`, 'error');
-      gotError = true;
-    }
-  } finally {
-    if (_currentController === controller) _currentController = null;
-  }
-
-  // Treat a server-side 'cancelled' event or a client abort as terminal-no-retry.
-  if (gotCancelled || cancelled) return { ok: false, cancelled: true };
-  return { ok: !gotError, cancelled: false };
-}
-
-// Map a queued youtube item to the server's per-item batch payload.
-function toItemPayload(it) {
-  return {
-    url: it.url,
-    video_format: it.video_format || '',
-    audio_format: it.audio_format,
-    expected_size: it.expected_size || 0,
-    output_dir: it.output_dir || document.getElementById('output-dir').value.trim(),
-    tune_mode: it.tune_mode || currentTuneMode,
-    title: it.title || it.url,
-    duration: it.duration || 0,
-    section_start: it.section_start ?? null,
-    section_end: it.section_end ?? null,
-  };
-}
-
-// Batch: POST a contiguous run of youtube items as one pipelined /download.
-// The SSE read loop mirrors runOneItem, but also maps item_done/item_failed
-// (by 1-based idx, submission order) back to the original items so the
-// caller can retry only the ones that actually failed (#28).
-// Returns { results: Array<{item, ok, cancelled, error}> } in submission order.
-async function runBatch(items, opts) {
-  const form = new FormData();
-  // url/audio_format are required form fields on /download; the server ignores
-  // them in batch mode but they must be present. Seed from the first item.
-  form.append('url', items[0].url);
-  form.append('audio_format', items[0].audio_format || '');
-  form.append('items', JSON.stringify(items.map(toItemPayload)));
-  form.append('convert', opts.convert);
-  form.append('cq', opts.cq);
-  form.append('maxrate', opts.maxrate);
-  appendEncodeOverrides(form, opts);
-  form.append('pipeline', 'true');
-  form.append('delete_cache', opts.deleteCacheVal);
-  form.append('shutdown', 'false');
-  form.append('output_dir', opts.outputDir);
-  form.append('tune_mode', opts.tuneMode);
-  form.append('mode', opts.mode);
-  form.append('audio_preset', opts.audioPreset);
-  form.append('target_res', opts.targetRes);
-  form.append('sharpen', opts.sharpen);
-
-  let gotCancelled = false;
-  let failureText = '';
-  const outcome = new Map(); // idx (1-based) -> { ok, error? }
-  const controller = new AbortController();
-  _currentController = controller;
-
-  try {
-    const r = await fetch(`${API}/download`, { method: 'POST', body: form, signal: controller.signal });
-    if (!r.ok) {
-      // A 409 (or any non-OK) is JSON with no SSE data: lines; with no outcome
-      // recorded the whole batch would otherwise look done. Fail every item
-      // with the server's error so the caller retries them (#95).
-      failureText = await httpErrorText(r);
-      log(`✕ ${failureText}`, 'error');
     } else {
       const reader = r.body.getReader();
       const decoder = new TextDecoder();
@@ -3344,6 +3212,7 @@ async function runBatch(items, opts) {
             const msg = JSON.parse(raw);
             if (msg.type === 'item_done') outcome.set(msg.idx, { ok: true });
             else if (msg.type === 'item_failed') outcome.set(msg.idx, { ok: false, error: msg.msg || 'failed' });
+            else if (msg.type === 'done') gotDone = true;
             else if (msg.type === 'cancelled') gotCancelled = true;
             handleMsg(msg);
           } catch {}
@@ -3351,12 +3220,14 @@ async function runBatch(items, opts) {
       }
     }
   } catch (e) {
+    // An aborted fetch (user hit Cancel) is terminal, not a retryable error.
     if (e && e.name === 'AbortError') gotCancelled = true;
     else {
-      // A dropped connection mid-batch marks the items without an outcome
-      // failed so they retry instead of escaping startDownload (#95).
-      failureText = (e && e.message) ? e.message : String(e);
-      log(`✕ ${failureText}`, 'error');
+      // A rejected fetch or a mid-stream read error (server exited, connection
+      // reset) is a retryable failure. Letting it escape startDownload would
+      // leave the job flag set and the Cancel button/wake lock stuck.
+      _lastErrorMsg = (e && e.message) ? e.message : String(e);
+      log(`✕ ${_lastErrorMsg}`, 'error');
     }
   } finally {
     if (_currentController === controller) _currentController = null;
@@ -3364,15 +3235,78 @@ async function runBatch(items, opts) {
 
   // Build results in submission order. An item with no outcome (e.g. the
   // stream died mid-run, or the encoder consecutive-failure abort cap left an
-  // already-downloaded item with neither event) counts as failed so it retries
-  // rather than being silently dropped.
+  // already-downloaded item with neither an item event nor `done`) counts as
+  // failed so it retries rather than being silently dropped.
   const results = items.map((item, i) => {
-    const o = outcome.get(i + 1);
     if (gotCancelled || cancelled) return { item, ok: false, cancelled: true };
+    const o = outcome.get(i + 1);
     if (o) return { item, ok: !!o.ok, cancelled: false, error: o.error };
-    return { item, ok: false, cancelled: false, error: failureText || 'no result' };
+    if (gotDone) return { item, ok: true, cancelled: false };
+    return { item, ok: false, cancelled: false, error: _lastErrorMsg || 'no result' };
   });
   return { results };
+}
+
+// Map a queued youtube item to the server's per-item payload.
+function toItemPayload(it) {
+  return {
+    url: it.url,
+    video_format: it.video_format || '',
+    audio_format: it.audio_format,
+    expected_size: it.expected_size || 0,
+    output_dir: it.output_dir || document.getElementById('output-dir').value.trim(),
+    tune_mode: it.tune_mode || currentTuneMode,
+    title: it.title || it.url,
+    duration: it.duration || 0,
+    section_start: it.section_start ?? null,
+    section_end: it.section_end ?? null,
+  };
+}
+
+// POST a run of youtube items to /download. A single item and a pipelined
+// batch are the same request now (#104); the server always runs an items list.
+// Results mirror `items` in submission order.
+async function runDownload(items, opts) {
+  const form = new FormData();
+  // url/audio_format/video_format are required form fields on /download; the
+  // server ignores them in items mode but they must be present. Seed from the
+  // first item.
+  form.append('url', items[0].url);
+  form.append('video_format', items[0].video_format || '');
+  form.append('audio_format', items[0].audio_format || '');
+  form.append('items', JSON.stringify(items.map(toItemPayload)));
+  form.append('convert', opts.convert);
+  form.append('cq', opts.cq);
+  form.append('maxrate', opts.maxrate);
+  appendEncodeOverrides(form, opts);
+  form.append('pipeline', opts.pipeline);
+  form.append('delete_cache', opts.deleteCacheVal);
+  form.append('shutdown', 'false');
+  form.append('output_dir', opts.outputDir);
+  form.append('tune_mode', opts.tuneMode);
+  form.append('mode', opts.mode);
+  form.append('audio_preset', opts.audioPreset);
+  form.append('target_res', opts.targetRes);
+  form.append('sharpen', opts.sharpen);
+  return runSse(`${API}/download`, form, items);
+}
+
+// Local files keep using /convert-local; the shared reader treats the one file
+// as a single item (the server reports no per-item events).
+async function runLocal(item, opts) {
+  const form = new FormData();
+  form.append('files', JSON.stringify([item.path]));
+  form.append('cq', opts.cq);
+  form.append('maxrate', opts.maxrate);
+  appendEncodeOverrides(form, opts);
+  form.append('shutdown', 'false');
+  form.append('output_dir', opts.outputDir);
+  form.append('tune_mode', opts.tuneMode);
+  form.append('mode', opts.mode);
+  form.append('audio_preset', opts.audioPreset);
+  form.append('target_res', opts.targetRes);
+  form.append('sharpen', opts.sharpen);
+  return runSse(`${API}/convert-local`, form, [item]);
 }
 
 const MAX_RETRY_ROUNDS = 3;
@@ -3511,7 +3445,7 @@ async function startDownload() {
       document.getElementById('stat-overall').textContent = completed + ' / ' + totalVisible;
       log(`── Batch of ${batchItems.length} video(s) — pipelined ──`, 'info');
       opts.shutdown = 'false';
-      const { results } = await runBatch(batchItems, opts);
+      const { results } = await runDownload(batchItems, opts);
       if (results.some(r => r.cancelled) || cancelled) { cancelled = true; break; }
       let anyFailed = false;
       for (const r of results) {
@@ -3558,7 +3492,10 @@ async function startDownload() {
     opts.shutdown = 'false';
 
     _lastErrorMsg = '';
-    const result = await runOneItem(item, opts);
+    const { results } = item.type === 'local'
+      ? await runLocal(item, opts)
+      : await runDownload([item], opts);
+    const result = results[0];
 
     // Cancelled (client abort or server 'cancelled' event): terminal, no retry, stop the run.
     if (result.cancelled || cancelled) {
@@ -3567,15 +3504,16 @@ async function startDownload() {
     }
 
     if (!result.ok) {
-      item._lastError = _lastErrorMsg;
+      const errText = result.error || _lastErrorMsg;
+      item._lastError = errText;
       item._retries = (item._retries || 0) + 1;
       if (item._retries < MAX_RETRY_ROUNDS) {
         log(`⚠ Failed: ${label} — will retry after remaining items.`, 'error');
-        recordFailure(item, _lastErrorMsg, false);  // transient (mid-retry)
+        recordFailure(item, errText, false);  // transient (mid-retry)
         retryQueue.push(item);
       } else {
         log(`✕ Failed: ${label} — max retries exhausted.`, 'error');
-        recordFailure(item, _lastErrorMsg, true);    // permanent
+        recordFailure(item, errText, true);    // permanent
       }
     }
 
@@ -4253,7 +4191,7 @@ async function startLocalConvert() {
 async function cancelJob() {
   // (1) Mark the whole run cancelled so the queue/retry loops stop.
   cancelled = true;
-  // (2) Abort the in-flight SSE fetch/reader so runOneItem unwinds immediately.
+  // (2) Abort the in-flight SSE fetch/reader so runSse unwinds immediately.
   if (_currentController) { try { _currentController.abort(); } catch {} }
   // (3) Terminate server-side ffmpeg/yt-dlp.
   try { await fetch(`${API}/cancel`, { method: 'POST' }); } catch {}
