@@ -293,7 +293,7 @@ _SESSION_TOKEN = secrets.token_urlsafe(32)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await _probe_nvenc_tune()
+    await _probe_ffmpeg_capabilities()
     # Record what this ffmpeg can actually do (#47). Diagnostics only: it reuses
     # the probe results above plus one `ffmpeg -version`, and is wrapped here as
     # well as internally — a report that fails must never stop the server booting.
@@ -962,11 +962,30 @@ def _ffmpeg_has_filter(name: str) -> bool:
     return any(line.split()[1:2] == [name] for line in out.splitlines() if line.strip())
 
 
+def _ffmpeg_has_encoder(name: str) -> bool:
+    """Whether this ffmpeg build lists a given encoder (e.g. hevc_nvenc)."""
+    try:
+        out = subprocess.run(
+            [get_ffmpeg(), "-hide_banner", "-encoders"],
+            capture_output=True, text=True, timeout=15,
+        ).stdout
+    except Exception:
+        return False
+    return any(line.split()[1:2] == [name] for line in out.splitlines() if line.strip())
+
+
 # GPU-resident pixel-format conversion needs the scale_cuda filter (libnpp).
 # The bundled Windows ffmpeg (gyan.dev) has it; Fedora/Nobara builds ship
 # --disable-libnpp, so it's absent there even though hevc_nvenc encoding works.
-HAS_SCALE_CUDA = _ffmpeg_has_filter("scale_cuda")
-HAS_LIBPLACEBO = _ffmpeg_has_filter("libplacebo")
+#
+# These are filled in by the one startup probe in `lifespan` (#99), never at
+# import: computing them here used to spawn ffmpeg twice on every import of this
+# module. HAS_NVENC starts optimistic so a handler invoked outside `lifespan`
+# (tests, embedders) behaves as it always did; the filters start pessimistically
+# because their only consumers are encode-argument builders.
+HAS_SCALE_CUDA = False
+HAS_LIBPLACEBO = False
+HAS_NVENC = True
 
 
 def _effective_target_height(source_height: int, target_height: int) -> int:
@@ -1519,6 +1538,7 @@ _TUNE_SUPPORTED = "supported"
 _TUNE_FFMPEG_TOO_OLD = "ffmpeg_too_old"
 _TUNE_DRIVER_REJECTED = "driver_rejected"
 _TUNE_PROBE_FAILED = "probe_failed"
+_TUNE_NVENC_MISSING = "nvenc_missing"
 _MAX_CONSECUTIVE_ENCODE_FAILURES = 3  # pipeline mode: bail out if the encoder is fundamentally broken
 
 
@@ -1560,6 +1580,12 @@ async def _probe_nvenc_tune():
     and causes InitializeEncoder failed: invalid param (8). The probe tests uhq without
     -bf, which is how it's actually used in encodes."""
     global _nvenc_tune, _nvenc_tune_cause
+    if not HAS_NVENC:
+        _nvenc_tune = "hq"
+        _nvenc_tune_cause = _TUNE_NVENC_MISSING
+        logger.info("hevc_nvenc is not available in this ffmpeg — video conversion "
+                    "is disabled; download-only and audio extraction still work.")
+        return
     proc = await asyncio.create_subprocess_exec(
         get_ffmpeg(), "-f", "lavfi", "-i", "nullsrc=s=1920x1080:d=0.1",
         "-vframes", "3",
@@ -1602,13 +1628,28 @@ async def _probe_nvenc_tune():
                         "using 'hq' + AQ")
 
 
+async def _probe_ffmpeg_capabilities():
+    """One startup probe for every ffmpeg capability the app branches on (#99).
+
+    Runs from `lifespan`, never at import, so importing this module spawns no
+    subprocess. Records whether hevc_nvenc is listed at all (if not, the uhq
+    probe is skipped and video conversion is refused before any download), the
+    uhq tune outcome, and the two optional filters."""
+    global HAS_NVENC, HAS_SCALE_CUDA, HAS_LIBPLACEBO
+    HAS_NVENC = await asyncio.to_thread(_ffmpeg_has_encoder, "hevc_nvenc")
+    HAS_SCALE_CUDA = await asyncio.to_thread(_ffmpeg_has_filter, "scale_cuda")
+    HAS_LIBPLACEBO = await asyncio.to_thread(_ffmpeg_has_filter, "libplacebo")
+    await _probe_nvenc_tune()
+
+
 # ── Startup capability report (#47) ──────────────────────────────────────────
-# Three startup probes each quietly select a lesser path when they fail:
-# _probe_nvenc_tune() (the uhq archival tune), HAS_SCALE_CUDA (GPU-resident
-# pixel-format conversion) and HAS_LIBPLACEBO (the ewa_lanczos scaler). None of
-# that ever reached the UI, so an ffmpeg predating a feature could cost output
-# quality for months without a word. The report below turns those *already
-# computed* results into something the UI can show. No probe is re-run here.
+# The startup probes in _probe_ffmpeg_capabilities() each quietly select a lesser
+# path when they fail: _probe_nvenc_tune() (the uhq archival tune), HAS_SCALE_CUDA
+# (GPU-resident pixel-format conversion) and HAS_LIBPLACEBO (the ewa_lanczos
+# scaler). None of that ever reached the UI, so an ffmpeg predating a feature
+# could cost output quality for months without a word. The report below turns
+# those *already computed* results into something the UI can show. No probe is
+# re-run here.
 #
 # THE PROBES ARE THE ONLY GATE. The version string is descriptive — it explains a
 # failure, it never decides one. Distro packages, git-master snapshots and vendor
@@ -1655,10 +1696,24 @@ def _read_ffmpeg_version() -> str:
     return _parse_ffmpeg_version((out.stdout or "") + "\n" + (out.stderr or ""))
 
 
-def _uhq_capability(tune_cause: str) -> dict:
+def _uhq_capability(tune_cause: str, has_nvenc: bool = True) -> dict:
     """The uhq-tune entry, built from #44's already-resolved cause. Same symptom,
     different remedies: an ffmpeg that never knew the option and a driver that
-    refused it must not be given the same advice."""
+    refused it must not be given the same advice.
+
+    With no NVENC at all the tune probe never ran, so reporting the outcome as an
+    "unrecognised" probe failure would be misleading — name the real blocker."""
+    if not has_nvenc or tune_cause == _TUNE_NVENC_MISSING:
+        return {
+            "key": "nvenc_uhq_tune",
+            "name": "Best-quality encode mode (uhq)",
+            "ok": False,
+            "cause": _TUNE_NVENC_MISSING,
+            "impact": "Video conversion is unavailable.",
+            "remedy": ("NVENC is unavailable, so this mode cannot run. Video "
+                       "conversion needs an ffmpeg built with NVENC and an "
+                       "NVIDIA GPU."),
+        }
     if tune_cause == _TUNE_FFMPEG_TOO_OLD:
         remedy = ("Update ffmpeg. This mode arrived in ffmpeg 7.1. "
                   "Your GPU driver is fine.")
@@ -1683,16 +1738,27 @@ def _uhq_capability(tune_cause: str) -> dict:
 
 def build_capability_report(*, ffmpeg_path: str, ffmpeg_version: str,
                             tune_cause: str, has_scale_cuda: bool,
-                            has_libplacebo: bool) -> dict:
+                            has_libplacebo: bool, has_nvenc: bool = True) -> dict:
     """Compose the capability report and its warning. Pure — every input is
     injected, so the whole thing is unit-testable with no ffmpeg, no GPU and no
     subprocess.
 
-    `warning` is None exactly when all three probes passed. It is never keyed off
+    `warning` is None exactly when every probe passed. It is never keyed off
     *ffmpeg_version*: an empty version yields "unknown version" in the message and
     changes nothing about whether the warning exists."""
     caps = [
-        _uhq_capability(tune_cause),
+        {
+            "key": "nvenc",
+            "name": "NVENC video encoding (hevc_nvenc)",
+            "ok": bool(has_nvenc),
+            "cause": "supported" if has_nvenc else "encoder_missing",
+            "impact": "Video conversion is unavailable — download-only and "
+                      "audio extraction still work.",
+            "remedy": "" if has_nvenc else
+                      ("Install an ffmpeg built with NVENC (--enable-nvenc) on "
+                       "a machine with an NVIDIA GPU."),
+        },
+        _uhq_capability(tune_cause, has_nvenc),
         {
             "key": "scale_cuda",
             "name": "Colour-format conversion on the GPU (scale_cuda)",
@@ -1718,15 +1784,22 @@ def build_capability_report(*, ffmpeg_path: str, ffmpeg_version: str,
 
     path = ffmpeg_path or FFMPEG_PATH_UNKNOWN
     version = ffmpeg_version or FFMPEG_VERSION_UNKNOWN
-    failing = [c for c in caps if not c["ok"]]
+    # Without NVENC, no video encode can run at all: lead with that fact and keep
+    # the optional-filter remedies out of a warning that cannot apply yet.
+    failing = [c for c in caps if not c["ok"]] if has_nvenc else \
+              [c for c in caps if c["key"] == "nvenc"]
 
     warning = None
     if failing:
-        n = len(failing)
-        noun = "feature" if n == 1 else "features"
-        fallback = "a slower fallback" if n == 1 else "slower fallbacks"
-        headline = "ffmpeg is missing {} {} — FetchForge is using {}".format(
-            n, noun, fallback)
+        if not has_nvenc:
+            headline = ("Video conversion is unavailable — this ffmpeg has no "
+                        "NVENC encoder")
+        else:
+            n = len(failing)
+            noun = "feature" if n == 1 else "features"
+            fallback = "a slower fallback" if n == 1 else "slower fallbacks"
+            headline = "ffmpeg is missing {} {} — FetchForge is using {}".format(
+                n, noun, fallback)
         # The path is the headline fact: the whole confusion this warning exists
         # to end was not knowing *which* ffmpeg was in use.
         text = "{} | ffmpeg: {} ({}) | {}".format(
@@ -1738,14 +1811,15 @@ def build_capability_report(*, ffmpeg_path: str, ffmpeg_version: str,
             "ffmpeg_version": version,
             "items": [{"name": c["name"], "impact": c["impact"],
                        "remedy": c["remedy"]} for c in failing],
-            # Every one of these three is an EXTRA on top of NVENC encoding, which
-            # the ffmpeg preflight already required to be present. Read without
-            # this line the banner is easily taken to mean the GPU is not encoding
-            # at all — the exact misreading it caused in practice.
-            "reassurance": "GPU encoding itself is working — "
-                           "these are extras on top of it.",
             "text": text,
         }
+        # Every optional capability is an EXTRA on top of NVENC encoding. Read
+        # without this line the banner is easily taken to mean the GPU is not
+        # encoding at all — the exact misreading it caused in practice. With no
+        # NVENC encoder, that reassurance would simply be false.
+        if has_nvenc:
+            warning["reassurance"] = ("GPU encoding itself is working — "
+                                      "these are extras on top of it.")
 
     return {
         "ffmpeg_path": path,
@@ -1780,6 +1854,7 @@ def _refresh_capability_report() -> dict:
             ffmpeg_path=str(path or ""),
             ffmpeg_version=version,
             tune_cause=_nvenc_tune_cause,
+            has_nvenc=HAS_NVENC,
             has_scale_cuda=HAS_SCALE_CUDA,
             has_libplacebo=HAS_LIBPLACEBO,
         )
@@ -2529,6 +2604,22 @@ async def _get_formats(url: str) -> dict:
     return {"video_formats": video_formats, "audio_formats": audio_formats}
 
 
+_NO_NVENC_VIDEO_MESSAGE = (
+    "Video conversion needs NVENC, but this ffmpeg has no hevc_nvenc encoder. "
+    "Download-only and audio extraction still work."
+)
+
+
+def _nvenc_missing_error(mode: str, converting: bool) -> Optional[str]:
+    """Why a video job must be refused before any download, or None.
+
+    Audio extraction and download-only never touch hevc_nvenc, so they keep
+    working on an ffmpeg without NVENC (#99)."""
+    if converting and mode != "audio" and not HAS_NVENC:
+        return _NO_NVENC_VIDEO_MESSAGE
+    return None
+
+
 @app.post("/download")
 async def download(
     url: str = Form(...),
@@ -2632,6 +2723,11 @@ async def download(
 
     async def _download_stream():
         global current_process
+
+        refusal = _nvenc_missing_error(mode, convert == "true")
+        if refusal:
+            yield sse_error(refusal)
+            return
 
         _target_res = int(target_res) if target_res.lstrip("-").isdigit() else 0
         _sharpen = sharpen == "true"
@@ -3563,6 +3659,11 @@ async def convert_local(
 
     async def _convert_local_stream():
         global current_process
+
+        refusal = _nvenc_missing_error(mode, True)
+        if refusal:
+            yield sse_error(refusal)
+            return
 
         _target_res = int(target_res) if target_res.lstrip("-").isdigit() else 0
         _sharpen = sharpen == "true"

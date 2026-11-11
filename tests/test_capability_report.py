@@ -37,12 +37,13 @@ WINDOWS_PATH = r"C:\Users\preka\Documents\ffmpeg\bin\ffmpeg.EXE"
 
 
 def report(*, tune_cause=server._TUNE_SUPPORTED, version="7.1.1",
-           path=WINDOWS_PATH, scale_cuda=True, libplacebo=True):
+           path=WINDOWS_PATH, scale_cuda=True, libplacebo=True, nvenc=True):
     """The pure builder with sane defaults; override one axis per test."""
     return server.build_capability_report(
         ffmpeg_path=path,
         ffmpeg_version=version,
         tune_cause=tune_cause,
+        has_nvenc=nvenc,
         has_scale_cuda=scale_cuda,
         has_libplacebo=libplacebo,
     )
@@ -152,6 +153,37 @@ class TestWarningComposition(unittest.TestCase):
         self.assertEqual(w["ffmpeg_path"], server.FFMPEG_PATH_UNKNOWN)
         self.assertIn(server.FFMPEG_PATH_UNKNOWN, w["text"])
 
+    def test_missing_nvenc_names_the_blocker_and_disables_video(self):
+        w = report(nvenc=False)["warning"]
+        self.assertIsNotNone(w)
+        self.assertIn("Video conversion is unavailable", w["headline"])
+        self.assertIn("NVENC", w["text"])
+        self.assertIn(WINDOWS_PATH, w["text"])
+        self.assertEqual(len(w["items"]), 1)
+        self.assertIn("NVENC", w["items"][0]["name"])
+        self.assertIn("--enable-nvenc", w["items"][0]["remedy"])
+
+    def test_missing_nvenc_omits_the_gpu_is_working_reassurance(self):
+        """The old reassurance was a lie in exactly this mode: NVENC is the GPU
+        encoder, so with no NVENC there is nothing to reassure about."""
+        w = report(nvenc=False)["warning"]
+        self.assertNotIn("reassurance", w)
+
+    def test_missing_nvenc_does_not_call_the_uhq_probe_unrecognised(self):
+        # Even when the (now skipped) probe would classify as probe_failed.
+        r = report(nvenc=False, tune_cause=server._TUNE_PROBE_FAILED)
+        uhq = next(c for c in r["capabilities"] if c["key"] == "nvenc_uhq_tune")
+        self.assertEqual(uhq["cause"], server._TUNE_NVENC_MISSING)
+        self.assertNotIn("do not recognise", uhq["remedy"])
+        self.assertIn("NVENC", uhq["remedy"])
+        self.assertNotIn("do not recognise", r["warning"]["text"])
+
+    def test_missing_nvenc_does_not_list_optional_filter_remedies(self):
+        w = report(nvenc=False, scale_cuda=False, libplacebo=False)["warning"]
+        self.assertEqual(len(w["items"]), 1)
+        self.assertNotIn("scale_cuda", w["text"])
+        self.assertNotIn("libplacebo", w["text"])
+
 
 class TestNoWarningWhenHealthy(unittest.TestCase):
     """The false-positive side. This is the failure mode the design note exists
@@ -173,9 +205,10 @@ class TestNoWarningWhenHealthy(unittest.TestCase):
         self.assertIsNone(r["warning"])
         self.assertEqual(r["ffmpeg_version"], server.FFMPEG_VERSION_UNKNOWN)
 
-    def test_report_always_lists_all_three_capabilities(self):
+    def test_report_always_lists_all_four_capabilities(self):
         keys = [c["key"] for c in report()["capabilities"]]
-        self.assertEqual(sorted(keys), ["libplacebo", "nvenc_uhq_tune", "scale_cuda"])
+        self.assertEqual(sorted(keys),
+                         ["libplacebo", "nvenc", "nvenc_uhq_tune", "scale_cuda"])
 
 
 class TestVersionFailureDoesNotSuppressWarning(unittest.TestCase):
@@ -230,7 +263,7 @@ class TestRefreshIsCrashProof(unittest.TestCase):
     def test_lifespan_starts_even_when_the_report_blows_up(self):
         """The end of the danger zone: a diagnostic cannot take the app down."""
         async def drive():
-            with mock.patch.object(server, "_probe_nvenc_tune", new=mock.AsyncMock()), \
+            with mock.patch.object(server, "_probe_ffmpeg_capabilities", new=mock.AsyncMock()), \
                  mock.patch.object(server, "_refresh_capability_report",
                                    side_effect=RuntimeError("total failure")), \
                  mock.patch.object(server, "_heartbeat_watchdog", new=mock.AsyncMock()), \
@@ -244,10 +277,11 @@ class TestRefreshIsCrashProof(unittest.TestCase):
         server._capability_report = {}
 
         async def drive():
-            with mock.patch.object(server, "_probe_nvenc_tune", new=mock.AsyncMock()), \
+            with mock.patch.object(server, "_probe_ffmpeg_capabilities", new=mock.AsyncMock()), \
                  mock.patch.object(server, "get_ffmpeg", return_value=WINDOWS_PATH), \
                  mock.patch.object(server, "_read_ffmpeg_version", return_value="7.1.1"), \
                  mock.patch.object(server, "_nvenc_tune_cause", server._TUNE_SUPPORTED), \
+                 mock.patch.object(server, "HAS_NVENC", True), \
                  mock.patch.object(server, "HAS_SCALE_CUDA", True), \
                  mock.patch.object(server, "HAS_LIBPLACEBO", True), \
                  mock.patch.object(server, "_heartbeat_watchdog", new=mock.AsyncMock()), \
