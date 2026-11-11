@@ -3155,6 +3155,18 @@ function getSelectedExpectedSize() {
   return vSize + aSize;
 }
 
+// Read the error text out of a non-OK response (#95). The server sends
+// {"error": "..."} for admission/validation failures such as the 409
+// single-job guard; a body that won't parse (or has no error) falls back to
+// the HTTP status so the failure summary still says something useful.
+async function httpErrorText(r) {
+  try {
+    const body = await r.json();
+    if (body && body.error) return body.error;
+  } catch {}
+  return 'HTTP ' + r.status;
+}
+
 // Returns true on success, false on error.
 // Dispatches to /download (youtube) or /convert-local (local) based on item.type.
 async function runOneItem(item, opts) {
@@ -3206,32 +3218,48 @@ async function runOneItem(item, opts) {
 
   try {
     const r = await fetch(endpoint, { method: 'POST', body: form, signal: controller.signal });
-    const reader = r.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
+    if (!r.ok) {
+      // A non-OK response (e.g. the 409 single-job guard) is JSON, not SSE, so
+      // its body has no data: lines. Without this check the item would read to
+      // the end with gotError false and be reported done although nothing ran.
+      _lastErrorMsg = await httpErrorText(r);
+      log(`✕ ${_lastErrorMsg}`, 'error');
+      gotError = true;
+    } else {
+      const reader = r.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      const lines = buf.split('\n');
-      buf = lines.pop();
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        const raw = line.slice(6).trim();
-        if (!raw) continue;
-        try {
-          const msg = JSON.parse(raw);
-          if (msg.type === 'error') gotError = true;
-          else if (msg.type === 'cancelled') gotCancelled = true;
-          handleMsg(msg);
-        } catch {}
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split('\n');
+        buf = lines.pop();
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const raw = line.slice(6).trim();
+          if (!raw) continue;
+          try {
+            const msg = JSON.parse(raw);
+            if (msg.type === 'error') gotError = true;
+            else if (msg.type === 'cancelled') gotCancelled = true;
+            handleMsg(msg);
+          } catch {}
+        }
       }
     }
   } catch (e) {
     // An aborted fetch (user hit Cancel) is terminal, not a retryable error.
     if (e && e.name === 'AbortError') gotCancelled = true;
-    else throw e;
+    else {
+      // A rejected fetch or a mid-stream read error (server exited, connection
+      // reset) is a retryable failure. Letting it escape startDownload would
+      // leave the job flag set and the Cancel button/wake lock stuck.
+      _lastErrorMsg = (e && e.message) ? e.message : String(e);
+      log(`✕ ${_lastErrorMsg}`, 'error');
+      gotError = true;
+    }
   } finally {
     if (_currentController === controller) _currentController = null;
   }
@@ -3284,38 +3312,52 @@ async function runBatch(items, opts) {
   form.append('sharpen', opts.sharpen);
 
   let gotCancelled = false;
+  let failureText = '';
   const outcome = new Map(); // idx (1-based) -> { ok, error? }
   const controller = new AbortController();
   _currentController = controller;
 
   try {
     const r = await fetch(`${API}/download`, { method: 'POST', body: form, signal: controller.signal });
-    const reader = r.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
+    if (!r.ok) {
+      // A 409 (or any non-OK) is JSON with no SSE data: lines; with no outcome
+      // recorded the whole batch would otherwise look done. Fail every item
+      // with the server's error so the caller retries them (#95).
+      failureText = await httpErrorText(r);
+      log(`✕ ${failureText}`, 'error');
+    } else {
+      const reader = r.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      const lines = buf.split('\n');
-      buf = lines.pop();
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        const raw = line.slice(6).trim();
-        if (!raw) continue;
-        try {
-          const msg = JSON.parse(raw);
-          if (msg.type === 'item_done') outcome.set(msg.idx, { ok: true });
-          else if (msg.type === 'item_failed') outcome.set(msg.idx, { ok: false, error: msg.msg || 'failed' });
-          else if (msg.type === 'cancelled') gotCancelled = true;
-          handleMsg(msg);
-        } catch {}
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split('\n');
+        buf = lines.pop();
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const raw = line.slice(6).trim();
+          if (!raw) continue;
+          try {
+            const msg = JSON.parse(raw);
+            if (msg.type === 'item_done') outcome.set(msg.idx, { ok: true });
+            else if (msg.type === 'item_failed') outcome.set(msg.idx, { ok: false, error: msg.msg || 'failed' });
+            else if (msg.type === 'cancelled') gotCancelled = true;
+            handleMsg(msg);
+          } catch {}
+        }
       }
     }
   } catch (e) {
     if (e && e.name === 'AbortError') gotCancelled = true;
-    else throw e;
+    else {
+      // A dropped connection mid-batch marks the items without an outcome
+      // failed so they retry instead of escaping startDownload (#95).
+      failureText = (e && e.message) ? e.message : String(e);
+      log(`✕ ${failureText}`, 'error');
+    }
   } finally {
     if (_currentController === controller) _currentController = null;
   }
@@ -3327,7 +3369,8 @@ async function runBatch(items, opts) {
   const results = items.map((item, i) => {
     const o = outcome.get(i + 1);
     if (gotCancelled || cancelled) return { item, ok: false, cancelled: true };
-    return { item, ok: !!(o && o.ok), cancelled: false, error: o ? o.error : 'no result' };
+    if (o) return { item, ok: !!o.ok, cancelled: false, error: o.error };
+    return { item, ok: false, cancelled: false, error: failureText || 'no result' };
   });
   return { results };
 }
@@ -3412,6 +3455,11 @@ async function startDownload() {
 
   let completed = 0;
   let retryQueue = [];  // items that failed and need retrying
+  let allDone = false;
+
+  // The run loop restores the idle UI in `finally` so an unexpected throw can
+  // never leave _jobRunning set, Cancel visible, or the wake lock held (#95).
+  try {
 
   // Main loop: drain dlQueue live — new items added mid-job are picked up
   while (dlQueue.length > 0 || retryQueue.length > 0) {
@@ -3536,17 +3584,18 @@ async function startDownload() {
     }
   }
 
-  const allDone = !cancelled && dlQueue.length === 0 && retryQueue.length === 0;
+  allDone = !cancelled && dlQueue.length === 0 && retryQueue.length === 0;
 
   if (allDone) {
     document.getElementById('overall-bar-fill').style.width = '100%';
   }
-
-  _jobRunning = false;
-  releaseWakeLock();
-  stopElapsedTimer();
-  document.getElementById('start-btn').classList.remove('hidden');
-  document.getElementById('cancel-btn').classList.add('hidden');
+  } finally {
+    _jobRunning = false;
+    releaseWakeLock();
+    stopElapsedTimer();
+    document.getElementById('start-btn').classList.remove('hidden');
+    document.getElementById('cancel-btn').classList.add('hidden');
+  }
 
   // Shutdown: queue is fully drained, nothing was added during final item
   if (allDone && opts.shutdownVal === 'true') {
