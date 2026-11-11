@@ -124,9 +124,11 @@ async def static_asset(name: str):
     return FileResponse(
         config.PKG_DIR / name,
         media_type=media_type,
-        # Versioned with the package, so a day of caching survives page reloads
-        # without ever pinning a stale stylesheet across a restart.
-        headers={"Cache-Control": "public, max-age=86400"},
+        # The URL never changes between releases, so a long max-age would keep
+        # running an old app.js/app.css against a freshly-served index.html after
+        # an update. no-cache forces a revalidation each load; FileResponse already
+        # sends ETag + Last-Modified, so an unchanged file is a cheap 304.
+        headers={"Cache-Control": "no-cache"},
     )
 
 

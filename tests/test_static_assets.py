@@ -45,11 +45,13 @@ class TestStaticRoute(unittest.TestCase):
                 self.assertEqual(resp.media_type, media_type)
                 self.assertEqual(Path(resp.path), config.PKG_DIR / name)
 
-    def test_sends_a_cache_header(self):
+    def test_sends_no_cache_header(self):
+        # Same URL every release, so a long max-age would run old JS/CSS against a
+        # new index.html. no-cache revalidates each load (ETag/Last-Modified → 304).
         for name in STATIC_TYPES:
             with self.subTest(name=name):
                 resp = _get(name)
-                self.assertIn("max-age", resp.headers.get("cache-control", ""))
+                self.assertEqual(resp.headers.get("cache-control", ""), "no-cache")
 
     def test_rejects_anything_outside_the_allowlist(self):
         for name in (
