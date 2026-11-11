@@ -230,13 +230,12 @@ class TestStartupCapabilityProbe(unittest.IsolatedAsyncioTestCase):
 
         self.addCleanup(restore)
         with mock.patch.object(server, "_ffmpeg_has_encoder", return_value=True) as enc, \
-             mock.patch.object(server, "_ffmpeg_has_filter",
-                               side_effect=lambda name: name == "scale_cuda") as filt, \
+             mock.patch.object(server, "_ffmpeg_filter_names",
+                               return_value={"scale_cuda"}) as filt, \
              mock.patch.object(server, "_probe_nvenc_tune", new=mock.AsyncMock()) as tune:
             await server._probe_ffmpeg_capabilities()
         enc.assert_called_once_with("hevc_nvenc")
-        self.assertEqual([c.args[0] for c in filt.call_args_list],
-                         ["scale_cuda", "libplacebo"])
+        filt.assert_called_once_with()
         tune.assert_awaited_once()
         self.assertTrue(server.HAS_NVENC)
         self.assertTrue(server.HAS_SCALE_CUDA)
@@ -250,7 +249,7 @@ class TestStartupCapabilityProbe(unittest.IsolatedAsyncioTestCase):
 
         self.addCleanup(restore)
         with mock.patch.object(server, "_ffmpeg_has_encoder", return_value=False), \
-             mock.patch.object(server, "_ffmpeg_has_filter", return_value=True), \
+             mock.patch.object(server, "_ffmpeg_filter_names", return_value={"scale_cuda", "libplacebo"}), \
              mock.patch.object(server, "_probe_nvenc_tune", new=mock.AsyncMock()) as tune:
             await server._probe_ffmpeg_capabilities()
         tune.assert_awaited_once()

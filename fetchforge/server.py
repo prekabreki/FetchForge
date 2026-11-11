@@ -950,16 +950,26 @@ _CUVID_DECODERS = {
 }
 
 
-def _ffmpeg_has_filter(name: str) -> bool:
-    """Whether this ffmpeg build provides a given filter."""
+def _ffmpeg_filter_names() -> set:
+    """Every filter name this ffmpeg build lists, from one `-filters` call."""
     try:
         out = subprocess.run(
             [get_ffmpeg(), "-hide_banner", "-filters"],
             capture_output=True, text=True, timeout=15,
         ).stdout
     except Exception:
-        return False
-    return any(line.split()[1:2] == [name] for line in out.splitlines() if line.strip())
+        return set()
+    names = set()
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            names.add(parts[1])
+    return names
+
+
+def _ffmpeg_has_filter(name: str) -> bool:
+    """Whether this ffmpeg build provides a given filter."""
+    return name in _ffmpeg_filter_names()
 
 
 def _ffmpeg_has_encoder(name: str) -> bool:
@@ -1637,8 +1647,9 @@ async def _probe_ffmpeg_capabilities():
     uhq tune outcome, and the two optional filters."""
     global HAS_NVENC, HAS_SCALE_CUDA, HAS_LIBPLACEBO
     HAS_NVENC = await asyncio.to_thread(_ffmpeg_has_encoder, "hevc_nvenc")
-    HAS_SCALE_CUDA = await asyncio.to_thread(_ffmpeg_has_filter, "scale_cuda")
-    HAS_LIBPLACEBO = await asyncio.to_thread(_ffmpeg_has_filter, "libplacebo")
+    filters = await asyncio.to_thread(_ffmpeg_filter_names)
+    HAS_SCALE_CUDA = "scale_cuda" in filters
+    HAS_LIBPLACEBO = "libplacebo" in filters
     await _probe_nvenc_tune()
 
 
