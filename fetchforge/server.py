@@ -795,13 +795,29 @@ async def _section_download_is_complete(path: Path, section, full_duration: floa
     return t0 <= section[0] + 2.0 and t1 >= need_end - 2.0
 
 
-def _newest_new_file(cache_dir: Path, pre_existing: set, pattern: str = "*.mkv"):
+def _newest_new_file(cache_dir: Path, pre_existing: set, pattern="*.mkv"):
     """The most-recently-modified file matching `pattern` that appeared in
     `cache_dir` since `pre_existing` (a set of Paths) was snapshotted. Lets the
     pipeline locate THIS download's output without grabbing a sibling video's
-    file already sitting in the shared cache (issue #8). None if nothing new."""
-    new = sorted(set(cache_dir.glob(pattern)) - set(pre_existing), key=os.path.getmtime)
+    file already sitting in the shared cache (issue #8). None if nothing new.
+
+    `pattern` may be one glob or an iterable of globs: audio downloads can land
+    with any `_AUDIO_EXTS` suffix, which no single glob covers."""
+    patterns = [pattern] if isinstance(pattern, str) else list(pattern)
+    candidates = set()
+    for pat in patterns:
+        candidates.update(cache_dir.glob(pat))
+    new = sorted(candidates - set(pre_existing), key=os.path.getmtime)
     return new[-1] if new else None
+
+
+def _cache_snapshot_patterns(is_audio: bool) -> list:
+    """Every file type yt-dlp may write for this download mode. Audio has many
+    possible suffixes, so the snapshot/fallback must cover all of `_AUDIO_EXTS`
+    rather than only `*.mkv` (issue #92)."""
+    if is_audio:
+        return ["*" + ext for ext in sorted(_AUDIO_EXTS)]
+    return ["*.mkv"]
 
 
 def _video_format_selector(vf: str, af: str, prefer_picked: bool) -> str:
@@ -2641,14 +2657,6 @@ async def download(
             # another range of it in the shared cache; the output stem inherits it.
             return "%(title)s{}.%(ext)s".format(section_suffix(section))
 
-        def _glob_downloaded(cache: Path) -> list:
-            if is_audio:
-                return sorted(
-                    [f for f in cache.iterdir() if f.is_file() and f.suffix.lower() in _AUDIO_EXTS],
-                    key=os.path.getmtime,
-                )
-            return sorted(cache.glob("*.mkv"), key=os.path.getmtime)
-
         # ── Step 1: resolve batch / playlist / single video ───────────────────
         # Batch mode: the client handed us a ready list of independent items.
         # Skip the playlist resolve entirely — metadata came from /video-info.
@@ -3178,6 +3186,13 @@ async def download(
                 dl_args += cookie_args()
                 dl_args += ["--", vid_url]
 
+                # Snapshot the cache before THIS download so the no-output-line
+                # fallback can only see files that just appeared — never an
+                # unrelated older file already sitting there (issue #92, the
+                # sequential counterpart to the pipeline's #8 fix).
+                cache_patterns = _cache_snapshot_patterns(is_audio)
+                pre_existing = {p for pat in cache_patterns for p in CACHE_DIR.glob(pat)}
+
                 proc = await asyncio.create_subprocess_exec(
                     *dl_args,
                     stdout=asyncio.subprocess.PIPE,
@@ -3242,7 +3257,9 @@ async def download(
                                 mkv_files = [candidate]
                                 break
                 if not mkv_files:
-                    mkv_files = _glob_downloaded(CACHE_DIR)
+                    found = _newest_new_file(CACHE_DIR, pre_existing, cache_patterns)
+                    if found:
+                        mkv_files = [found]
 
                 expected_dur = video_durations.get(vid_url) or 0
 
