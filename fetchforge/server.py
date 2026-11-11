@@ -855,31 +855,40 @@ def _audio_format_selector(af: str) -> str:
     return "{}/{}".format(af, fallback) if af else fallback
 
 
-def _resolve_batch_items(items_json: str):
-    """Parse the client `items` payload into the structures the pipeline
-    consumes. Returns (video_urls, video_titles, video_durations, per_item)
-    where per_item[i] carries the per-video format/output-dir/tune/section.
+def _parse_items_payload(items_json: str) -> list:
+    """Parse the client `items` payload into normalized per-item dicts. Every
+    field the old tuple-of-structures model carried is kept on the item itself.
     Raises ValueError on a non-http url (mirrors the single-url guard) or a bad
     time range."""
     items = json.loads(items_json)
-    video_urls, video_titles, video_durations, per_item = [], {}, {}, []
+    parsed = []
     for it in items:
         u = it["url"]
         if not is_http_url(u):
             raise ValueError("URL must be http or https: {}".format(u))
-        video_urls.append(u)
-        video_titles[u] = it.get("title", "")
-        video_durations[u] = it.get("duration") or 0
-        per_item.append({
-            "video_format": it.get("video_format", ""),
-            "audio_format": it["audio_format"],
+        parsed.append({
+            "url": u,
+            "title": it.get("title", "") or "",
+            "duration": it.get("duration") or 0,
+            "video_format": it.get("video_format", "") or "",
+            "audio_format": it.get("audio_format", "") or "",
             "expected_size": int(it.get("expected_size") or 0),
             "output_dir": it.get("output_dir", "") or "",
-            "tune_mode": it.get("tune_mode", "uhq"),
+            "tune_mode": it.get("tune_mode", "uhq") or "uhq",
             "section": parse_section(str(it.get("section_start") or ""),
                                      str(it.get("section_end") or "")),
         })
-    return video_urls, video_titles, video_durations, per_item
+    return parsed
+
+
+def _resolve_batch_items(items_json: str):
+    """Backward-compatible view over `_parse_items_payload`: returns
+    (video_urls, video_titles, video_durations, per_item)."""
+    parsed = _parse_items_payload(items_json)
+    video_urls = [it["url"] for it in parsed]
+    video_titles = {it["url"]: it["title"] for it in parsed}
+    video_durations = {it["url"]: it["duration"] for it in parsed}
+    return video_urls, video_titles, video_durations, parsed
 
 
 # ── SSE event builders (single source of truth for the wire format) ───────────
@@ -2835,6 +2844,412 @@ async def run_pipelined(items, fetch, process, cancel, *, throttle=None,
         await _reap_tasks(dl_task, enc_task)
 
 
+def _min_output_bytes(source_bytes: int, is_audio: bool) -> int:
+    """The single "is this output complete?" rule for every path: an audio
+    output only needs to exist and be at least 1 MB; a video output must be at
+    least 1 MB and 30% of its source (H.265 is 40-100% of source)."""
+    if is_audio:
+        return 1024 * 1024
+    return max(1024 * 1024, int(source_bytes * 0.30))
+
+
+def _item_is_audio(item) -> bool:
+    return item.get("mode", "video") == "audio"
+
+
+def _item_output_ext(item) -> str:
+    return audio_output_ext(item.get("audio_preset", "mp3")) if _item_is_audio(item) else "mp4"
+
+
+def _item_output_suffix(item) -> str:
+    return "" if _item_is_audio(item) else "_h265"
+
+
+def _item_dest_dir(item) -> Path:
+    raw = item.get("output_dir") or ""
+    return Path(raw) if raw else CONVERTED_DIR
+
+
+def _item_output_path(item, stem: str) -> Path:
+    return _item_dest_dir(item) / "{}{}.{}".format(
+        stem, _item_output_suffix(item), _item_output_ext(item))
+
+
+def _make_download_item(idx, data, *, mode, audio_preset, convert, delete_cache,
+                        output_dir, encode_opts) -> dict:
+    """One fully self-describing item. Every per-item value lives here, so both
+    the sequential loop and the pipeline read settings the same way."""
+    item = {
+        "idx": idx,
+        "url": data["url"],
+        "title": data.get("title") or "",
+        "duration": data.get("duration") or 0,
+        "video_format": data.get("video_format") or "",
+        "audio_format": data.get("audio_format") or "",
+        "expected_size": int(data.get("expected_size") or 0),
+        "output_dir": data.get("output_dir") or output_dir or "",
+        "tune_mode": data.get("tune_mode") or "uhq",
+        "section": data.get("section"),
+        "mode": data.get("mode") or mode,
+        "audio_preset": data.get("audio_preset") or audio_preset,
+        "convert": convert,
+        "delete_cache": delete_cache,
+    }
+    item.update(encode_opts)
+    return item
+
+
+async def fetch_item(item, emit, stopping, *, total, pipelined=False):
+    """Download one item and return its Path, or None when it was skipped,
+    failed or cancelled.
+
+    Owns the yt-dlp argv, progress parsing, cache snapshot/output detection
+    (`_newest_new_file`) and the download-completeness checks for BOTH the
+    sequential loop and the pipeline coordinator. A failed item emits
+    `item_failed` and returns None; the caller keeps going.
+    """
+    global current_dl_process
+    idx = item["idx"]
+    url = item["url"]
+    title = item.get("title") or ""
+    section = item.get("section")
+    is_audio = _item_is_audio(item)
+    convert = bool(item.get("convert", True))
+    label = "[{}/{}] ".format(idx, total) if total > 1 else ""
+    dl_label = "[DL {}/{}] ".format(idx, total) if total > 1 else ""
+
+    dest_dir = _item_dest_dir(item)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    await emit(sse_video_start(idx, total))
+
+    # Skip only when the output this job produces is already complete. A
+    # skipped item never deletes a cache file it did not download.
+    if title and (convert or is_audio):
+        predicted = _item_output_path(
+            item, _predict_output_stem(title, section_suffix(section)))
+        # A clip's size is unrelated to the full video's reported size.
+        skip_source_bytes = 0 if section else int(item.get("expected_size") or 0)
+        min_output = _min_output_bytes(skip_source_bytes, is_audio)
+        if predicted.exists() and predicted.stat().st_size >= min_output:
+            await emit(sse_log("{}Skipping \u2014 already encoded: {}".format(
+                label, predicted.name)))
+            await emit(sse_item_done(idx, total))
+            return None
+
+    # In pipeline mode the main progress bar tracks the concurrent ENCODE;
+    # download progress goes to the separate dl-status row via dl_progress.
+    # A `phase` event here would flip the main bar to indeterminate.
+    if not pipelined:
+        await emit(sse_phase("{}Downloading".format(label), title))
+    if title:
+        await emit(sse_log("{}Downloading: {}".format(dl_label, title)))
+    else:
+        await emit(sse_log("{}Downloading...".format(dl_label)))
+
+    if is_audio:
+        fmt_args = ["-f", _audio_format_selector(item.get("audio_format", ""))]
+        merge_args = []
+    else:
+        fmt_args = ["-f", _video_format_selector(
+            item.get("video_format", ""), item.get("audio_format", ""),
+            prefer_picked=True)]
+        merge_args = ["--merge-output-format", "mkv"]
+
+    dl_args = [
+        *get_ytdlp_argv(),
+        *fmt_args,
+        *NODE_ARGS,
+        "--no-playlist",
+        "--no-overwrites",
+        *merge_args,
+        "--concurrent-fragments", "2",
+        "--retries", "25",
+        "--fragment-retries", "25",
+        "--newline",
+        "--restrict-filenames",
+        "--paths", str(CACHE_DIR),
+        "-o", "%(title)s{}.%(ext)s".format(section_suffix(section)),
+        *section_ytdlp_args(section),
+    ]
+    dl_args += cookie_args()
+    dl_args += ["--", url]
+
+    cache_patterns = _cache_snapshot_patterns(is_audio)
+    pre_existing = {p for pat in cache_patterns for p in CACHE_DIR.glob(pat)}
+    expected_dur = item.get("duration") or 0
+    exp_bytes = 0 if section else int(item.get("expected_size") or 0)
+
+    proc = await asyncio.create_subprocess_exec(
+        *dl_args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    current_dl_process = proc
+    output_paths = set()
+
+    try:
+        async for raw in proc.stdout:
+            if stopping():
+                proc.terminate()
+                break
+            line = raw.decode(errors="replace").rstrip()
+            _cw = _maybe_flag_stale_cookies(line)
+            if _cw:
+                await emit(sse_cookie_warning(_cw))
+            m = re.search(
+                r"\[download\]\s+([\d.]+)%\s+of\s+(\S+)\s+at\s+(.+?)\s+ETA\s+(\S+)",
+                line
+            )
+            if m:
+                pct, size, speed, eta = m.groups()
+                if pipelined:
+                    await emit(sse_dl_progress(float(pct), size, speed, eta, idx, total))
+                else:
+                    await emit(_sse({"type": "progress", "pct": float(pct),
+                                     "size": size, "speed": speed, "eta": eta}))
+            else:
+                merger = re.search(r'\[Merger\] Merging formats into "(.+?)"', line)
+                # Audio mode and section downloads have no merger — capture the
+                # destination line instead.
+                dest = re.search(r'\[download\] Destination: (.+)', line) if (is_audio or section) else None
+                already = re.search(r'\[download\] (.+?) has already been downloaded', line)
+                if merger:
+                    output_paths.add(merger.group(1))
+                elif dest:
+                    output_paths.add(dest.group(1).strip())
+                elif already:
+                    output_paths.add(already.group(1))
+                await emit(sse_log(line))
+        await proc.wait()
+    finally:
+        # Synchronous terminate first: a finally under a re-delivered anyio
+        # cancellation must not await before terminating (#87).
+        _terminate_if_running(proc)
+        current_dl_process = None
+        await proc.wait()
+
+    if _cancel_requested.is_set() or stopping():
+        return None   # user cancelled / pipeline aborted — not a download failure
+
+    allowed_suffixes = _AUDIO_EXTS if is_audio else {".mkv"}
+    files = []
+    if output_paths:
+        files = sorted(
+            [Path(p) for p in output_paths
+             if Path(p).exists() and Path(p).suffix.lower() in allowed_suffixes],
+            key=os.path.getmtime,
+        )
+        if not files and not is_audio:
+            for p in output_paths:
+                candidate = Path(p) if Path(p).suffix else Path(p).with_suffix(".mkv")
+                if candidate.exists():
+                    files = [candidate]
+                    break
+    if not files:
+        # Only a file that appeared during THIS download — never a sibling
+        # video's file already sitting in the shared cache (#8/#92).
+        found = _newest_new_file(CACHE_DIR, pre_existing, cache_patterns)
+        if found:
+            files = [found]
+
+    if proc.returncode != 0:
+        if files and await (
+                _section_download_is_complete(files[0], section, expected_dur) if section
+                else _download_is_complete(files[0], exp_bytes, expected_dur)):
+            await emit(sse_log("{}yt-dlp exited with errors but output file verified complete \u2014 continuing.".format(dl_label)))
+        else:
+            size_note = ""
+            if files and exp_bytes > 0:
+                actual = files[0].stat().st_size
+                size_note = " (got {:.0f}MB of expected {:.0f}MB)".format(
+                    actual / 1024**2, exp_bytes / 1024**2)
+            await emit(sse_item_failed(idx, total, "download failed"))
+            if total == 1:
+                await emit(sse_error("{}Download failed{}.".format(label, size_note)))
+            await emit(sse_log("{}Download failed{} \u2014 skipping, continuing with the rest.".format(dl_label, size_note)))
+            return None
+
+    if not files:
+        await emit(sse_item_failed(idx, total, "no output"))
+        if total == 1:
+            await emit(sse_error("{}No .mkv found after download.".format(label)))
+        await emit(sse_log("{}No .mkv found after download \u2014 skipping, continuing with the rest.".format(dl_label)))
+        return None
+
+    await emit(sse_log("{}Queued for encoding.".format(dl_label)))
+    return files[0]
+
+
+async def process_item(item, path, emit, *, total) -> bool:
+    """Encode, audio-extract or leave-as-downloaded one fetched item.
+
+    Returns True on success (including a skipped/already-complete output) and
+    False on an encode failure. Owns the output-completeness rule and the
+    single `delete_cache` deletion site.
+    """
+    global current_process
+    idx = item["idx"]
+    is_audio = _item_is_audio(item)
+    convert = bool(item.get("convert", True))
+    delete_cache = bool(item.get("delete_cache", True))
+    section = item.get("section")
+    label = "[{}/{}] ".format(idx, total) if total > 1 else ""
+    enc_label = "[ENC {}/{}] ".format(idx, total) if total > 1 else ""
+
+    if not convert and not is_audio:
+        await emit(sse_log("{}Saved (no conversion): {}".format(label, path)))
+        await emit(sse_item_done(idx, total))
+        return True
+
+    dest_dir = _item_dest_dir(item)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    safe_stem = _output_stem(path.stem, section_suffix(section))
+    output_file = _item_output_path(item, safe_stem)
+
+    source_size = path.stat().st_size if path.exists() else 0
+    min_output = _min_output_bytes(source_size, is_audio)
+
+    if output_file.exists():
+        out_size = output_file.stat().st_size
+        if out_size < min_output:
+            await emit(sse_log("{}Removing incomplete output ({:.0f} MB, expected >={:.0f} MB) \u2014 re-encoding.".format(
+                enc_label, out_size / 1024**2, min_output / 1024**2)))
+            output_file.unlink()
+        else:
+            await emit(sse_log("{}Skipping \u2014 output already exists: {} ({:.0f} MB)".format(
+                enc_label, output_file.name, out_size / 1024**2)))
+            if delete_cache:
+                path.unlink(missing_ok=True)
+            await emit(sse_item_done(idx, total))
+            return True
+
+    phase_verb = "Extracting audio" if is_audio else "Converting"
+    await emit(sse_phase("{}: {}".format(phase_verb, path.name)))
+    await emit(sse_source_size(source_size))
+
+    src = await probe_video(path)
+    duration_secs = src.get("duration") or None
+    seek = section_input_seek(section, src.get("start_time", 0.0))
+    if section:
+        duration_secs = _clip_duration(section, item.get("duration") or 0)
+    if duration_secs:
+        await emit(sse_log("Duration: {:.1f}s".format(duration_secs)))
+    else:
+        await emit(sse_log("Could not read duration \u2014 progress bar will be indeterminate"))
+
+    if is_audio:
+        ffmpeg_args = build_audio_ffmpeg(
+            path, output_file, item.get("audio_preset", "mp3"), input_opts=seek)
+        await emit(sse_log("Audio extract: {} \u2192 {}".format(
+            item.get("audio_preset", "mp3").upper(), output_file.name)))
+    else:
+        params, ffmpeg_args, enc_logs = _encode_plan(
+            src, path, output_file,
+            {"tune_mode": item.get("tune_mode", "uhq"),
+             "cq": item.get("cq", "0"), "maxrate": item.get("maxrate", ""),
+             "preset": item.get("preset", ""), "tune": item.get("tune", ""),
+             "pix_fmt": item.get("pix_fmt", ""),
+             "target_res": item.get("target_res", 0),
+             "sharpen": item.get("sharpen", False)},
+            input_opts=seek,
+        )
+        for _log in enc_logs:
+            await emit(sse_log(_log))
+
+    enc_res: dict = {}
+    async for _s in run_encode(ffmpeg_args, duration_secs=duration_secs,
+                               idx=idx, total=total, result=enc_res):
+        await emit(_s)
+
+    if _cancel_requested.is_set():
+        # User cancelled mid-encode — discard the partial output, don't treat
+        # it as a failure or retry.
+        if output_file.exists():
+            output_file.unlink(missing_ok=True)
+        return True
+
+    if enc_res["returncode"] != 0:
+        if output_file.exists():
+            output_file.unlink(missing_ok=True)
+        fail_verb = "Audio extract" if is_audio else "Conversion"
+        await emit(sse_error("{}{} failed: {}".format(label, fail_verb, path.name)))
+        await emit(sse_item_failed(idx, total, "encode failed"))
+        return False
+
+    source_bytes = path.stat().st_size if path.exists() else 0
+    if delete_cache:
+        path.unlink(missing_ok=True)
+    output_bytes = output_file.stat().st_size
+    size_mb = output_bytes / 1024 ** 2
+    cache_note = "cache cleared" if delete_cache else "cache kept"
+    await emit(sse_log("Done: {} \u2014 {:.0f} MB ({})".format(output_file.name, size_mb, cache_note)))
+    if source_bytes > 0:
+        await emit(sse_size_info(source_bytes, output_bytes))
+    await emit(sse_item_done(idx, total))
+    return True
+
+
+async def _iter_sequential(items, *, total, shutdown):
+    """Sequential execution: a loop over `fetch_item` / `process_item`. Events
+    are pumped through a queue so the two coroutines can be the exact same ones
+    the pipeline coordinator drives."""
+    q: asyncio.Queue = asyncio.Queue()
+    done_ids, failed_ids = set(), set()
+
+    async def emit(msg):
+        try:
+            evt = json.loads(msg[6:].strip())
+            if evt.get("type") == "item_done":
+                done_ids.add(evt.get("idx"))
+            elif evt.get("type") == "item_failed":
+                failed_ids.add(evt.get("idx"))
+        except Exception:
+            pass
+        await q.put(msg)
+
+    async def driver():
+        try:
+            for item in items:
+                if _cancel_requested.is_set():
+                    break
+                path = await fetch_item(
+                    item, emit, _cancel_requested.is_set,
+                    total=total, pipelined=False)
+                if path is None:
+                    if _cancel_requested.is_set():
+                        break
+                    continue
+                await process_item(item, path, emit, total=total)
+
+            if _cancel_requested.is_set():
+                await emit(sse_cancelled('Cancelled by user.'))
+            elif failed_ids and not done_ids:
+                # Every item failed. A single-item job already emitted its own
+                # `error`; a multi-item one gets one terminal error here.
+                if total > 1:
+                    await emit(sse_error("All items failed."))
+            else:
+                await emit(sse_done('All done!'))
+                if shutdown:
+                    await emit(sse_shutdown('Shutting down in 60 seconds...'))
+        finally:
+            await q.put(None)
+
+    task = asyncio.create_task(driver())
+    try:
+        while True:
+            msg = await q.get()
+            if msg is None:
+                break
+            yield msg
+        await task
+    finally:
+        if not task.done():
+            task.cancel()
+        await _reap_tasks(task)
+
+
 @app.post("/download")
 async def download(
     url: str = Form(...),
@@ -2937,8 +3352,6 @@ async def download(
                 await _write_job_log(log_path, "\n".join(header_lines + _job_lines + [""]))
 
     async def _download_stream():
-        global current_process
-
         refusal = _nvenc_missing_error(mode, convert == "true")
         if refusal:
             yield sse_error(refusal)
@@ -2946,68 +3359,58 @@ async def download(
 
         _target_res = int(target_res) if target_res.lstrip("-").isdigit() else 0
         _sharpen = sharpen == "true"
+        _convert = convert == "true"
+        _delete_cache = delete_cache == "true"
+        _shutdown = shutdown == "true"
 
-        dest_dir = Path(output_dir) if output_dir else CONVERTED_DIR
-        dest_dir.mkdir(parents=True, exist_ok=True)
+        # Fail early on an unusable request-level output dir, before any
+        # subprocess runs (unchanged from the pre-items flow).
+        base_dest = Path(output_dir) if output_dir else CONVERTED_DIR
+        base_dest.mkdir(parents=True, exist_ok=True)
+        encode_opts = {
+            "cq": cq,
+            "maxrate": maxrate,
+            "preset": preset,
+            "tune": tune,
+            "pix_fmt": pix_fmt,
+            "target_res": _target_res,
+            "sharpen": _sharpen,
+        }
 
-        is_audio = mode == "audio"
-        out_ext = audio_output_ext(audio_preset) if is_audio else "mp4"
-        out_suffix = "" if is_audio else "_h265"  # video keeps the _h265 marker
-
-        def _predicted_output(stem: str) -> Path:
-            return dest_dir / "{}{}.{}".format(stem, out_suffix, out_ext)
-
-        # In audio mode the user-selected audio_format is the only stream we pull;
-        # no merge to MKV. Output filename detection swaps from [Merger] to [download] Destination.
-        def _yt_format_args() -> list:
-            if is_audio:
-                return ["-f", _audio_format_selector(audio_format)]
-            # Single video honors the explicit pick (with a best-available
-            # fallback); a multi-video playlist always grabs the highest
-            # available per video (mixed 720p/1080p lists — issue #13).
-            return ["-f", _video_format_selector(video_format, audio_format,
-                                                 prefer_picked=(total_videos <= 1))]
-
-        def _yt_merge_args() -> list:
-            return [] if is_audio else ["--merge-output-format", "mkv"]
-
-        def _section_for(vid_idx: int):
-            return per_item[vid_idx - 1]["section"] if batch else req_section
-
-        def _output_template(section) -> str:
-            # The range goes into the downloaded name so a clip never collides
-            # with (or is --no-overwrites-matched against) the full video or
-            # another range of it in the shared cache; the output stem inherits it.
-            return "%(title)s{}.%(ext)s".format(section_suffix(section))
-
-        # ── Step 1: resolve batch / playlist / single video ───────────────────
-        # Batch mode: the client handed us a ready list of independent items.
-        # Skip the playlist resolve entirely — metadata came from /video-info.
-        batch = items.strip() != ""
-        per_item = []
-        try:
-            req_section = None if batch else parse_section(section_start, section_end)
-        except ValueError as exc:
-            yield sse_error("Bad time range: {}".format(exc))
-            return
-        if batch:
+        # ── Build the items list: `items` when given, else one item from `url` ──
+        if items.strip():
             try:
-                video_urls, video_titles, video_durations, per_item = _resolve_batch_items(items)
+                parsed = _parse_items_payload(items)
             except (ValueError, KeyError, json.JSONDecodeError) as exc:
                 yield sse_error("Bad batch payload: {}".format(exc))
                 return
-            total_videos = len(video_urls)
-            if total_videos == 0:
+            if not parsed:
                 yield sse_error("Batch had no items.")
                 return
-            yield sse_log("Batch: {} video(s) queued — pipelined.".format(total_videos))
+            download_items = [
+                _make_download_item(
+                    idx, data,
+                    mode=mode, audio_preset=audio_preset,
+                    convert=_convert, delete_cache=_delete_cache,
+                    output_dir=output_dir, encode_opts=encode_opts)
+                for idx, data in enumerate(parsed, 1)
+            ]
+            total_videos = len(download_items)
+            yield sse_log("Batch: {} item(s) queued.".format(total_videos))
         else:
             if not is_http_url(url):
                 yield sse_error('URL must be http or https.')
                 return
+            try:
+                section = parse_section(section_start, section_end)
+            except ValueError as exc:
+                yield sse_error("Bad time range: {}".format(exc))
+                return
 
+            # Old clients still send a single URL. Resolve its title/duration,
+            # but never expand a playlist server-side — the client already does
+            # that and a playlist response here would be silently incomplete.
             yield sse_phase('Resolving...')
-
             flat_args = [*get_ytdlp_argv(), "--flat-playlist", "-J", "--no-download", *NODE_ARGS]
             flat_args += cookie_args()
             flat_args += ["--", url]
@@ -3026,7 +3429,6 @@ async def download(
             if flat_proc.returncode != 0:
                 yield sse_error('Could not fetch video info: ' + flat_err.decode(errors='replace')[:300])
                 return
-
             try:
                 info = json.loads(flat_out)
             except Exception:
@@ -3034,532 +3436,49 @@ async def download(
                 return
 
             if info.get("_type") == "playlist":
-                entries = [e for e in info.get("entries", []) if e]
-                video_urls = []
-                video_titles = {}     # url → title, used to skip already-encoded videos
-                video_durations = {}  # url → duration (s), used to verify download completeness
-                for e in entries:
-                    vid_url = e.get("webpage_url") or e.get("url") or ""
-                    if vid_url and not vid_url.startswith("http"):
-                        vid_url = f"https://www.youtube.com/watch?v={vid_url}"
-                    if vid_url:
-                        video_urls.append(vid_url)
-                        video_titles[vid_url] = e.get("title", "")
-                        video_durations[vid_url] = e.get("duration") or 0
-                total_videos = len(video_urls)
-                yield sse_log(f'Playlist: {total_videos} video(s) queued — processing one at a time.')
-            else:
-                video_urls = [url]
-                video_titles = {url: info.get("title") or ""}
-                video_durations = {url: info.get("duration") or 0}
-                total_videos = 1
-
-            if req_section and total_videos > 1:
-                yield sse_error("A time range applies to a single video, not a playlist.")
+                yield sse_error("URL is a playlist. Send one item per video in the items field.")
                 return
 
-        # ── Step 2 ────────────────────────────────────────────────────────────
-        if (pipeline == "true" or batch) and total_videos >= 1 and convert == "true" and not is_audio and (batch or total_videos > 1):
-            # ── Pipeline mode: downloader and encoder run concurrently ─────────
+            total_videos = 1
+            download_items = [_make_download_item(
+                1,
+                {"url": url, "title": info.get("title") or "",
+                 "duration": info.get("duration") or 0,
+                 "section": section},
+                mode=mode, audio_preset=audio_preset,
+                convert=_convert, delete_cache=_delete_cache,
+                output_dir=output_dir, encode_opts=encode_opts,
+            )]
+
+        # ── Execute: pipelined when explicitly requested, else sequential ─────
+        if pipeline == "true" and total_videos > 1:
             yield sse_log('Pipeline mode: next download starts while current video encodes.')
 
-            failed_videos = []   # videos skipped in a playlist/batch (reported at the end)
+            async def _fetch_payload(item, emit, stopping):
+                path = await fetch_item(item, emit, stopping,
+                                        total=total_videos, pipelined=True)
+                return None if path is None else (item, path)
 
-            async def _fetch_one(item, emit, stopping):
-                global current_dl_process
-                vid_idx, vid_url = item
-                dl_label = "[DL {}/{}] ".format(vid_idx, total_videos)
-
-                # Per-item lookups (batch mode) vs request-level scalars.
-                cfg = per_item[vid_idx - 1] if batch else None
-                vf = cfg["video_format"] if cfg else video_format
-                af = cfg["audio_format"] if cfg else audio_format
-                item_dest = Path(cfg["output_dir"]) if (cfg and cfg["output_dir"]) else dest_dir
-                item_dest.mkdir(parents=True, exist_ok=True)
-                exp_bytes = cfg["expected_size"] if cfg else (int(expected_size) if expected_size else 0)
-                section = _section_for(vid_idx)
-                if section:
-                    exp_bytes = 0   # the full video's size says nothing about a clip
-
-                # Skip download if output MP4 already exists and looks complete
-                min_output = max(1024 * 1024, int(exp_bytes * 0.30))
-                vid_title = video_titles.get(vid_url, "")
-                if vid_title:
-                    predicted = item_dest / "{}_h265.mp4".format(
-                        _predict_output_stem(vid_title, section_suffix(section)))
-                    if predicted.exists() and predicted.stat().st_size >= min_output:
-                        await emit(sse_log("{}Skipping \u2014 already encoded: {}".format(dl_label, predicted.name)))
-                        if batch:
-                            await emit(sse_item_done(vid_idx, total_videos))
-                        return None
-
-                # NOTE: pipeline mode only — do NOT emit a `phase` event here.
-                # The main progress bar tracks the concurrent ENCODE (sse_progress);
-                # pipeline download progress is shown separately via sse_dl_progress
-                # (the dl-status-row). A `phase` event would flip the main bar to
-                # indeterminate/scrolling with nothing to clear it during the download.
-                # The title still surfaces here in the log and in the dl-status-row.
-                if vid_title:
-                    await emit(sse_log("{}Downloading: {}".format(dl_label, vid_title)))
-                else:
-                    await emit(sse_log("{}Downloading...".format(dl_label)))
-
-                dl_args = [
-                    *get_ytdlp_argv(),
-                    "-f", _video_format_selector(vf, af, prefer_picked=batch),
-                    *NODE_ARGS,
-                    "--no-playlist",
-                    "--no-overwrites",
-                    "--merge-output-format", "mkv",
-                    "--concurrent-fragments", "2",
-                    "--retries", "25",
-                    "--fragment-retries", "25",
-                    "--newline",
-                    "--restrict-filenames",
-                    "--paths", str(CACHE_DIR),
-                    "-o", _output_template(section),
-                    *section_ytdlp_args(section),
-                ]
-                dl_args += cookie_args()
-                dl_args += ["--", vid_url]
-
-                # Snapshot the cache so the post-download fallback can tell
-                # THIS download's output from sibling MKVs already present
-                # (in pipeline mode the previous video is still encoding in
-                # the same CACHE_DIR — see issue #8).
-                pre_existing_mkvs = set(CACHE_DIR.glob("*.mkv"))
-
-                proc = await asyncio.create_subprocess_exec(
-                    *dl_args,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.STDOUT,
-                )
-                current_dl_process = proc
-                output_paths = set()
-
-                try:
-                    async for raw in proc.stdout:
-                        if stopping():
-                            proc.terminate()
-                            break
-                        line = raw.decode(errors="replace").rstrip()
-                        _cw = _maybe_flag_stale_cookies(line)
-                        if _cw:
-                            await emit(sse_cookie_warning(_cw))
-                        m = re.search(
-                            r"\[download\]\s+([\d.]+)%\s+of\s+(\S+)\s+at\s+(.+?)\s+ETA\s+(\S+)",
-                            line
-                        )
-                        if m:
-                            dl_pct, dl_size, dl_speed, dl_eta = m.groups()
-                            await emit(sse_dl_progress(float(dl_pct), dl_size, dl_speed, dl_eta, vid_idx, total_videos))
-                        else:
-                            merger = re.search(r'\[Merger\] Merging formats into "(.+?)"', line)
-                            # A section download is written merged in one go:
-                            # no [Merger] line, only its Destination.
-                            dest = re.search(r'\[download\] Destination: (.+)', line) if section else None
-                            already = re.search(r'\[download\] (.+?) has already been downloaded', line)
-                            if merger:
-                                output_paths.add(merger.group(1))
-                            elif dest:
-                                output_paths.add(dest.group(1).strip())
-                            elif already:
-                                output_paths.add(already.group(1))
-                            await emit(sse_log(line))
-
-                    await proc.wait()
-                finally:
-                    _terminate_if_running(proc)
-                    current_dl_process = None
-                    await proc.wait()
-
-                if _cancel_requested.is_set():
-                    return None   # user cancelled — not a download failure
-
-                mkv_files = []
-                if output_paths:
-                    mkv_files = sorted(
-                        [Path(p) for p in output_paths if Path(p).exists() and p.endswith(".mkv")],
-                        key=os.path.getmtime
-                    )
-                    if not mkv_files:
-                        for p in output_paths:
-                            candidate = Path(p) if Path(p).suffix else Path(p).with_suffix(".mkv")
-                            if candidate.exists():
-                                mkv_files = [candidate]
-                                break
-                if not mkv_files:
-                    # Fallback only to a file that appeared during THIS
-                    # download — never a sibling video's MKV still in the
-                    # shared cache. A blind glob here would grab the
-                    # previous (still-encoding) video and mis-report this
-                    # failed download as complete (issue #8).
-                    found = _newest_new_file(CACHE_DIR, pre_existing_mkvs)
-                    if found:
-                        mkv_files = [found]
-
-                expected_dur = video_durations.get(vid_url) or 0
-
-                if proc.returncode != 0:
-                    if mkv_files and await (
-                            _section_download_is_complete(mkv_files[0], section, expected_dur) if section
-                            else _download_is_complete(mkv_files[0], exp_bytes, expected_dur)):
-                        await emit(sse_log("{}yt-dlp exited with errors but output file verified complete \u2014 continuing.".format(dl_label)))
-                    else:
-                        # Batch/playlist: skip this bad video and keep going.
-                        await emit(sse_item_failed(vid_idx, total_videos, "download failed"))
-                        size_note = ""
-                        if mkv_files and exp_bytes > 0:
-                            actual = mkv_files[0].stat().st_size
-                            size_note = " (got {:.0f}MB of expected {:.0f}MB)".format(actual / 1024**2, exp_bytes / 1024**2)
-                        # One un-downloadable video must not abort the rest of a
-                        # playlist/batch — record it and keep going; the whole
-                        # job still completes.
-                        failed_videos.append(vid_title or vid_url)
-                        await emit(sse_log("{}Download failed{} \u2014 skipping, continuing with the rest.".format(dl_label, size_note)))
-                        return None
-
-                if not mkv_files:
-                    await emit(sse_item_failed(vid_idx, total_videos, "no mkv"))
-                    failed_videos.append(vid_title or vid_url)
-                    await emit(sse_log("{}No .mkv found after download \u2014 skipping, continuing with the rest.".format(dl_label)))
-                    return None
-
-                await emit(sse_log("{}Queued for encoding.".format(dl_label)))
-                return (vid_idx, mkv_files[0])
-
-            async def _process_one(item, emit):
-                global current_process
-                vid_idx, input_file = item
-                await emit(sse_video_start(vid_idx, total_videos))
-                enc_label = "[ENC {}/{}] ".format(vid_idx, total_videos)
-
-                # Per-item output-dir + tune (batch mode) vs request-level.
-                cfg = per_item[vid_idx - 1] if batch else None
-                item_dest = Path(cfg["output_dir"]) if (cfg and cfg["output_dir"]) else dest_dir
-                item_tune = cfg["tune_mode"] if cfg else tune_mode
-                item_dest.mkdir(parents=True, exist_ok=True)
-
-                section = _section_for(vid_idx)
-                safe_stem = _output_stem(input_file.stem, section_suffix(section))
-                output_file = item_dest / "{}_h265.mp4".format(safe_stem)
-                source_size = input_file.stat().st_size if input_file.exists() else 0
-                min_output = max(1024 * 1024, int(source_size * 0.30))
-
-                if output_file.exists():
-                    out_size = output_file.stat().st_size
-                    if out_size < min_output:
-                        await emit(sse_log("{}Removing incomplete output ({:.0f} MB, expected >={:.0f} MB) \u2014 re-encoding.".format(enc_label, out_size / 1024**2, min_output / 1024**2)))
-                        output_file.unlink()
-                    else:
-                        await emit(sse_log("{}Skipping \u2014 output already exists: {} ({:.0f} MB)".format(enc_label, output_file.name, out_size / 1024**2)))
-                        if delete_cache == "true":
-                            input_file.unlink(missing_ok=True)
-                        if batch:
-                            await emit(sse_item_done(vid_idx, total_videos))
-                        return True
-
-                await emit(sse_phase("{}Converting: {}".format(enc_label, input_file.name)))
-                await emit(sse_source_size(source_size))
-
-                src = await probe_video(input_file)
-                duration_secs = src.get("duration") or None
-                seek = section_input_seek(section, src.get("start_time", 0.0))
-                if section:
-                    duration_secs = _clip_duration(section, video_durations.get(video_urls[vid_idx - 1]) or 0)
-                if duration_secs:
-                    await emit(sse_log("Duration: {:.1f}s".format(duration_secs)))
-                else:
-                    await emit(sse_log("Could not read duration \u2014 progress bar will be indeterminate"))
-
-                params, enc_args, enc_logs = _encode_plan(
-                    src, input_file, output_file,
-                    {"tune_mode": item_tune, "cq": cq, "maxrate": maxrate,
-                     "preset": preset, "tune": tune, "pix_fmt": pix_fmt,
-                     "target_res": _target_res, "sharpen": _sharpen},
-                    input_opts=seek,
-                )
-                for _log in enc_logs:
-                    await emit(sse_log(_log))
-                enc_res: dict = {}
-                async for _s in run_encode(enc_args, duration_secs=duration_secs,
-                                           idx=vid_idx, total=total_videos, result=enc_res):
-                    await emit(_s)
-
-                if _cancel_requested.is_set():
-                    # User cancelled mid-encode — discard the partial output,
-                    # don't treat it as a failure or retry.
-                    if output_file.exists():
-                        output_file.unlink(missing_ok=True)
-                    return True
-
-                if enc_res["returncode"] != 0:
-                    # Remove partial output so retries don't falsely skip.
-                    if output_file.exists():
-                        output_file.unlink(missing_ok=True)
-                    await emit(sse_error("{}Conversion failed: {}".format(enc_label, input_file.name)))
-                    await emit(sse_item_failed(vid_idx, total_videos, "encode failed"))
-                    return False
-
-                source_bytes = input_file.stat().st_size if input_file.exists() else 0
-                if delete_cache == "true":
-                    input_file.unlink(missing_ok=True)
-                output_bytes = output_file.stat().st_size
-                size_mb = output_bytes / 1024 ** 2
-                cache_note = "cache cleared" if delete_cache == "true" else "cache kept"
-                await emit(sse_log("Done: {} \u2014 {:.0f} MB ({})".format(output_file.name, size_mb, cache_note)))
-                if source_bytes > 0:
-                    await emit(sse_size_info(source_bytes, output_bytes))
-                await emit(sse_item_done(vid_idx, total_videos))
-                return True
+            async def _process_payload(payload, emit):
+                item, path = payload
+                return await process_item(item, path, emit, total=total_videos)
 
             async def _throttle(item, emit, stopping):
-                vid_idx, _vid_url = item
-                if vid_idx < total_videos and not stopping():
+                if item["idx"] < total_videos and not stopping():
                     sleep_s = random.uniform(3, 8)
                     await emit(sse_log("Next download in {:.1f}s...".format(sleep_s)))
                     await asyncio.sleep(sleep_s)
 
-            async def _finalize(emit):
-                if failed_videos:
-                    shown = "; ".join(failed_videos[:10]) + (" …" if len(failed_videos) > 10 else "")
-                    await emit(sse_log("⚠ Skipped {} video(s) that couldn't be downloaded: {}".format(len(failed_videos), shown)))
-
             async with contextlib.aclosing(run_pipelined(
-                    list(enumerate(video_urls, 1)), _fetch_one, _process_one,
-                    _cancel_requested, throttle=_throttle, finalize=_finalize,
-                    shutdown=(shutdown == "true"))) as _pipeline:
+                    download_items, _fetch_payload, _process_payload,
+                    _cancel_requested, throttle=_throttle,
+                    shutdown=_shutdown)) as _pipeline:
                 async for _event in _pipeline:
                     yield _event
-
         else:
-            # ── Sequential: download → convert → delete, one at a time ─────────
-            for vid_idx, vid_url in enumerate(video_urls, 1):
-                if _cancel_requested.is_set():
-                    break   # cancel stops the whole queue, not just the current proc
-                label = f"[{vid_idx}/{total_videos}] " if total_videos > 1 else ""
-                yield sse_video_start(vid_idx, total_videos)
-
-                # Skip download if output already exists and looks complete.
-                # Video: H.265 is 40-100% of source — 30% floor. Audio: WAV/MP3 size
-                # is unrelated to source bytes (WAV often >> source), so existence + 1MB suffices.
-                section = req_section
-                # A clip's size is unrelated to the full video's reported size.
-                expected_bytes = 0 if section else (int(expected_size) if expected_size else 0)
-                min_output = 1024 * 1024 if is_audio else max(1024 * 1024, int(expected_bytes * 0.30))
-                vid_title = video_titles.get(vid_url, "")
-                if vid_title:
-                    predicted = _predicted_output(_predict_output_stem(vid_title, section_suffix(section)))
-                    if predicted.exists() and predicted.stat().st_size >= min_output:
-                        yield sse_log(f'{label}Skipping \u2014 already encoded: {predicted.name}')
-                        continue
-
-                yield sse_phase("{}Downloading".format(label), vid_title)
-
-                dl_args = [
-                    *get_ytdlp_argv(),
-                    *_yt_format_args(),
-                    *NODE_ARGS,
-                    "--no-playlist",
-                    "--no-overwrites",
-                    *_yt_merge_args(),
-                    "--concurrent-fragments", "2",
-                    "--retries", "25",
-                    "--fragment-retries", "25",
-                    "--newline",
-                    "--restrict-filenames",
-                    "--paths", str(CACHE_DIR),
-                    "-o", _output_template(section),
-                    *section_ytdlp_args(section),
-                ]
-                dl_args += cookie_args()
-                dl_args += ["--", vid_url]
-
-                # Snapshot the cache before THIS download so the no-output-line
-                # fallback can only see files that just appeared — never an
-                # unrelated older file already sitting there (issue #92, the
-                # sequential counterpart to the pipeline's #8 fix).
-                cache_patterns = _cache_snapshot_patterns(is_audio)
-                pre_existing = {p for pat in cache_patterns for p in CACHE_DIR.glob(pat)}
-
-                proc = await asyncio.create_subprocess_exec(
-                    *dl_args,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.STDOUT,
-                )
-                current_process = proc
-                output_paths = set()
-
-                try:
-                    async for raw in proc.stdout:
-                        if _cancel_requested.is_set():
-                            proc.terminate()
-                            break
-                        line = raw.decode(errors="replace").rstrip()
-                        _cw = _maybe_flag_stale_cookies(line)
-                        if _cw:
-                            yield sse_cookie_warning(_cw)
-                        m = re.search(
-                            r"\[download\]\s+([\d.]+)%\s+of\s+([\S]+)\s+at\s+([\S]+)\s+ETA\s+([\S]+)",
-                            line
-                        )
-                        if m:
-                            pct, size, speed, eta = m.groups()
-                            yield _sse({"type": "progress", "pct": float(pct), "size": size, "speed": speed, "eta": eta})
-                        else:
-                            merger = re.search(r'\[Merger\] Merging formats into "(.+?)"', line)
-                            # Audio mode and section downloads have no merger — capture
-                            # the destination line instead.
-                            dest = re.search(r'\[download\] Destination: (.+)', line) if (is_audio or section) else None
-                            already = re.search(r'\[download\] (.+?) has already been downloaded', line)
-                            if merger:
-                                output_paths.add(merger.group(1))
-                            elif dest:
-                                output_paths.add(dest.group(1).strip())
-                            elif already:
-                                output_paths.add(already.group(1))
-                            yield sse_log(line)
-
-                    await proc.wait()
-                finally:
-                    _terminate_if_running(proc)
-                    current_process = None
-                    await proc.wait()
-
-                if _cancel_requested.is_set():
-                    break   # user cancelled — not a download failure
-
-                # Resolve downloaded file(s) before checking return code — yt-dlp can
-                # exit non-zero from transient fragment errors even when the file was
-                # fully downloaded.
-                allowed_suffixes = _AUDIO_EXTS if is_audio else {".mkv"}
-                mkv_files = []
-                if output_paths:
-                    mkv_files = sorted(
-                        [Path(p) for p in output_paths if Path(p).exists() and Path(p).suffix.lower() in allowed_suffixes],
-                        key=os.path.getmtime
-                    )
-                    if not mkv_files and not is_audio:
-                        for p in output_paths:
-                            candidate = Path(p) if Path(p).suffix else Path(p).with_suffix('.mkv')
-                            if candidate.exists():
-                                mkv_files = [candidate]
-                                break
-                if not mkv_files:
-                    found = _newest_new_file(CACHE_DIR, pre_existing, cache_patterns)
-                    if found:
-                        mkv_files = [found]
-
-                expected_dur = video_durations.get(vid_url) or 0
-
-                if proc.returncode != 0:
-                    if mkv_files and await (
-                            _section_download_is_complete(mkv_files[0], section, expected_dur) if section
-                            else _download_is_complete(mkv_files[0], expected_bytes, expected_dur)):
-                        yield sse_log(f'{label}yt-dlp exited with errors but output file verified complete — continuing.')
-                    else:
-                        size_note = ""
-                        if mkv_files and expected_bytes > 0:
-                            actual = mkv_files[0].stat().st_size
-                            size_note = " (got {:.0f}MB of expected {:.0f}MB)".format(actual / 1024**2, expected_bytes / 1024**2)
-                        yield sse_error("{}Download failed{}.".format(label, size_note))
-                        return
-
-                if not mkv_files:
-                    yield sse_error(f'{label}No .mkv found after download.')
-                    return
-
-                if convert == "true" or is_audio:
-                    input_file = mkv_files[0]
-                    source_size = input_file.stat().st_size
-                    safe_stem = _output_stem(input_file.stem, section_suffix(section))
-                    output_file = _predicted_output(safe_stem)
-
-                    # Video: H.265 should be at least 30% of source. Audio: WAV/MP3 size
-                    # is unrelated to source bytes, so just require existence + 1 MB.
-                    min_output = 1024 * 1024 if is_audio else max(1024 * 1024, int(source_size * 0.30))
-
-                    if output_file.exists():
-                        out_size = output_file.stat().st_size
-                        if out_size < min_output:
-                            msg = "{}Removing incomplete output ({:.0f} MB, expected >={:.0f} MB) — re-encoding.".format(
-                                label, out_size / 1024**2, min_output / 1024**2)
-                            yield sse_log(msg)
-                            output_file.unlink()
-                        else:
-                            msg = "{}Skipping \u2014 output already exists: {} ({:.0f} MB)".format(label, output_file.name, out_size / 1024**2)
-                            yield sse_log(msg)
-                            if delete_cache == "true":
-                                input_file.unlink(missing_ok=True)
-                            continue
-
-                    phase_verb = "Extracting audio" if is_audio else "Converting"
-                    yield sse_phase(f'{label}{phase_verb}: {input_file.name}')
-                    yield sse_source_size(source_size)
-
-                    src = await probe_video(input_file)
-                    duration_secs = src.get("duration") or None
-                    seek = section_input_seek(section, src.get("start_time", 0.0))
-                    if section:
-                        duration_secs = _clip_duration(section, video_durations.get(vid_url) or 0)
-                    if duration_secs:
-                        yield sse_log(f'Duration: {duration_secs:.1f}s')
-                    else:
-                        yield sse_log('Could not read duration — progress bar will be indeterminate')
-
-                    if is_audio:
-                        ffmpeg_args = build_audio_ffmpeg(input_file, output_file, audio_preset, input_opts=seek)
-                        enc_log = "Audio extract: {} → {}".format(audio_preset.upper(), output_file.name)
-                        yield sse_log(enc_log)
-                    else:
-                        params, ffmpeg_args, enc_logs = _encode_plan(
-                            src, input_file, output_file,
-                            {"tune_mode": tune_mode, "cq": cq, "maxrate": maxrate,
-                             "preset": preset, "tune": tune, "pix_fmt": pix_fmt,
-                             "target_res": _target_res, "sharpen": _sharpen},
-                            input_opts=seek,
-                        )
-                        for _log in enc_logs:
-                            yield sse_log(_log)
-
-                    enc_res: dict = {}
-                    async for _s in run_encode(ffmpeg_args, duration_secs=duration_secs,
-                                               idx=vid_idx, total=total_videos, result=enc_res):
-                        yield _s
-
-                    if _cancel_requested.is_set():
-                        if output_file.exists():
-                            output_file.unlink(missing_ok=True)
-                        break   # user cancelled mid-encode — not a failure
-                    if enc_res["returncode"] != 0:
-                        # Remove partial output so retries don't falsely skip
-                        if output_file.exists():
-                            output_file.unlink(missing_ok=True)
-                        fail_verb = "Audio extract" if is_audio else "Conversion"
-                        yield sse_error(f'{label}{fail_verb} failed: {input_file.name}')
-                        return
-
-                    source_bytes = input_file.stat().st_size
-                    if delete_cache == "true":
-                        input_file.unlink(missing_ok=True)
-                    output_bytes = output_file.stat().st_size
-                    size_mb = output_bytes / 1024 ** 2
-                    cache_note = "cache cleared" if delete_cache == "true" else "cache kept"
-                    yield sse_log("Done: {} \u2014 {:.0f} MB ({})".format(output_file.name, size_mb, cache_note))
-                    if source_bytes > 0:
-                        yield sse_size_info(source_bytes, output_bytes)
-
-                else:
-                    for f in mkv_files:
-                        yield sse_log(f'Saved (no conversion): {f}')
-
-            if _cancel_requested.is_set():
-                yield sse_cancelled('Cancelled by user.')
-            else:
-                yield sse_done('All done!')
-                if shutdown == "true":
-                    # Client-driven: UI runs the visible countdown and calls /shutdown-now.
-                    yield sse_shutdown('Shutting down in 60 seconds...')
+            async for _event in _iter_sequential(
+                    download_items, total=total_videos, shutdown=_shutdown):
+                yield _event
 
     return StreamingResponse(_tracked(stream()), media_type="text/event-stream")
 
@@ -3752,13 +3671,16 @@ async def convert_local(
             safe_stem = sanitize(input_file.stem)
             output_file = dest_dir / "{}{}.{}".format(safe_stem, out_suffix, out_ext)
 
+            source_bytes = input_file.stat().st_size if input_file.exists() else 0
             if output_file.exists():
-                size_mb = output_file.stat().st_size / 1024 ** 2
-                if size_mb < 1:
-                    yield sse_log(f'Removing incomplete output ({size_mb * 1024:.0f} KB) — re-encoding.')
+                out_size = output_file.stat().st_size
+                min_output = _min_output_bytes(source_bytes, is_audio)
+                if out_size < min_output:
+                    yield sse_log("Removing incomplete output ({:.0f} MB, expected >={:.0f} MB) \u2014 re-encoding.".format(
+                        out_size / 1024**2, min_output / 1024**2))
                     output_file.unlink()
                 else:
-                    yield sse_log(f'Skipping — output already exists: {output_file.name} ({size_mb:.0f} MB)')
+                    yield sse_log(f'Skipping — output already exists: {output_file.name} ({out_size / 1024 ** 2:.0f} MB)')
                     continue
 
             phase_verb = "Extracting audio" if is_audio else "Converting"

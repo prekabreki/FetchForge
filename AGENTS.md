@@ -86,17 +86,19 @@ Each queue item carries: `type` ("dl" or "local"), title, URL or file paths, for
 
 ## How the download flow works (per item)
 
-### Step 1 — Resolve
-`--flat-playlist -J` fetches playlist metadata without downloading. Single videos return as a one-item list. Builds `video_titles` dict (`url → title`) used for pre-download skip checks.
+### Step 1 — Items
+`/download` always runs a list of items. The client expands playlists itself and sends an `items` JSON array (one object per video). A request with only `url` (old clients) is turned into a one-item list after a single `--flat-playlist -J` probe for its title/duration; if that probe says the URL is a playlist, the request is rejected with an `error` telling the caller to send `items` — the server never expands playlists.
+
+Each item carries `url`, `title`, `duration`, `video_format`, `audio_format`, `expected_size`, `output_dir`, `tune_mode` and `section`. Job-level settings (`mode`, `audio_preset`, `convert`, `delete_cache`, encode overrides) are copied onto every item by `_make_download_item()`, so no path reads a request-level field directly.
 
 ### Step 2 — Process
-Two modes controlled by the `pipeline` form field:
+`fetch_item(item, ...)` owns the yt-dlp argv, progress parsing, cache snapshot + `_newest_new_file` output detection, and the download-completeness checks for both modes. `process_item(item, path, ...)` owns video encode, audio extract and download-only, plus the single `delete_cache` deletion site. Two execution modes use those same two coroutines:
 
-**Sequential (default):** For each video: download → encode → delete MKV → next.
+**Sequential (default):** a loop over `fetch_item` → `process_item`. Each item emits `item_done`/`item_failed`, and a failed item does not stop the remaining items.
 
-**Pipeline mode** (`pipeline=true`, playlists only): Two concurrent asyncio workers sharing a `Queue(maxsize=1)`:
-- `dl_worker` downloads sequentially, puts `(vid_idx, Path)` on `file_q`, sleeps 3–8s random between downloads. Uses `--concurrent-fragments 2` (not 4 — higher values trigger YouTube throttling on large streams).
-- `enc_worker` consumes from `file_q`, encodes, deletes MKV, loops.
+**Pipeline mode** (`pipeline=true`, more than one item): Two concurrent asyncio workers sharing a `Queue(maxsize=1)`:
+- `dl_worker` calls `fetch_item` sequentially, puts `(item, Path)` on `file_q`, sleeps 3–8s random between downloads. `fetch_item` uses `--concurrent-fragments 2` (not 4 — higher values trigger YouTube throttling on large streams).
+- `enc_worker` calls `process_item`, deletes MKV, loops.
 - `maxsize=1` — downloader stays at most 1 video ahead of encoder, prevents MKV pile-up.
 - `abort = asyncio.Event()` — set on dl or enc failure. **A dl failure does NOT kill in-progress encodes.** enc_worker only checks for `None` sentinel to stop, never `abort` during encoding. A dl failure stops future downloads but lets the current encode finish and drains any already-queued MKV.
 - enc_worker `finally` block drains `file_q` **without deleting** queued MKVs — they were fully downloaded and should be preserved.
@@ -117,10 +119,10 @@ Do **not** use ffprobe's format `duration` for that: on a Matroska/WebM file wit
 The size-based checks (`expected_size` ratios) are skipped for ranged items — the full video's size says nothing about a clip.
 
 ### Pre-download skip check
-Before downloading each video, `_predict_output_stem(title)` computes yt-dlp's exact `--restrict-filenames` output (via `yt_dlp.utils.sanitize_filename`, falling back to a regex approximation only when the package isn't importable — e.g. a Windows bundled `yt-dlp.exe`) then our `sanitize()`, and checks if `<dest>/<stem>_h265.mp4` already exists. If complete, the video is skipped. Using yt-dlp's own sanitizer avoids the accent/emoji divergence that could wrongly skip a wanted video.
+Before downloading each item, `_predict_output_stem(title, suffix)` computes yt-dlp's exact `--restrict-filenames` output (via `yt_dlp.utils.sanitize_filename`, falling back to a regex approximation only when the package isn't importable — e.g. a Windows bundled `yt-dlp.exe`) then our `sanitize()`, and checks if the item's output (`<dest>/<stem>_h265.mp4`, or `<stem>.wav`/`.mp3` in audio mode) already exists and passes `_min_output_bytes()`. If complete, `fetch_item` emits `item_done` and returns None; it never deletes a cache file it did not download. Using yt-dlp's own sanitizer avoids the accent/emoji divergence that could wrongly skip a wanted video.
 
 ### `_download_is_complete(path, expected_bytes, expected_duration)` (async)
-Decides whether a download that exited non-zero is actually complete. With a known size, file must be ≥85% of `expected_bytes`. With **no** size reported (live streams, premieres, age-restricted — `expected_size=0`), it does NOT trust existence+1MB (a truncated 50MB slice of a 4GB video would pass); instead it ffprobes the container duration and requires it to match the resolve-time `duration` within ±2s. If neither size nor duration is available, the file is treated as incomplete. Per-video durations are captured at resolve into `video_durations`.
+Decides whether a download that exited non-zero is actually complete. With a known size, file must be ≥85% of `expected_bytes`. With **no** size reported (live streams, premieres, age-restricted — `expected_size=0`), it does NOT trust existence+1MB (a truncated 50MB slice of a 4GB video would pass); instead it ffprobes the container duration and requires it to match the resolve-time `duration` within ±2s. If neither size nor duration is available, the file is treated as incomplete. Each item carries its own resolve-time `duration`.
 
 ## SSE event types
 
@@ -132,6 +134,8 @@ All events: `data: {JSON}\n\n`. **Every event is built by an `sse_*` helper** at
 | `progress` | `pct, overall, speed, eta, size` | `pct` = per-file %, `overall` = job-level % |
 | `video_start` | `current, total` | Start of each video — triggers overall bar |
 | `dl_progress` | `pct, size, speed, eta, idx, total` | Download progress (pipeline mode) |
+| `item_done` | `idx, total` | One item succeeded (or was skipped) |
+| `item_failed` | `idx, total, msg` | One item failed; the job continues with the rest |
 | `size_info` | `source_mb, output_mb, bloat_pct` | Emitted after each successful encode |
 | `log` | `msg` | Scrolling log line |
 | `error` | `msg` | Shown in red |
