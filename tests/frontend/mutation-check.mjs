@@ -120,6 +120,24 @@ const MUTATIONS = [
     file: 'time-range.test.mjs',
     expect: ['the queue row shows the range, and two ranges of one video are two jobs'],
   },
+  {
+    id: 'i95/download-http-status',
+    guard: 'the !r.ok check in runOneItem()',
+    breaks: 'a 409 JSON body has no data: lines, so the item reads to the end and is reported done although nothing ran',
+    find: '    const r = await fetch(endpoint, { method: \'POST\', body: form, signal: controller.signal });\n    if (!r.ok) {',
+    replace: '    const r = await fetch(endpoint, { method: \'POST\', body: form, signal: controller.signal });\n    if (false) {',
+    file: 'http-errors.test.mjs',
+    expect: ['a /download 409 leaves the item recorded as failed, not done'],
+  },
+  {
+    id: 'i95/read-error-retries',
+    guard: 'the non-AbortError branch in runOneItem()',
+    breaks: 'a connection reset mid-stream is rethrown and escapes startDownload, leaving the job flag, Cancel button and wake lock stuck',
+    find: '      // A rejected fetch or a mid-stream read error (server exited, connection\n      // reset) is a retryable failure. Letting it escape startDownload would\n      // leave the job flag set and the Cancel button/wake lock stuck.\n      _lastErrorMsg = (e && e.message) ? e.message : String(e);',
+    replace: '      throw e;',
+    file: 'http-errors.test.mjs',
+    expect: ['a stream that errors mid-read leaves the Start button visible and Cancel hidden afterwards'],
+  },
 ];
 
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

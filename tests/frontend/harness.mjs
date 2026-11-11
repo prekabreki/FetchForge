@@ -45,11 +45,12 @@ class SseStream {
     this._queue = [];
     this._waiters = [];
     this._ended = false;
+    this._error = null;
   }
 
   _push(chunk) {
     const w = this._waiters.shift();
-    if (w) w(chunk);
+    if (w) w.resolve(chunk);
     else this._queue.push(chunk);
   }
 
@@ -66,12 +67,21 @@ class SseStream {
     this._push({ done: true, value: undefined });
   }
 
+  /** Drop the connection: a pending or subsequent read() rejects, as a real
+   *  connection reset mid-stream would. */
+  fail(err) {
+    this._error = err || new Error('stream error');
+    this._ended = true;
+    this._waiters.splice(0).forEach((w) => w.reject(this._error));
+  }
+
   _reader() {
     return {
       read: () => {
+        if (this._error) return Promise.reject(this._error);
         if (this._queue.length) return Promise.resolve(this._queue.shift());
         if (this._ended) return Promise.resolve({ done: true, value: undefined });
-        return new Promise((r) => this._waiters.push(r));
+        return new Promise((resolve, reject) => this._waiters.push({ resolve, reject }));
       },
       cancel: () => Promise.resolve(),
     };
@@ -102,12 +112,22 @@ class FetchStub {
   }
 
   /** Respond to any request whose URL contains `pattern` with JSON `data`.
-   *  Re-registering the same pattern replaces the previous response. */
+   *  Re-registering the same pattern replaces the previous response.
+   *  The response carries a real `body` (not just `json()`): a real fetch
+   *  response always has one, including error responses like a /download 409,
+   *  and a test that only passes because `r.body` is undefined would not prove
+   *  the page checks `r.ok`. */
   json(pattern, data, { ok = true, status = 200 } = {}) {
     this._routes = this._routes.filter((r) => r.pattern !== pattern);
+    const text = JSON.stringify(data);
     this._routes.push({
       pattern,
-      handler: () => ({ ok, status, json: async () => data, text: async () => JSON.stringify(data) }),
+      handler: () => ({
+        ok, status,
+        body: { getReader: () => oneShotReader(text) },
+        json: async () => data,
+        text: async () => text,
+      }),
     });
     return this;
   }
@@ -163,6 +183,19 @@ class FetchStub {
       return Promise.resolve(route.handler(call));
     };
   }
+}
+
+/** A one-shot ReadableStreamDefaultReader over `text`, for JSON responses. */
+function oneShotReader(text) {
+  let sent = false;
+  return {
+    read: async () => {
+      if (sent) return { done: true, value: undefined };
+      sent = true;
+      return { done: false, value: new TextEncoder().encode(text) };
+    },
+    cancel: async () => {},
+  };
 }
 
 function decodeForm(body) {
