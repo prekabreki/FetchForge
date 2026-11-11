@@ -2593,6 +2593,18 @@ async def download(
                         except Exception:
                             pass
                     yield chunk
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # A disconnect cancels the task, and cleanup can raise while that
+                # cancellation is pending (#87). Never turn that into a job error:
+                # let the cancellation continue so it propagates as before.
+                task = asyncio.current_task()
+                if task is not None and task.cancelling():
+                    raise asyncio.CancelledError() from exc
+                logger.exception("Unexpected error in download job")
+                _jlog("ERROR", "Unexpected error: {}".format(exc))
+                yield sse_error("Unexpected error: {}".format(exc))
             finally:
                 elapsed = datetime.datetime.now() - _job_start
                 status = "CANCELLED"
@@ -3508,6 +3520,18 @@ async def convert_local(
                         except Exception:
                             pass
                     yield chunk
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # A disconnect cancels the task, and cleanup can raise while that
+                # cancellation is pending (#87). Never turn that into a job error:
+                # let the cancellation continue so it propagates as before.
+                task = asyncio.current_task()
+                if task is not None and task.cancelling():
+                    raise asyncio.CancelledError() from exc
+                logger.exception("Unexpected error in local conversion job")
+                _jlog("ERROR", "Unexpected error: {}".format(exc))
+                yield sse_error("Unexpected error: {}".format(exc))
             finally:
                 elapsed = datetime.datetime.now() - _job_start
                 status = "CANCELLED"
