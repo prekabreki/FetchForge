@@ -115,6 +115,21 @@ async def index():
     return HTMLResponse(html)
 
 
+@app.get("/static/{name}")
+async def static_asset(name: str):
+    """Serve the frontend's CSS or JS. Exact-match allowlist, no StaticFiles mount."""
+    media_type = config.STATIC_FILES.get(name)
+    if media_type is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return FileResponse(
+        config.PKG_DIR / name,
+        media_type=media_type,
+        # Versioned with the package, so a day of caching survives page reloads
+        # without ever pinning a stale stylesheet across a restart.
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
 @app.get("/fonts/{name}")
 async def font_asset(name: str):
     """Serve one vendored webfont. Exact-match allowlist, woff2 only."""

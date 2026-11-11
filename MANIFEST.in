@@ -1,3 +1,5 @@
 include fetchforge/index.html
+include fetchforge/app.css
+include fetchforge/app.js
 include LICENSE
 include README.md

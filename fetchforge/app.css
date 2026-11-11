@@ -1,0 +1,1340 @@
+  /* Vendored from Google Fonts, byte-identical to what the CDN served. Provenance,
+     licences and the subsetting rationale: fetchforge/fonts/SOURCES.txt.
+
+     Both files are VARIABLE fonts whose wght axis on disk is wider than we use
+     (Outfit 100-900, JetBrains Mono 400-800). The ranges below are therefore
+     load-bearing — they reproduce the CDN's font matching exactly. In particular
+     JetBrains Mono is pinned to 400 500 even though the file goes to 800: the
+     mono rules that ask for 700 clamp to 500 today, and widening this range
+     would silently make them heavier.
+
+     latin-ext is a separate face on purpose. Video titles and Windows paths carry
+     accented characters, but unicode-range means it is only fetched when one
+     actually appears. */
+  @font-face {
+    font-family: 'Outfit';
+    font-style: normal;
+    font-weight: 400 800;
+    font-display: swap;
+    src: url('/fonts/outfit-latin.woff2') format('woff2');
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+  }
+  @font-face {
+    font-family: 'Outfit';
+    font-style: normal;
+    font-weight: 400 800;
+    font-display: swap;
+    src: url('/fonts/outfit-latin-ext.woff2') format('woff2');
+    unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+  }
+  @font-face {
+    font-family: 'JetBrains Mono';
+    font-style: normal;
+    font-weight: 400 500;
+    font-display: swap;
+    src: url('/fonts/jetbrains-mono-latin.woff2') format('woff2');
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+  }
+  @font-face {
+    font-family: 'JetBrains Mono';
+    font-style: normal;
+    font-weight: 400 500;
+    font-display: swap;
+    src: url('/fonts/jetbrains-mono-latin-ext.woff2') format('woff2');
+    unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+  }
+
+  :root {
+    --bg: #111318;
+    --surface: #1a1d25;
+    --surface2: #22262f;
+    --border: #2d3240;
+    --border2: #3a3f50;
+    --accent: #e8a023;
+    --accent2: #ef5350;
+    --accent3: #4dd0a0;
+    --accent4: #64b5f6;
+    --text: #e8e4df;
+    /* Neutral ramp is contrast-checked against every surface it lands on.
+       Worst case is --surface2 (#22262f): text 12.0:1, text2 6.0:1, muted 4.6:1.
+       Do not darken these without re-running the ratios. */
+    --text2: #a5a0b2;
+    --muted: #8e8b9b;
+    --mono: 'JetBrains Mono', monospace;
+    --sans: 'Outfit', sans-serif;
+    --radius: 10px;
+    --radius-sm: 7px;
+
+    /* Motion: built-in CSS easings are too weak to read as intentional. */
+    --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+    --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+
+    /* Explicit stacking scale — no ad-hoc z-index values. */
+    --z-sticky: 30;
+    --z-overlay: 50;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.6;
+    min-height: 100vh;
+  }
+
+  .container {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 36px 28px 70px;
+  }
+
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  header {
+    margin-bottom: 32px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid var(--border);
+    animation: fadeUp 0.4s var(--ease-out) both;
+  }
+
+  .header-brand {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+  }
+
+  .channel-logo {
+    width: 80px;
+    height: 80px;
+    border-radius: 50%;
+    border: 2px solid var(--border2);
+    flex-shrink: 0;
+    object-fit: cover;
+    /* Fixed box, so nothing shifts — the fade only removes the snap-in. */
+    opacity: 0;
+    transition: opacity 200ms var(--ease-out);
+  }
+  .channel-logo.img-loaded { opacity: 1; }
+
+  .logo {
+    font-family: var(--sans);
+    font-weight: 800;
+    font-size: 28px;
+    letter-spacing: -0.5px;
+    color: var(--accent);
+    line-height: 1.2;
+    min-width: 0;
+  }
+
+  /* The wordmark line must never break mid-word; the subtitle below it can wrap
+     onto a second line at narrow widths instead of forcing the flex row (and the
+     channel logo it shares with) past the viewport edge — see #64. */
+  .logo > div:first-child {
+    white-space: nowrap;
+  }
+
+  .logo span {
+    /* colored words inherit logo size — no override */
+  }
+
+  .hero-blurb {
+    font-size: 14px;
+    color: var(--text2);
+    line-height: 1.6;
+    margin-top: -12px;
+    margin-bottom: 28px;
+    max-width: 68ch;
+  }
+  .hero-blurb strong { color: var(--text); font-weight: 600; }
+
+  .header-status {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text2);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    padding: 4px 12px;
+    border-radius: 16px;
+    transition: border-color 0.2s;
+  }
+
+  .status-pill:hover {
+    border-color: var(--border2);
+  }
+
+  /* Static, not pulsing: this dot reports a fact ("server answered /version"),
+     it is not live-changing data, so animating it forever is decoration. The
+     colour plus the adjacent version string already carry the state. */
+  .dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--accent3);
+    box-shadow: 0 0 6px rgba(77,208,160,0.5);
+  }
+  .dot.warn { background: var(--accent2); box-shadow: 0 0 6px rgba(239,83,80,0.5); }
+
+  /* #47 — the ffmpeg capability warning. Amber (--accent), not --accent2: a
+     degraded capability is a warning with a remedy, not an error. Non-blocking
+     by construction — it sits in the flow above the blurb, gates nothing, and
+     stays hidden while all three startup probes pass. */
+  .cap-warning {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    background: rgba(232,160,35,0.06);
+    border: 1px solid rgba(232,160,35,0.28);
+    border-left: 3px solid var(--accent);
+    border-radius: var(--radius);
+    padding: 12px 14px;
+    margin-bottom: 18px;
+  }
+  .cap-warning[hidden] { display: none; }
+  .cap-warning-icon {
+    flex: none;
+    width: 16px; height: 16px;
+    margin-top: 2px;
+    color: var(--accent);
+  }
+  .cap-warning-head {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--accent);
+    margin-bottom: 6px;
+  }
+  .cap-warning-list {
+    margin: 0 0 8px;
+    padding-left: 16px;
+    font-size: 13px;
+    color: var(--text2);
+    line-height: 1.6;
+  }
+  .cap-warning-list strong { color: var(--text); font-weight: 600; }
+  /* The "your GPU is fine" line. Body colour, not --accent: it is the one part of
+     this banner that is reassurance rather than warning, and colouring it amber
+     with everything else is what let the whole box read as "NVENC is broken". */
+  .cap-warning-note {
+    font-size: 13px;
+    color: var(--text2);
+    margin: 0 0 8px;
+  }
+  /* Mono, because a filesystem path is instrument data. Long Windows paths must
+     wrap rather than push the page sideways. */
+  .cap-warning-meta {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    line-height: 1.7;
+    overflow-wrap: anywhere;
+  }
+  .cap-warning-meta span { color: var(--text2); }
+
+  /* #54 — interface icons. One class, so every icon is sized off the type ramp
+     (1em) and painted by whatever it sits in. That inheritance is the whole
+     point: the emoji these replaced were colour glyphs from a system font, so
+     `color: var(--accent2)` on a Clear control never reached them. Geometry is
+     Lucide, defined once in the <symbol> sprite at the top of <body>. */
+  .icon {
+    width: 1em;
+    height: 1em;
+    flex: none;
+    vertical-align: -0.125em;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  .icon-sprite { display: none; }
+
+  /* Disclosure arrows are one chevron rotated, not two glyphs swapped: the
+     toggles used to assign textContent, which would wipe an SVG child. State
+     now lives on the container's aria-expanded, which those toggles already
+     maintain, so the arrow follows the thing screen readers are told. */
+  .icon-chevron { transition: transform 0.18s var(--ease-out); }
+  [aria-expanded="true"] .icon-chevron { transform: rotate(90deg); }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 14px;
+    transition: border-color 0.2s ease;
+    animation: fadeUp 0.4s var(--ease-out) both;
+  }
+
+  .card:nth-child(2) { animation-delay: 0.03s; }
+  .card:nth-child(3) { animation-delay: 0.06s; }
+  .card:nth-child(4) { animation-delay: 0.09s; }
+  .card:nth-child(5) { animation-delay: 0.12s; }
+  .card:nth-child(6) { animation-delay: 0.15s; }
+  .card:nth-child(7) { animation-delay: 0.18s; }
+
+  .card:hover {
+    border-color: var(--border2);
+  }
+
+  .card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 20px;
+    background: rgba(255,255,255,0.02);
+    border-bottom: 1px solid var(--border);
+    border-radius: var(--radius) var(--radius) 0 0;
+  }
+
+  .card-title {
+    font-family: var(--sans);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text2);
+    letter-spacing: 0.5px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .card-num {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--accent);
+    background: rgba(232,160,35,0.1);
+    border: 1px solid rgba(232,160,35,0.2);
+    padding: 2px 8px;
+    border-radius: 4px;
+    letter-spacing: 0.5px;
+  }
+
+  .card-body { padding: 20px; }
+
+  .input-group { display: flex; gap: 8px; }
+  /* An input's auto minimum is its ~20ch intrinsic width, so flex:1 alone can't
+     shrink it and the row's button gets pushed off the card on a phone. */
+  .input-group input { min-width: 0; }
+
+  input[type="url"], input[type="text"] {
+    flex: 1;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 13px;
+    padding: 11px 14px;
+    border-radius: var(--radius-sm);
+    outline: none;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+
+  input[type="url"]:focus, input[type="text"]:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(232,160,35,0.15);
+  }
+  input[type="file"] { display: none; }
+
+  .btn {
+    font-family: var(--sans);
+    font-weight: 600;
+    font-size: 13px;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    border: none;
+    cursor: pointer;
+    padding: 11px 22px;
+    border-radius: var(--radius-sm);
+    transition: background-color 0.15s ease, border-color 0.15s ease,
+                color 0.15s ease, box-shadow 0.15s ease,
+                transform 0.15s var(--ease-out);
+    white-space: nowrap;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .btn::after { display: none; }
+
+  /* Dark-on-colour throughout: #fff on --accent2 is only 3.5:1, #111 is 5.4:1
+     and matches how the primary/success buttons already treat their fills. */
+  .btn-primary { background: var(--accent); color: #111; }
+  .btn-primary:hover { background: #f0b429; }
+  .btn-success { background: var(--accent3); color: #111; }
+  .btn-danger { background: var(--accent2); color: #111; }
+  .btn-outline { background: transparent; color: var(--text2); border: 1px solid var(--border2); }
+  .btn-outline:hover { border-color: var(--accent); color: var(--accent); }
+  .btn:disabled { opacity: 0.3; cursor: not-allowed; transform: none !important; box-shadow: none !important; }
+  .btn-sm { padding: 7px 14px; font-size: 11px; }
+  .btn:active:not(:disabled) { transform: scale(0.98); }
+
+  /* Hover *motion* only where there is a real pointer — touch fires hover on
+     tap, so an ungated lift sticks after the finger lifts. */
+  @media (hover: hover) and (pointer: fine) {
+    .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(232,160,35,0.25); }
+    .btn-success:hover { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(77,208,160,0.25); }
+    .btn-danger:hover  { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(239,83,80,0.25); }
+    .btn-outline:hover { transform: translateY(-1px); }
+    .preset-card:hover { transform: translateY(-1px); }
+    .thumb:hover { transform: scale(1.03); }
+  }
+
+  /* Every focusable control gets one visible ring. The inputs below replace the
+     UA outline with their own; everything else uses this. */
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 3px;
+  }
+
+  .cookies-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+
+  .cookies-paste-row { margin-top: 14px; padding-top: 14px; border-top: 1px dashed var(--border); }
+  .cookies-paste-row textarea {
+    width: 100%;
+    min-height: 70px;
+    box-sizing: border-box;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 10px 12px;
+    resize: vertical;
+  }
+  .cookies-paste-row textarea:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(232,160,35,0.15);
+  }
+  .cookies-paste-actions { display: flex; align-items: center; gap: 12px; margin-top: 8px; flex-wrap: wrap; }
+  .cookies-paste-hint { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+
+  .badge {
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: 14px;
+  }
+  .badge-ok { background: rgba(77,208,160,0.12); color: var(--accent3); border: 1px solid rgba(77,208,160,0.25); }
+  .badge-warn { background: rgba(239,83,80,0.1); color: var(--accent2); border: 1px solid rgba(239,83,80,0.2); }
+
+  .video-info {
+    display: none;
+    gap: 18px;
+    margin-top: 18px;
+    padding-top: 18px;
+    border-top: 1px solid var(--border);
+  }
+  /* After a 1-3s fetch this block lands all at once — thumbnail, title, two
+     format dropdowns and up to 50 playlist rows — and shoves the page down.
+     Same fadeUp idiom as .failure-panel so the arrival reads as an arrival.
+     fetchInfo() restarts it explicitly on a second fetch (see the comment
+     there): the class is already on by then, so CSS alone would not replay. */
+  .video-info.visible { display: flex; animation: fadeUp 0.3s var(--ease-out) both; }
+
+  .thumb {
+    width: 190px;
+    flex-shrink: 0;
+    /* Without this the flex row stretches the thumbnail to the meta column's
+       height and object-fit:cover crops it into a tall sliver. */
+    align-self: flex-start;
+    aspect-ratio: 16/9;
+    object-fit: cover;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    /* Space is already reserved by aspect-ratio, so the only thing to fix is
+       the pop: hold at 0 until the bytes arrive, then fade. */
+    opacity: 0;
+    transition: transform 0.2s var(--ease-out), opacity 200ms var(--ease-out);
+  }
+  .thumb.img-loaded { opacity: 1; }
+
+  .video-meta { flex: 1; min-width: 0; }
+  /* On a phone, side by side leaves the meta column ~150px — the stream
+     dropdowns collapse to a bare "[". Stack the thumbnail above instead. */
+  @media (max-width: 520px) {
+    .video-info.visible { flex-direction: column; }
+    .thumb { width: 100%; }
+  }
+
+  .video-title {
+    font-family: var(--sans);
+    font-size: 17px;
+    font-weight: 700;
+    line-height: 1.3;
+    color: var(--text);
+    margin-bottom: 6px;
+  }
+
+  .meta-line { font-size: 13px; color: var(--text2); margin-bottom: 3px; }
+
+  .format-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+    margin-top: 16px;
+  }
+
+  .field { display: flex; flex-direction: column; gap: 5px; }
+  /* A grid track's auto minimum is its content's intrinsic width, which for a
+     text input is ~20ch — enough to push the second column off the card. */
+  .format-row > .field { min-width: 0; }
+  .format-row input[type="text"] { width: 100%; min-width: 0; }
+  /* #76 — the hint spans both From/To columns and sits tight under them. */
+  .section-hint { grid-column: 1 / -1; margin-top: -6px; }
+  /* Job-queue row. Its tune <select> must not inherit the global width:100%,
+     or it eats the row and the title (the only flexible item) renders at zero
+     width — at every viewport, not just a phone. */
+  .queue-row {
+    display: flex; align-items: center; gap: 6px;
+    padding: 5px 10px; border-bottom: 1px solid var(--border);
+  }
+  .queue-title { flex: 1 1 0; min-width: 6em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .queue-detail { flex-shrink: 0; margin: 0 6px; color: var(--muted); font-size: 11px; }
+  .queue-range { color: var(--accent); }
+  .queue-row select { width: auto; flex-shrink: 0; font-size: 11px; padding: 4px 26px 4px 8px; background-position: right 8px center; }
+  .queue-row .queue-dir {   /* two classes, to outrank input[type="text"] */
+    flex: 0 0 120px; width: 120px;
+    background: var(--surface2); border: 1px solid var(--border); color: var(--text);
+    font-family: var(--mono); font-size: 11px; padding: 4px 6px;
+    border-radius: var(--radius-sm); outline: none;
+  }
+  .queue-row .queue-dir:focus { border-color: var(--accent); box-shadow: none; }
+  .queue-remove { color: var(--accent2); cursor: pointer; flex-shrink: 0; }
+  /* On a phone the fixed-width controls still leave the title too little room:
+     give it its own line and let the rest wrap beneath. */
+  @media (max-width: 520px) {
+    .queue-row { flex-wrap: wrap; row-gap: 6px; }
+    /* Title and its remove control share the first line; the rest wraps. */
+    .queue-title { order: -2; flex-basis: calc(100% - 2em); }
+    .queue-remove { order: -1; margin-left: auto; }
+    .queue-detail { flex-basis: 100%; margin-left: 0; }
+    .queue-row .queue-dir { flex: 1 1 0; width: auto; min-width: 0; }
+  }
+
+  .field-label {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 1.5px;
+    color: var(--muted);
+    text-transform: uppercase;
+  }
+
+  select {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 12px;
+    padding: 9px 30px 9px 12px;
+    border-radius: var(--radius-sm);
+    outline: none;
+    cursor: pointer;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%238e8b9b'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    width: 100%;
+    transition: border-color 0.2s, box-shadow 0.2s;
+  }
+  select:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(232,160,35,0.15); }
+  select:hover { border-color: var(--border2); }
+
+  /* Preset cards */
+  .preset-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+
+  .preset-card {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    padding: 14px 16px;
+    cursor: pointer;
+    transition: border-color 0.2s ease, background-color 0.2s ease,
+                box-shadow 0.2s ease, transform 120ms var(--ease-out);
+    display: block;
+    position: relative;
+    border-radius: var(--radius-sm);
+  }
+
+  .preset-card:hover { border-color: var(--border2); }
+  /* Same press acknowledgement .btn already has. Cards take 0.98; the
+     full-width rows below take 0.995, because the same ratio on a 900px row
+     reads as a lurch rather than a press. */
+  .preset-card:active { transform: scale(0.98); }
+  .preset-card.selected { border-color: var(--accent); background: rgba(232,160,35,0.06); box-shadow: 0 0 0 1px var(--accent); }
+  .preset-card input[type="radio"] { position: absolute; opacity: 0; width: 0; height: 0; }
+
+  .preset-name {
+    font-family: var(--sans);
+    font-weight: 700;
+    font-size: 15px;
+    color: var(--text);
+    margin-bottom: 4px;
+  }
+  .preset-card.selected .preset-name { color: var(--accent); }
+
+  .preset-desc { font-size: 13px; color: var(--text2); line-height: 1.5; margin-bottom: 8px; }
+
+  .preset-tags { display: flex; gap: 6px; flex-wrap: wrap; }
+
+  .preset-tag {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    background: var(--surface);
+    padding: 3px 8px;
+    border-radius: 4px;
+  }
+  .preset-card.selected .preset-tag { background: rgba(232,160,35,0.1); color: var(--accent); }
+
+  /* Advanced */
+  .advanced-toggle {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 12px;
+    user-select: none;
+  }
+  .advanced-toggle:hover { color: var(--text2); }
+
+  .advanced-section { display: none; }
+  .advanced-section.open { display: block; }
+
+  .adv-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    padding: 14px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    margin-bottom: 12px;
+  }
+
+  /* The five encode controls (#51). The layout decision lives here once, not as
+     an inline grid-template-columns on the instance: three columns at full width
+     (CQ / bitrate / speed, then tune / pixel format / reset), two when the card
+     narrows, one on a phone so the panel never scrolls sideways. */
+  .adv-grid-encode { grid-template-columns: repeat(3, 1fr); }
+  @media (max-width: 760px) { .adv-grid-encode { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 520px) { .adv-grid-encode { grid-template-columns: 1fr; } }
+
+  /* Persistent hint under every control, stating range / default / consequence.
+     Deliberately not title=: a tooltip is invisible to the keyboard and to
+     touch, and on this surface the numbers are the point. 11px is the
+     documented functional-text floor; --muted on --surface2 is 4.6:1. */
+  .field-hint {
+    font-family: var(--mono);
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--muted);
+  }
+  /* Same line raised to a warning. --accent2 on --surface2 measures only 4.34:1,
+     so the warning is recessed onto --bg instead, where the same token reads at
+     5.35:1 — the token stays, the contrast floor holds, and no waiver is spent.
+     A tinted line with a rule down its edge, not a nested card. */
+  .field-warn {
+    font-family: var(--mono);
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--accent2);
+    background: var(--bg);
+    border-left: 2px solid var(--accent2);
+    padding: 6px 8px;
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  }
+  /* The reset control shares a grid cell with the fields, so it hugs its own
+     width instead of stretching to the column. */
+  .adv-reset-btn { align-self: start; }
+
+  .adv-note { font-size: 13px; color: var(--muted); margin-bottom: 14px; }
+
+  /* Toggle */
+  .toggle-row { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+
+  .toggle { position: relative; width: 42px; height: 24px; flex-shrink: 0; }
+  .toggle input { opacity: 0; width: 0; height: 0; }
+
+  .slider {
+    position: absolute; inset: 0;
+    background: var(--border2);
+    cursor: pointer; transition: background-color 0.25s ease; border-radius: 12px;
+  }
+  .slider:before {
+    content: '';
+    position: absolute;
+    height: 18px; width: 18px;
+    left: 3px; bottom: 3px;
+    background: var(--surface);
+    transition: transform 0.25s var(--ease-out), background-color 0.25s ease;
+    border-radius: 50%;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+  }
+  input:checked + .slider { background: var(--accent); }
+  input:checked + .slider:before { transform: translateX(18px); background: #111; }
+
+  .toggle-label { font-size: 14px; color: var(--text2); }
+
+  /* Progress */
+  .progress-section { display: none; margin-bottom: 16px; }
+  /* Revealed once per page load, when Start is pressed — .visible is never
+     removed again, so this deliberately plays a single time. */
+  .progress-section.visible { display: block; animation: fadeUp 0.25s var(--ease-out) both; }
+
+  /* Charts */
+  .chart-panel {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 10px 6px;
+    min-width: 0;
+  }
+  .chart-lbl {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 1.5px;
+    color: var(--muted);
+    text-transform: uppercase;
+    margin-bottom: 4px;
+  }
+
+  /* F1: Phase row + indicator dot */
+  .phase-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+    border-radius: 4px;
+  }
+  .phase-dot {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: var(--muted);
+    transition: background 0.3s ease, box-shadow 0.3s ease;
+  }
+  /* Each glow matches its own dot. These previously carried leftover teal/
+     purple/pink values from a retired palette, so an amber dot glowed violet. */
+  .phase-dot.idle        { background: var(--muted);   box-shadow: none; animation: none; }
+  .phase-dot.downloading { background: var(--accent3); box-shadow: 0 0 8px rgba(77,208,160,0.6); animation: phasePulse 1.5s ease infinite; }
+  .phase-dot.converting  { background: var(--accent);  box-shadow: 0 0 8px rgba(232,160,35,0.6); animation: phasePulse 1.5s ease infinite; }
+  .phase-dot.done        { background: #68d391;        box-shadow: 0 0 8px rgba(104,211,145,0.6); animation: none; }
+  .phase-dot.error       { background: var(--accent2); box-shadow: 0 0 8px rgba(239,83,80,0.5); animation: none; }
+  @keyframes phasePulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.5; transform: scale(0.8); }
+  }
+
+  .phase-label {
+    font-family: var(--sans);
+    font-weight: 700;
+    font-size: 15px;
+    letter-spacing: 0;
+    color: var(--accent);
+    margin-bottom: 0;
+    transition: color 0.3s ease;
+  }
+  .phase-file {
+    font-size: 12px;
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-bottom: 10px;
+    max-width: 100%;
+  }
+
+  /* F3: Phase transition animation */
+  @keyframes phaseFlash {
+    0% { opacity: 0.3; transform: translateX(12px); }
+    100% { opacity: 1; transform: translateX(0); }
+  }
+  .phase-label.transitioning { animation: phaseFlash 0.35s ease-out; }
+  @keyframes phaseGlow {
+    0% { box-shadow: inset 0 0 0 1px rgba(232,160,35,0.3); }
+    100% { box-shadow: inset 0 0 0 1px transparent; }
+  }
+  .phase-row.glow { animation: phaseGlow 0.6s ease-out; }
+
+  .bar-bg {
+    height: 8px;
+    background: var(--surface2);
+    margin-bottom: 10px;
+    overflow: hidden;
+    border-radius: 4px;
+  }
+
+  .bar-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #d4891a, var(--accent), #f0c050);
+    background-size: 200% 100%;
+    animation: shimmer 2.5s ease infinite;
+    width: 0%;
+    transition: width 0.4s ease, background 0.6s ease, box-shadow 0.6s ease;
+    border-radius: 4px;
+    box-shadow: 0 0 10px rgba(232,160,35,0.35);
+  }
+
+  /* F4: Phase-aware bar colors. The converting ramp used to run
+     #6c4ce0 → amber → #b794f4, i.e. violet into the accent and back out —
+     a leftover from a retired purple palette. Every ramp now stays in the
+     hue of the accent it represents. */
+  .bar-fill.phase-downloading {
+    background: linear-gradient(90deg, #2a9d8f, var(--accent3), #6ee7c0);
+    background-size: 200% 100%;
+    box-shadow: 0 0 10px rgba(77,208,160,0.35);
+  }
+  .bar-fill.phase-converting {
+    background: linear-gradient(90deg, #d4891a, var(--accent), #f0c050);
+    background-size: 200% 100%;
+    box-shadow: 0 0 10px rgba(232,160,35,0.35);
+  }
+  .bar-fill.phase-done {
+    background: linear-gradient(90deg, #48bb78, #68d391, #9ae6b4);
+    background-size: 200% 100%;
+    box-shadow: 0 0 12px rgba(104,211,145,0.4);
+  }
+  .bar-fill.phase-error {
+    background: linear-gradient(90deg, #c53030, var(--accent2), #fc8181);
+    background-size: 200% 100%;
+    box-shadow: 0 0 10px rgba(239,83,80,0.35);
+  }
+
+  @keyframes shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+  }
+
+  .bar-indeterminate .bar-fill {
+    width: 30% !important;
+    animation: slide 1.5s infinite ease-in-out, shimmer 2.5s ease infinite;
+  }
+
+  @keyframes slide { 0%{transform:translateX(-200%)} 100%{transform:translateX(500%)} }
+
+  /* F2: Encode settings pills */
+  .encode-pill {
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: 14px;
+    background: rgba(124,92,252,0.08);
+    color: var(--accent);
+    border: 1px solid rgba(124,92,252,0.18);
+    animation: pillFadeIn 0.4s ease both;
+    white-space: nowrap;
+  }
+  .encode-pill .pill-key { color: var(--muted); margin-right: 3px; }
+  .encode-pill:nth-child(2) { animation-delay: 0.05s; }
+  .encode-pill:nth-child(3) { animation-delay: 0.1s; }
+  .encode-pill:nth-child(4) { animation-delay: 0.15s; }
+  .encode-pill:nth-child(5) { animation-delay: 0.2s; }
+  @keyframes pillFadeIn {
+    from { opacity: 0; transform: translateY(4px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  /* F5: Celebration */
+  @keyframes celebrationRise {
+    0%   { opacity: 1; transform: translateY(0) translateX(0) scale(1); }
+    100% { opacity: 0; transform: translateY(-60px) translateX(var(--drift, 0px)) scale(0.3); }
+  }
+  .confetti-particle {
+    position: absolute;
+    width: 5px; height: 5px;
+    border-radius: 50%;
+    animation: celebrationRise 1.4s ease-out forwards;
+    pointer-events: none;
+  }
+  /* Success green, not the retired violet, and no rainbow: hue-rotating the
+     bar threw away the phase colour that had just finished earning its meaning
+     (and animating `filter` is off the GPU). A brightness lift reads as
+     "finished" without repainting the semantics. */
+  @keyframes cardGlow {
+    0%  { box-shadow: 0 0 0 0 rgba(104,211,145,0); }
+    30% { box-shadow: 0 0 24px 4px rgba(104,211,145,0.3); }
+    100%{ box-shadow: 0 0 0 0 rgba(104,211,145,0); }
+  }
+  .card.celebrating { animation: cardGlow 1.5s ease-out; }
+  .bar-fill.celebrating { animation: shimmer 2.5s ease infinite; }
+
+  .progress-stats {
+    display: flex; gap: 24px;
+    font-size: 13px; color: var(--text2);
+    margin-bottom: 16px; flex-wrap: wrap;
+  }
+  .progress-stats strong { color: var(--text); font-weight: 600; }
+
+  /* Live size tracker */
+  .size-tracker {
+    display: none;
+    margin-top: 2px;
+    margin-bottom: 10px;
+    padding: 8px 12px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 12px;
+    color: var(--text2);
+  }
+  /* The one reveal the user did not ask for: it appears mid-encode and pushes
+     the log box down while they are reading numbers. resetSizeTracker() drops
+     .visible between videos, which takes the animation (and its `both` fill)
+     with it — so nothing is stranded visible, and it replays per video. */
+  .size-tracker.visible { display: block; animation: fadeUp 0.25s var(--ease-out) both; }
+  .size-tracker-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 6px;
+  }
+  .size-tracker-label {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .size-tracker-pct {
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 700;
+    transition: color 0.3s ease;
+  }
+  /* overflow must stay visible: .size-tracker-mark is deliberately taller than
+     the bar (top/bottom: -2px) so the 1:1 reference line reads as a tick above
+     and below it. Clipping here silently flattened it into the track. */
+  .size-tracker-bar {
+    height: 6px;
+    background: var(--bg);
+    border-radius: 3px;
+    overflow: visible;
+    position: relative;
+    margin-bottom: 5px;
+  }
+  .size-tracker-fill {
+    height: 100%;
+    border-radius: 3px;
+    transition: width 0.5s ease, background 0.5s ease;
+    width: 0%;
+  }
+  .size-tracker-mark {
+    position: absolute;
+    top: -2px;
+    bottom: -2px;
+    width: 2px;
+    background: var(--text);
+    border-radius: 1px;
+    opacity: 0.4;
+  }
+  .size-tracker-values {
+    display: flex;
+    justify-content: space-between;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .st-green  { color: #48bb78; }
+  .st-teal   { color: #38b2ac; }
+  .st-orange { color: #ed8936; }
+  .st-red    { color: #f56565; }  /* #e53e3e was 3.7:1 on --surface2 */
+  .st-fill-green  { background: linear-gradient(90deg, #48bb78, #68d391); }
+  .st-fill-teal   { background: linear-gradient(90deg, #38b2ac, #4ecdc4); }
+  .st-fill-orange { background: linear-gradient(90deg, #ed8936, #f6ad55); }
+  .st-fill-red    { background: linear-gradient(90deg, #e53e3e, #fc8181); }
+
+  .log-box {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text2);
+    padding: 12px 14px;
+    min-height: 150px;
+    max-height: 320px;
+    resize: vertical;
+    overflow-y: auto;
+    line-height: 1.8;
+  }
+  .log-error { color: var(--accent2); font-weight: 500; }
+  .log-done { color: var(--accent3); font-weight: 500; }
+  .log-info { color: var(--accent4); }
+
+  .action-row {
+    display: flex; gap: 12px;
+    align-items: center; margin-top: 18px; flex-wrap: wrap;
+  }
+
+  .shutdown-row {
+    display: flex; align-items: center; gap: 10px;
+    margin-top: 10px; padding: 10px 14px;
+    background: rgba(239,83,80,0.05);
+    border: 1px solid rgba(239,83,80,0.12);
+    border-radius: var(--radius-sm);
+  }
+  .shutdown-row input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent2); cursor: pointer; }
+  .shutdown-row label { font-size: 13px; color: var(--text2); cursor: pointer; }
+
+  .idle-msg { font-size: 14px; color: var(--muted); margin-bottom: 14px; }
+
+  .hidden { display: none !important; }
+
+  .update-log { font-family: var(--mono); font-size: 13px; color: var(--text2); margin-top: 8px; min-height: 20px; }
+
+  ::-webkit-scrollbar { width: 5px; }
+  ::-webkit-scrollbar-track { background: var(--bg); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+
+  .history-panel { margin-top: 10px; }
+
+  .history-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 1.5px;
+    color: var(--muted);
+    text-transform: uppercase;
+    margin-bottom: 8px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .history-header:hover { color: var(--text2); }
+
+  .history-header-right { display: flex; align-items: center; gap: 12px; }
+
+  .history-clear {
+    font-size: 11px;
+    color: var(--accent2);
+    cursor: pointer;
+    letter-spacing: 1px;
+  }
+  .history-clear:hover { color: #f77; }
+
+  .history-list {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    max-height: 220px;
+    overflow-y: auto;
+  }
+
+  .history-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    transition: background-color 0.1s ease, transform 120ms var(--ease-out);
+  }
+  .history-item:last-child { border-bottom: none; }
+  .history-item:hover { background: rgba(232,160,35,0.05); }
+  .history-item:active { transform: scale(0.995); }
+
+  /* The span-shaped buttons (select all / invert / dismiss / "use this") get
+     the same press acknowledgement as .btn. .hold-confirm is excluded on
+     purpose: those two spans already report the press through their fill, and
+     a competing scale would read as a second, contradictory signal. */
+  span[role="button"]:not(.hold-confirm) {
+    display: inline-block;
+    transition: transform 120ms var(--ease-out);
+  }
+  span[role="button"]:not(.hold-confirm):active { transform: scale(0.98); }
+
+  .history-thumb {
+    width: 56px;
+    height: 32px;
+    object-fit: cover;
+    flex-shrink: 0;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+  }
+  .history-thumb-blank {
+    width: 56px;
+    height: 32px;
+    background: var(--border);
+    flex-shrink: 0;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+  }
+
+  .history-meta { flex: 1; min-width: 0; }
+
+  .history-title {
+    font-size: 13px;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-bottom: 2px;
+  }
+
+  .history-sub {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+  }
+
+  /* Shutdown countdown overlay */
+  .shutdown-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: var(--z-overlay);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(10,11,15,0.82);
+    backdrop-filter: blur(3px);
+    animation: fadeUp 0.25s var(--ease-out) both;
+  }
+  /* Exit along the entry path, but faster out (180ms) than in (250ms): the
+     user has decided, the system is only acknowledging. `animation: none` is
+     required — the entry animation's `both` fill would otherwise pin opacity
+     and transform and the transition would never move. */
+  .shutdown-overlay.closing {
+    animation: none;
+    opacity: 0;
+    transform: translateY(8px);
+    transition: opacity 180ms var(--ease-out), transform 180ms var(--ease-out);
+  }
+  .shutdown-overlay-card {
+    background: var(--surface);
+    border: 1px solid rgba(239,83,80,0.4);
+    border-radius: var(--radius);
+    box-shadow: 0 12px 48px rgba(0,0,0,0.5), 0 0 0 1px rgba(239,83,80,0.15);
+    padding: 32px 40px;
+    text-align: center;
+    max-width: 440px;
+    width: 90%;
+  }
+  .shutdown-overlay-title {
+    font-family: var(--sans);
+    font-weight: 800;
+    font-size: 20px;
+    color: var(--accent2);
+    margin-bottom: 6px;
+    letter-spacing: -0.3px;
+  }
+  .shutdown-overlay-count {
+    font-family: var(--mono);
+    font-weight: 700;
+    font-size: 42px;
+    color: var(--text);
+    margin: 10px 0 6px;
+    letter-spacing: 1px;
+  }
+  .shutdown-overlay-sub {
+    font-size: 13px;
+    color: var(--text2);
+    margin-bottom: 22px;
+  }
+  .shutdown-overlay-card .btn { width: 100%; padding: 15px 22px; font-size: 15px; }
+
+  /* Failure summary panel (sticky above progress) */
+  .failure-panel {
+    position: sticky;
+    top: 8px;
+    z-index: var(--z-sticky);
+    display: none;
+    background: var(--surface);
+    border: 1px solid var(--accent2);
+    border-radius: var(--radius);
+    margin-bottom: 14px;
+    box-shadow: 0 4px 16px rgba(239,83,80,0.12);
+    animation: fadeUp 0.3s var(--ease-out) both;
+  }
+  .failure-panel.visible { display: block; }
+  .failure-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .failure-panel-title {
+    font-family: var(--sans);
+    font-weight: 700;
+    font-size: 14px;
+    color: var(--accent2);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .failure-panel-dismiss {
+    font-family: var(--mono);
+    font-size: 16px;
+    line-height: 1;
+    color: var(--text2);
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 4px;
+    user-select: none;
+  }
+  .failure-panel-dismiss:hover { color: var(--accent2); background: rgba(239,83,80,0.08); }
+  .failure-panel-list {
+    list-style: none;
+    margin: 0;
+    padding: 6px 0;
+    max-height: 220px;
+    overflow-y: auto;
+  }
+  .failure-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 7px 16px;
+    font-size: 13px;
+    border-bottom: 1px solid var(--border);
+  }
+  .failure-item:last-child { border-bottom: none; }
+  .failure-item-icon { flex-shrink: 0; font-size: 13px; line-height: 1.5; }
+  .failure-item.transient .failure-item-icon { color: #f6ad55; }
+  .failure-item.permanent .failure-item-icon { color: var(--accent2); }
+  .failure-item-body { flex: 1; min-width: 0; }
+  .failure-item-title {
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .failure-item-reason {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text2);
+    margin-top: 2px;
+  }
+  .failure-item.transient .failure-item-cat { color: #f6ad55; }
+  .failure-item.permanent .failure-item-cat { color: var(--accent2); }
+  .failure-item-cat {
+    font-family: var(--mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    font-weight: 700;
+  }
+
+  /* Captured-cookies confirmation state */
+  .cookies-paste-row textarea.captured {
+    border-color: var(--accent3) !important;
+    background: rgba(77,208,160,0.06);
+    color: var(--accent3);
+    font-weight: 700;
+  }
+  .cookies-method-header {
+    font-size: 12px;
+    color: var(--text2);
+    margin-bottom: 12px;
+    line-height: 1.5;
+  }
+
+  /* ---------------------------------------------------------------------------
+     Hold-to-confirm. Two clears here are destructive and not undoable: one
+     wipes the server's history, the other throws away a hand-picked queue.
+     Both used to fire on a single click of an 11px span. Now the pointer path
+     needs a sustained 700ms press, and the fill is the progress report for it,
+     which is why it survives reduced motion below. Release early and the fill
+     snaps back in 200ms: slow while you are deciding, fast once you let go.
+     The keyboard path cannot hold, so it arms instead and takes a second
+     Enter/Space to fire.
+     --------------------------------------------------------------------------- */
+  .hold-confirm {
+    position: relative;
+    display: inline-block;
+    padding: 2px 6px;
+    border-radius: 4px;
+    overflow: hidden;
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  .hold-confirm-fill {
+    position: absolute;
+    inset: 0;
+    background: var(--accent2);
+    opacity: 0.32;
+    clip-path: inset(0 100% 0 0);
+    transition: clip-path 200ms var(--ease-out);
+    pointer-events: none;
+  }
+  .hold-confirm.holding .hold-confirm-fill,
+  .hold-confirm.armed .hold-confirm-fill { clip-path: inset(0); }
+  .hold-confirm.holding .hold-confirm-fill { transition: clip-path 700ms linear; }
+  .hold-confirm-label { position: relative; }
+  .hold-confirm.armed { box-shadow: inset 0 0 0 1px var(--accent2); }
+
+  /* ---------------------------------------------------------------------------
+     Reduced motion. Deliberately "gentler", not "off": the fades, colour
+     changes and progress-bar widths carry information about a long-running job
+     and are kept. What goes is movement for its own sake — travel, scaling,
+     the confetti, the shimmer, and the indeterminate bar's sideways loop.
+     The indeterminate bar still has to say "working", so it breathes on
+     opacity instead of sliding.
+     --------------------------------------------------------------------------- */
+  @media (prefers-reduced-motion: reduce) {
+    @keyframes fadeUp          { from { opacity: 0; } to { opacity: 1; } }
+    @keyframes phaseFlash      { from { opacity: 0.3; } to { opacity: 1; } }
+    @keyframes phasePulse      { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+    @keyframes softBreathe     { 0%, 100% { opacity: 0.45; } 50% { opacity: 1; } }
+
+    /* purely decorative — nothing is lost by dropping these outright */
+    .bar-fill,
+    .bar-fill.celebrating,
+    .card.celebrating { animation: none; }
+    .confetti-particle { display: none; }
+
+    /* the one indeterminate state that must keep signalling activity */
+    .bar-indeterminate .bar-fill {
+      animation: softBreathe 1.8s ease-in-out infinite;
+      transform: none;
+      width: 100%;
+    }
+
+    /* strip hover/press travel, keep the colour feedback */
+    .btn:hover, .btn-primary:hover, .btn-success:hover,
+    .btn-danger:hover, .btn-outline:hover,
+    .preset-card:hover, .thumb:hover,
+    .btn:active:not(:disabled),
+    .preset-card:active, .history-item:active,
+    span[role="button"]:not(.hold-confirm):active,
+    .shutdown-overlay.closing { transform: none; }
+
+    /* stagger exists only to sequence movement */
+    .card, .encode-pill { animation-delay: 0s !important; }
+
+    /* The hold-to-confirm fill is not decoration: it is the only readout of
+       how far through the 700ms press you are, and of the 200ms snap back on
+       release. Re-asserted here so it reads as a deliberate exemption rather
+       than something this block forgot about. */
+    .hold-confirm-fill { transition: clip-path 200ms var(--ease-out); }
+    .hold-confirm.holding .hold-confirm-fill { transition: clip-path 700ms linear; }
+
+    /* The chevron still turns — the open/closed state is the message — it just
+       stops travelling there. */
+    .icon-chevron { transition: none; }
+  }
