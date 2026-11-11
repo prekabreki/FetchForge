@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from fetchforge import server
+from fetchforge import server, ytdlp
 
 
 class TestUpdateTargetDetection(unittest.TestCase):
@@ -17,12 +17,12 @@ class TestUpdateTargetDetection(unittest.TestCase):
 
     def test_venv_ytdlp_is_updatable(self):
         p = str(Path(sys.prefix) / "bin" / "yt-dlp")
-        self.assertTrue(server._ytdlp_in_this_env([p]))
+        self.assertTrue(ytdlp._ytdlp_in_this_env([p]))
 
     def test_module_invocation_is_updatable(self):
         # `python -m yt_dlp` runs out of this interpreter by construction, so
         # /update-ytdlp must pick the pip path, not the "can't update it" message.
-        self.assertTrue(server._ytdlp_in_this_env([sys.executable, "-m", "yt_dlp"]))
+        self.assertTrue(ytdlp._ytdlp_in_this_env([sys.executable, "-m", "yt_dlp"]))
 
     def test_system_ytdlp_not_in_env(self):
         # /usr/bin is outside a venv sys.prefix (the case that must fall through
@@ -30,7 +30,7 @@ class TestUpdateTargetDetection(unittest.TestCase):
         for root in (sys.prefix, site.getuserbase()):
             if Path("/usr/bin").resolve().is_relative_to(Path(root).resolve()):
                 self.skipTest("running under a system interpreter (prefix == /usr)")
-        self.assertFalse(server._ytdlp_in_this_env(["/usr/bin/yt-dlp"]))
+        self.assertFalse(ytdlp._ytdlp_in_this_env(["/usr/bin/yt-dlp"]))
 
 
 class TestYtdlpArgvResolution(unittest.TestCase):
@@ -39,25 +39,25 @@ class TestYtdlpArgvResolution(unittest.TestCase):
     every yt-dlp call site 500'd even though the module was importable."""
 
     def setUp(self):
-        server.get_ytdlp_argv.cache_clear()
-        self.addCleanup(server.get_ytdlp_argv.cache_clear)
+        ytdlp.get_ytdlp_argv.cache_clear()
+        self.addCleanup(ytdlp.get_ytdlp_argv.cache_clear)
 
     def test_falls_back_to_module_when_no_console_script(self):
         with mock.patch("shutil.which", return_value=None), \
-             mock.patch.object(server, "IS_WINDOWS", False), \
-             mock.patch.object(server, "sys") as fake_sys:
+             mock.patch.object(ytdlp, "IS_WINDOWS", False), \
+             mock.patch.object(ytdlp, "sys") as fake_sys:
             fake_sys.prefix = "/nonexistent-prefix"
             fake_sys.executable = "/usr/bin/python3"
-            self.assertEqual(server.get_ytdlp_argv(),
+            self.assertEqual(ytdlp.get_ytdlp_argv(),
                              ["/usr/bin/python3", "-m", "yt_dlp"])
 
     def test_console_script_on_path_is_fallback_only(self):
         with mock.patch("shutil.which", return_value="/venv/bin/yt-dlp"), \
              mock.patch("importlib.util.find_spec", return_value=None), \
-             mock.patch.object(server, "IS_WINDOWS", False), \
-             mock.patch.object(server, "sys") as fake_sys:
+             mock.patch.object(ytdlp, "IS_WINDOWS", False), \
+             mock.patch.object(ytdlp, "sys") as fake_sys:
             fake_sys.prefix = "/nonexistent-prefix"
-            self.assertEqual(server.get_ytdlp_argv(), ["/venv/bin/yt-dlp"])
+            self.assertEqual(ytdlp.get_ytdlp_argv(), ["/venv/bin/yt-dlp"])
 
     def test_venv_copy_wins_over_path(self):
         with tempfile.TemporaryDirectory() as td:
@@ -72,20 +72,20 @@ class TestYtdlpArgvResolution(unittest.TestCase):
             venv_ytdlp.chmod(0o755)
             path_ytdlp.chmod(0o755)
             with mock.patch.dict(os.environ, {"PATH": str(pathbin)}), \
-                 mock.patch.object(server, "IS_WINDOWS", False), \
-                 mock.patch.object(server, "sys") as fake_sys:
+                 mock.patch.object(ytdlp, "IS_WINDOWS", False), \
+                 mock.patch.object(ytdlp, "sys") as fake_sys:
                 fake_sys.prefix = str(prefix)
                 self.assertEqual(shutil.which("yt-dlp"), str(path_ytdlp))
-                self.assertEqual(server.get_ytdlp_argv(), [str(venv_ytdlp)])
+                self.assertEqual(ytdlp.get_ytdlp_argv(), [str(venv_ytdlp)])
 
     def test_raises_only_when_module_is_absent_too(self):
         with mock.patch("shutil.which", return_value=None), \
-             mock.patch.object(server, "IS_WINDOWS", False), \
+             mock.patch.object(ytdlp, "IS_WINDOWS", False), \
              mock.patch("importlib.util.find_spec", return_value=None), \
-             mock.patch.object(server, "sys") as fake_sys:
+             mock.patch.object(ytdlp, "sys") as fake_sys:
             fake_sys.prefix = "/nonexistent-prefix"
             with self.assertRaises(RuntimeError):
-                server.get_ytdlp_argv()
+                ytdlp.get_ytdlp_argv()
 
 
 class TestUpdateYtdlpBranches(unittest.TestCase):
@@ -102,9 +102,9 @@ class TestUpdateYtdlpBranches(unittest.TestCase):
 
     def _run(self, proc, find_spec_return, which_return=None):
         spawn = mock.AsyncMock(return_value=proc)
-        with mock.patch.object(server, "get_ytdlp_argv", return_value=["/venv/bin/yt-dlp"]), \
-             mock.patch.object(server, "_ytdlp_in_this_env", return_value=True), \
-             mock.patch.object(server, "IS_WINDOWS", False), \
+        with mock.patch.object(ytdlp, "get_ytdlp_argv", return_value=["/venv/bin/yt-dlp"]), \
+             mock.patch.object(ytdlp, "_ytdlp_in_this_env", return_value=True), \
+             mock.patch.object(ytdlp, "IS_WINDOWS", False), \
              mock.patch("importlib.util.find_spec", return_value=find_spec_return), \
              mock.patch("shutil.which", return_value=which_return), \
              mock.patch("asyncio.create_subprocess_exec", new=spawn):
@@ -135,26 +135,26 @@ class TestUpdateYtdlpBranches(unittest.TestCase):
         self.assertIn(f"uv pip install --python {sys.executable}", out["output"])
 
     def test_successful_upgrade_clears_argv_cache(self):
-        ytdlp = mock.MagicMock(return_value=["/venv/bin/yt-dlp"])
-        with mock.patch.object(server, "get_ytdlp_argv", ytdlp), \
-             mock.patch.object(server, "_ytdlp_in_this_env", return_value=True), \
-             mock.patch.object(server, "IS_WINDOWS", False), \
+        fake_get = mock.MagicMock(return_value=["/venv/bin/yt-dlp"])
+        with mock.patch.object(ytdlp, "get_ytdlp_argv", fake_get), \
+             mock.patch.object(ytdlp, "_ytdlp_in_this_env", return_value=True), \
+             mock.patch.object(ytdlp, "IS_WINDOWS", False), \
              mock.patch("importlib.util.find_spec", return_value=object()), \
              mock.patch("asyncio.create_subprocess_exec",
                         new=mock.AsyncMock(return_value=self._fake_proc())):
             asyncio.run(server.update_ytdlp())
-        ytdlp.cache_clear.assert_called_once()
+        fake_get.cache_clear.assert_called_once()
 
     def test_failed_upgrade_keeps_argv_cache(self):
-        ytdlp = mock.MagicMock(return_value=["/venv/bin/yt-dlp"])
-        with mock.patch.object(server, "get_ytdlp_argv", ytdlp), \
-             mock.patch.object(server, "_ytdlp_in_this_env", return_value=True), \
-             mock.patch.object(server, "IS_WINDOWS", False), \
+        fake_get = mock.MagicMock(return_value=["/venv/bin/yt-dlp"])
+        with mock.patch.object(ytdlp, "get_ytdlp_argv", fake_get), \
+             mock.patch.object(ytdlp, "_ytdlp_in_this_env", return_value=True), \
+             mock.patch.object(ytdlp, "IS_WINDOWS", False), \
              mock.patch("importlib.util.find_spec", return_value=object()), \
              mock.patch("asyncio.create_subprocess_exec",
                         new=mock.AsyncMock(return_value=self._fake_proc(returncode=1))):
             asyncio.run(server.update_ytdlp())
-        ytdlp.cache_clear.assert_not_called()
+        fake_get.cache_clear.assert_not_called()
 
 
 class TestLazyToolResolution(unittest.TestCase):
@@ -162,19 +162,19 @@ class TestLazyToolResolution(unittest.TestCase):
         # Module already imported at top without ffmpeg guaranteed present -> no
         # import crash. With nothing resolvable, the getter (not import) is what
         # raises — proving resolution is deferred to call time.
-        self.assertTrue(callable(server.get_ffmpeg))
-        server.get_ffmpeg.cache_clear()
+        self.assertTrue(callable(ytdlp.get_ffmpeg))
+        ytdlp.get_ffmpeg.cache_clear()
         with mock.patch("shutil.which", return_value=None), \
-             mock.patch.object(server, "IS_WINDOWS", False):
+             mock.patch.object(ytdlp, "IS_WINDOWS", False):
             with self.assertRaises(RuntimeError):
-                server.get_ffmpeg()
-        server.get_ffmpeg.cache_clear()
+                ytdlp.get_ffmpeg()
+        ytdlp.get_ffmpeg.cache_clear()
 
     def test_resolution_is_cached(self):
-        server.get_ffprobe.cache_clear()
-        with mock.patch.object(server, "_resolve_tool", return_value="/x/ffprobe") as m:
-            first = server.get_ffprobe()
-            second = server.get_ffprobe()
+        ytdlp.get_ffprobe.cache_clear()
+        with mock.patch.object(ytdlp, "_resolve_tool", return_value="/x/ffprobe") as m:
+            first = ytdlp.get_ffprobe()
+            second = ytdlp.get_ffprobe()
         self.assertEqual(first, second)
         self.assertEqual(m.call_count, 1)  # cached: _resolve_tool invoked once, not twice
-        server.get_ffprobe.cache_clear()  # don't leak the patched value to other tests
+        ytdlp.get_ffprobe.cache_clear()  # don't leak the patched value to other tests

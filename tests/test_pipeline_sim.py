@@ -10,7 +10,7 @@ import asyncio
 import json
 import unittest
 
-from fetchforge import server
+from fetchforge import items as runner
 
 
 def _terminal(events):
@@ -54,7 +54,7 @@ async def _run(n_videos, *, enc_fail=frozenset(), enc_crash=frozenset(),
         return True
 
     async def driver():
-        async for msg in server.run_pipelined(items, fetch, process, cancel):
+        async for msg in runner.run_pipelined(items, fetch, process, cancel):
             events.append(msg)
 
     timer = None

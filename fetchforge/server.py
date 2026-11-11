@@ -1,293 +1,32 @@
+"""FastAPI app, middleware, routes and the server entry point.
+
+All download/encode plumbing lives in focused modules (``items``, ``encode``,
+``ytdlp``, ``jobs``, …); this module wires it to HTTP.
+"""
 import asyncio
 import contextlib
 import datetime
-import importlib.util
 import json
 import os
-import platform
-import site
 import random
-import re
-import shutil
-import subprocess
+import secrets
+import socket
 import sys
+import threading
 import time
+import urllib.request
+import webbrowser
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlparse
 
-IS_WINDOWS = sys.platform.startswith("win")
-if IS_WINDOWS:
-    import ctypes
-
-# Power management — prevent sleep during long encodes.
-# Windows: SetThreadExecutionState, re-asserted on a timer.
-# Linux:   hold a `systemd-inhibit` process for the duration.
-# The public interface (_keep_awake / _allow_sleep, refcounted) is identical on
-# both; only the backend differs.
-_ES_CONTINUOUS       = 0x80000000
-_ES_SYSTEM_REQUIRED  = 0x00000001
-_ES_DISPLAY_REQUIRED = 0x00000002
-_AWAKE_FLAGS = _ES_CONTINUOUS | _ES_SYSTEM_REQUIRED | _ES_DISPLAY_REQUIRED
-
-_awake_task: Optional[asyncio.Task] = None      # Windows: re-assertion loop
-_awake_inhibitor: Optional[subprocess.Popen] = None   # Linux: systemd-inhibit handle
-_awake_refcount = 0
-
-def _set_awake():
-    """Single-shot assertion — called repeatedly by the background task (Windows)."""
-    ctypes.windll.kernel32.SetThreadExecutionState(_AWAKE_FLAGS)
-
-async def _awake_loop():
-    """Re-assert wakefulness every 30s so Windows never overrides it."""
-    try:
-        while True:
-            _set_awake()
-            await asyncio.sleep(30)
-    except asyncio.CancelledError:
-        pass
-    finally:
-        ctypes.windll.kernel32.SetThreadExecutionState(_ES_CONTINUOUS)
-
-def _keep_awake():
-    global _awake_task, _awake_inhibitor, _awake_refcount
-    _awake_refcount += 1
-    if IS_WINDOWS:
-        if _awake_task is None or _awake_task.done():
-            _awake_task = asyncio.get_event_loop().create_task(_awake_loop())
-    else:
-        if _awake_inhibitor is None or _awake_inhibitor.poll() is not None:
-            inhibit = shutil.which("systemd-inhibit")
-            if inhibit:
-                # Block idle/sleep until this process is killed in _allow_sleep.
-                _awake_inhibitor = subprocess.Popen(
-                    [inhibit, "--what=idle:sleep", "--who=FetchForge",
-                     "--why=Video encoding in progress", "sleep", "infinity"]
-                )
-            # No systemd-inhibit (rare) → no-op; an active encode keeps the box busy anyway.
-
-def _allow_sleep():
-    global _awake_task, _awake_inhibitor, _awake_refcount
-    _awake_refcount = max(0, _awake_refcount - 1)
-    if _awake_refcount != 0:
-        return
-    if _awake_task is not None and not _awake_task.done():
-        _awake_task.cancel()
-        _awake_task = None
-    if _awake_inhibitor is not None and _awake_inhibitor.poll() is None:
-        _awake_inhibitor.terminate()
-        _awake_inhibitor = None
-
-@contextlib.contextmanager
-def _wake_lock():
-    """Hold the wake lock for the body's lifetime: released exactly once, on any exit."""
-    _keep_awake()
-    try:
-        yield
-    finally:
-        _allow_sleep()
-
-async def _write_job_log(path, text):
-    """Write a job log off the event loop, logging (never raising) a failed write.
-
-    On a client disconnect the job's task is cancelled, and anyio re-delivers
-    that cancellation at every await until the task finishes, so the thread
-    hop is cancelled too. Write synchronously then: the log matters more than
-    a few ms of a cancelled stream's loop time.
-    """
-    try:
-        await asyncio.to_thread(path.write_text, text, encoding="utf-8")
-    except asyncio.CancelledError:
-        try:
-            path.write_text(text, encoding="utf-8")
-        except Exception as exc:
-            logger.warning("Log write failed: %s", exc)
-        raise
-    except Exception as exc:
-        logger.warning("Log write failed: %s", exc)
-
-
-def _terminate_if_running(proc) -> bool:
-    """Synchronously SIGTERM a subprocess that hasn't exited yet.
-
-    Synchronous on purpose: a finally running under a re-delivered anyio
-    cancellation must not await before the terminate, or the terminate never
-    runs (#87). Swallows the race where the process already died and was reaped
-    (ProcessLookupError). Returns True if a terminate was actually sent."""
-    if proc is None or proc.returncode is not None:
-        return False
-    try:
-        proc.terminate()
-    except Exception:
-        pass
-    return True
-
-
-async def _reap_tasks(*tasks) -> None:
-    """Await already-cancelled worker tasks to completion, immune to anyio
-    re-delivering the disconnect cancellation at every await (#87)."""
-    for _t in tasks:
-        while not _t.done():
-            try:
-                await asyncio.shield(_t)
-            except asyncio.CancelledError:
-                pass
-
-
-# Heartbeat watchdog — auto-quit when the browser tab goes away.
-# The page pings GET /heartbeat every few seconds; if no ping arrives within
-# _HEARTBEAT_TIMEOUT, the server self-exits. A grace window (rather than firing
-# on tab-close directly) tolerates page refreshes and multiple open tabs.
-#
-# IMPORTANT: heartbeat silence alone must NOT kill the server while real work is
-# in flight. Browsers throttle setInterval in backgrounded/hidden tabs (clamped
-# to ~once/min, and frozen entirely after a few minutes), so a long queue run in
-# a non-focused window would otherwise breach the 30s timeout and self-exit
-# mid-encode. Two guards prevent that:
-#   1. _active_jobs > 0 — a /download or /convert-local SSE stream is actively
-#      running (download/encode in progress). Definitive proof the user is here;
-#      never exit. Covers ~all of a queue's wall-clock (incl. pipeline mode,
-#      where one request spans the whole playlist).
-#   2. _INTER_ITEM_GRACE after the last job ends — rides out the gaps between
-#      queue items, the client's retry backoffs (up to 45s), and the client-side
-#      60s shutdown countdown, so a throttled tab can't kill the server in those
-#      windows. Bounded so a truly-dead tab still auto-quits ~2 min after work.
-_HEARTBEAT_TIMEOUT = 30          # seconds of silence before shutting down
-_INTER_ITEM_GRACE = 120          # seconds to stay alive after a job ends (> 45s backoff + 60s shutdown countdown)
-_last_heartbeat: float = 0.0     # monotonic timestamp of the last ping
-_active_jobs = 0                 # count of /download + /convert-local SSE streams currently running
-_last_job_end: float = 0.0       # monotonic timestamp when the last job stream finished
-_job_admitted = False            # single-job admission (#89): True while a job owns the server
-_current_job = None              # the admitted Job (#105); /cancel acts on its handles
-_BUSY_MESSAGE = "Another download or conversion is already running. Wait for it to finish and try again."
-_uvicorn_server = None           # set in run_server(); lets the watchdog stop the server
-
-
-def __getattr__(name):
-    """Read-only view of the current job's live subprocess handles.
-
-    `current_process` / `current_dl_process` were mutable module globals until
-    #105; a Job now owns both slots. This keeps callers that merely *read* the
-    handles (diagnostics, tests) working without reintroducing shared state."""
-    if name in ("current_process", "current_dl_process"):
-        job = _current_job
-        if job is None:
-            return None
-        return job.ffmpeg if name == "current_process" else job.downloader
-    raise AttributeError("module {!r} has no attribute {!r}".format(__name__, name))
-
-async def _heartbeat_watchdog():
-    """Exit the process once no tab has pinged for _HEARTBEAT_TIMEOUT seconds,
-    UNLESS a job is running or just finished (see guards above)."""
-    global _last_heartbeat
-    _last_heartbeat = time.monotonic()    # start the clock at launch
-    while True:
-        await asyncio.sleep(5)
-        now = time.monotonic()
-        # A download/encode is actively streaming — the user is here even if the
-        # backgrounded tab has throttled its heartbeat. Never exit.
-        if _active_jobs > 0:
-            continue
-        # Just finished a job: ride out inter-item gaps, retry backoffs, and the
-        # client's 60s shutdown countdown before trusting heartbeat silence.
-        if now - _last_job_end < _INTER_ITEM_GRACE:
-            continue
-        if now - _last_heartbeat > _HEARTBEAT_TIMEOUT:
-            if _uvicorn_server is not None:
-                _uvicorn_server.should_exit = True
-            return
-
-
-def _try_admit() -> bool:
-    """Atomically claim the single job slot (#89). Synchronous and await-free, so
-    the check-and-set cannot be interleaved with another request on the event
-    loop. Returns False when a /download or /convert-local job already runs."""
-    global _job_admitted
-    if _job_admitted:
-        return False
-    _job_admitted = True
-    return True
-
-
-def _release_admission() -> None:
-    """Release the single job slot. Idempotent and synchronous, so it runs even
-    under a re-delivered anyio cancellation (no awaits)."""
-    global _job_admitted
-    _job_admitted = False
-
-
-def _register_job(job):
-    """Make `job` the one /cancel can reach after admission succeeds."""
-    global _current_job
-    _current_job = job
-    return job
-
-
-class _TrackedStream:
-    """Cold-safe async iterable wrapping an SSE generator.
-
-    Increments _active_jobs for the life of the stream, stamps _last_job_end, and
-    closes the Job exactly once — on exhaustion, error, cancellation, or close,
-    which releases the single-job admission. It is a plain object (not a bare
-    async generator) so that aclose() releases admission even when the stream is
-    closed before it is ever iterated: a never-started async generator's finally
-    never runs, which would leak the admission held from the handler (#89)."""
-
-    def __init__(self, agen, job):
-        self._agen = agen
-        self._job = job
-        self._started = False
-        self._finished = False
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self):
-        global _active_jobs
-        if not self._started:
-            self._started = True
-            _active_jobs += 1
-        try:
-            return await self._agen.__anext__()
-        except StopAsyncIteration:
-            self._finish()
-            raise
-        except asyncio.CancelledError:
-            self._finish()
-            raise
-        except BaseException:
-            self._finish()
-            raise
-
-    async def aclose(self):
-        self._finish()
-        aclose = getattr(self._agen, "aclose", None)
-        if aclose is not None:
-            await aclose()
-
-    def _finish(self):
-        global _active_jobs, _last_job_end
-        if self._finished:
-            return
-        self._finished = True
-        if self._started:
-            _active_jobs -= 1
-        _last_job_end = time.monotonic()
-        self._job.close()
-
-
-def _tracked(agen, job):
-    """Wrap an SSE generator so the heartbeat watchdog knows a job is in flight
-    and the Job is closed (releasing admission) when the stream ends (whether it
-    finished, errored, was cancelled, or was never consumed)."""
-    return _TrackedStream(agen, job)
-
-import secrets
-from contextlib import asynccontextmanager
-from fastapi import FastAPI, UploadFile, File, Form, Request
-from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse, FileResponse
-from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
+from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+
+from . import capabilities, config, cookies, encode, events, history, items as runner, jobs, sections, ytdlp
+
+APP_VERSION = config.APP_VERSION
 
 # The app binds to 127.0.0.1 only, but any web page the user visits can still
 # issue cross-origin requests to it. Without an origin check those drive-by
@@ -314,17 +53,29 @@ _set_port(DEFAULT_PORT)
 # the most dangerous endpoint (/shutdown-now). Regenerated every launch.
 _SESSION_TOKEN = secrets.token_urlsafe(32)
 
-@asynccontextmanager
+
+def __getattr__(name):
+    """Read-only view of the current job's live subprocess handles.
+
+    `current_process` / `current_dl_process` were mutable module globals until
+    #105; a Job now owns both slots and jobs exposes them. This keeps callers
+    that merely *read* the handles (diagnostics, tests) working."""
+    if name in ("current_process", "current_dl_process"):
+        return getattr(jobs, name)
+    raise AttributeError("module {!r} has no attribute {!r}".format(__name__, name))
+
+
+@contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
-    await _probe_ffmpeg_capabilities()
+    await capabilities._probe_ffmpeg_capabilities()
     # Record what this ffmpeg can actually do (#47). Diagnostics only: it reuses
     # the probe results above plus one `ffmpeg -version`, and is wrapped here as
     # well as internally — a report that fails must never stop the server booting.
     try:
-        await asyncio.to_thread(_refresh_capability_report)
+        await asyncio.to_thread(capabilities._refresh_capability_report)
     except Exception:
-        logger.warning("startup capability report failed", exc_info=True)
-    watchdog = asyncio.create_task(_heartbeat_watchdog())
+        config.logger.warning("startup capability report failed", exc_info=True)
+    watchdog = asyncio.create_task(jobs._heartbeat_watchdog())
     yield
     watchdog.cancel()
 
@@ -354,1969 +105,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-PKG_DIR = Path(__file__).parent          # code + index.html template (read-only)
-STATE_DIR = Path.cwd()                    # all writable runtime state
-
-# Vendored webfonts, served by /fonts/{name} so the UI never touches a CDN.
-# The allowlist is built once from the shipped directory and matched exactly:
-# no StaticFiles mount, so nothing outside these filenames is reachable and
-# path traversal has nothing to traverse into.
-FONTS_DIR = PKG_DIR / "fonts"
-FONT_FILES = frozenset(p.name for p in FONTS_DIR.glob("*.woff2")) if FONTS_DIR.is_dir() else frozenset()
-
-
-def _resolve_tool(name: str, win_bundled: Path) -> str:
-    """Locate an external binary.
-
-    Windows keeps the bundled `_internal/*.exe` / `yt-dlp.exe` it always shipped.
-    Linux/macOS resolve from PATH (system package or the project .venv), matching
-    the repo's "binaries are per-machine, do not track" convention.
-    """
-    if IS_WINDOWS and win_bundled.exists():
-        return str(win_bundled)
-    found = shutil.which(name)
-    if found:
-        return found
-    # Console scripts installed into this interpreter's venv (e.g. yt-dlp) live
-    # in sys.prefix/bin and resolve even when the venv isn't on PATH.
-    bindir = "Scripts" if IS_WINDOWS else "bin"
-    for exe in (name, name + ".exe"):
-        cand = Path(sys.prefix) / bindir / exe
-        if cand.exists():
-            return str(cand)
-    if win_bundled.exists():        # last resort (e.g. a manually-dropped binary)
-        return str(win_bundled)
-    raise RuntimeError(
-        f"Required tool '{name}' not found on PATH. "
-        f"On Linux: activate the project .venv (pip installs yt-dlp) and install ffmpeg."
-    )
-
-
-import functools
-
-@functools.cache
-def get_ffmpeg() -> str:
-    return _resolve_tool("ffmpeg", PKG_DIR / "_internal" / "ffmpeg.exe")
-
-@functools.cache
-def get_ffprobe() -> str:
-    return _resolve_tool("ffprobe", PKG_DIR / "_internal" / "ffprobe.exe")
-
-@functools.cache
-def get_ytdlp_argv() -> list:
-    """argv prefix that runs yt-dlp — this interpreter's own copy when it has
-    one, else a console script found on PATH.
-
-    yt-dlp is a pip dependency, but where pip puts its console script depends on
-    the install shape: a venv's Scripts/bin, `--user`'s site base, or (Windows
-    Store Python) a redirected LocalCache dir that is on none of the paths a
-    tool search would guess. `python -m yt_dlp` is equivalent and needs no path
-    guessing, so it's the fallback rather than an error.
-
-    Order matters because a system yt-dlp is often on PATH while the app was
-    installed into an inactive venv: the interpreter's own copy (console script
-    in sys.prefix, or the importable module) must win so `/update-ytdlp` upgrades
-    the one we actually run. PATH is consulted only when this interpreter has no
-    yt-dlp of its own.
-    """
-    bundled = PKG_DIR / "yt-dlp.exe"
-    if IS_WINDOWS and bundled.exists():
-        return [str(bundled)]
-    bindir = "Scripts" if IS_WINDOWS else "bin"
-    for exe in ("yt-dlp", "yt-dlp.exe"):
-        cand = Path(sys.prefix) / bindir / exe
-        if cand.exists():
-            return [str(cand)]
-    if importlib.util.find_spec("yt_dlp") is not None:
-        return [sys.executable, "-m", "yt_dlp"]
-    found = shutil.which("yt-dlp")
-    if found:
-        return [found]
-    if bundled.exists():        # last resort (e.g. a manually-dropped binary)
-        return [str(bundled)]
-    raise RuntimeError(
-        "yt-dlp not found. It ships as a dependency of this package — "
-        "reinstall with `pip install -U fetchforge` (or `pip install -U yt-dlp[default]` "
-        "into the same interpreter) and restart FetchForge."
-    )
-
-
-def _ytdlp_in_this_env(ytdlp_argv: list) -> bool:
-    """True when the resolved yt-dlp lives inside the running interpreter's
-    environment (venv / pip install) — i.e. `pip install -U` against
-    sys.executable will actually upgrade the copy the app uses."""
-    if ytdlp_argv[:1] == [sys.executable]:      # `python -m yt_dlp`: by definition ours
-        return True
-    # sys.prefix covers venv/system installs; the user base covers `pip install
-    # --user`, which pip also upgrades in place from this interpreter.
-    roots = [sys.prefix, site.getuserbase()]
-    for root in roots:
-        try:
-            if Path(ytdlp_argv[0]).resolve().is_relative_to(Path(root).resolve()):
-                return True
-        except (OSError, ValueError, IndexError):
-            continue
-    return False
-
-
-def _ytdlp_upgrade_cmd() -> list | None:
-    """Command that upgrades the pip-dependency yt-dlp in this interpreter, or
-    None when neither pip nor uv is available to do it.
-
-    Mirrors launch.sh's pip -> uv ladder: a venv created by `uv venv`/`uv sync`
-    has no pip, so fall back to uv. uv is always pinned to this interpreter's
-    `--python` so the upgrade lands in the env yt-dlp actually runs from, not
-    whatever env uv would infer from the cwd."""
-    if importlib.util.find_spec("pip") is not None:
-        return [sys.executable, "-m", "pip", "install", "-U", "yt-dlp[default]"]
-    uv = shutil.which("uv")
-    if uv:
-        return [uv, "pip", "install", "--python", sys.executable, "-U", "yt-dlp[default]"]
-    return None
-
-
-def _resolve_node_args() -> list:
-    """yt-dlp's JS runtime for solving challenges. Resolve node from PATH;
-    fall back to the canonical Windows install location it always used."""
-    node = shutil.which("node")
-    if not node and IS_WINDOWS:
-        node = r"C:\Program Files\nodejs\node.exe"
-    return ["--js-runtimes", f"node:{node}"] if node else []
-
-
-NODE_ARGS = _resolve_node_args()
-COOKIES_PATH = STATE_DIR / "cookies.txt"
-
-# Intermediate webm/mkv — cleared weekly. Override with FETCHFORGE_CACHE_DIR
-# (the legacy BOP_CACHE_DIR is still honored so existing overrides don't break).
-_cache_override = os.getenv("FETCHFORGE_CACHE_DIR") or os.getenv("BOP_CACHE_DIR")
-if _cache_override:
-    CACHE_DIR = Path(_cache_override)
-elif IS_WINDOWS:
-    CACHE_DIR = Path(r"E:/Cache/ytdlp") if Path(r"E:/").exists() else Path(r"C:/cache/ytdlp")
-else:
-    CACHE_DIR = Path(os.getenv("XDG_CACHE_HOME", Path.home() / ".cache")) / "fetchforge" / "ytdlp"
-OUTPUT_DIR = STATE_DIR / "downloads"    # final converted mp4s
-CONVERTED_DIR = OUTPUT_DIR / "converted"
-HISTORY_PATH = STATE_DIR / "history.json"
-LOGS_DIR = STATE_DIR / "logs"
-from fetchforge import __version__ as APP_VERSION
-
-
-import logging
-from logging.handlers import RotatingFileHandler
-
-logger = logging.getLogger("fetchforge")
-
-
-def _setup_logging() -> None:
-    """Route our own output and uvicorn's loggers into a rotating logs/server.log
-    (5MB × 3) so headless launches (launch-hidden.vbs / launch.sh with no console)
-    still leave a debuggable trail — without it, a crash before the browser
-    connects is silent. The visible-console launchers keep their stdout too."""
-    fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-    file_handler = RotatingFileHandler(
-        LOGS_DIR / "server.log", maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
-    )
-    file_handler.setFormatter(fmt)
-    stream_handler = logging.StreamHandler(sys.stdout)
-    stream_handler.setFormatter(fmt)
-    logger.setLevel(logging.INFO)
-    logger.handlers = [file_handler, stream_handler]
-    logger.propagate = False
-    # Tee uvicorn's loggers into the same file (they keep their own console handlers).
-    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
-        logging.getLogger(name).addHandler(file_handler)
-
-
-def _ensure_runtime_dirs() -> None:
-    """Create the writable runtime dirs (cache, downloads, logs). Called from
-    run_server() — NOT at import time — so a bare `import fetchforge.server`
-    (tests, third parties) has no filesystem side effects in the importer's cwd."""
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    OUTPUT_DIR.mkdir(exist_ok=True)
-    CONVERTED_DIR.mkdir(exist_ok=True)
-    LOGS_DIR.mkdir(exist_ok=True)
-
-
-def _poweroff():
-    """Shut the machine down — the UI's optional 'power off when done'.
-    Windows: `shutdown /s /t 0`. Linux: `systemctl poweroff` (logind allows the
-    active-session user without a password), falling back to `shutdown -h now`."""
-    if IS_WINDOWS:
-        subprocess.run(["shutdown", "/s", "/t", "0"])
-        return
-    if shutil.which("systemctl"):
-        subprocess.run(["systemctl", "poweroff"])
-    else:
-        subprocess.run(["shutdown", "-h", "now"])
-
-
-_history_lock = asyncio.Lock()
-
-
-def _atomic_write_text(path: Path, text: str) -> None:
-    """Write text via a temp file + os.replace so a crash mid-write can't truncate
-    the real file (os.replace is atomic on the same filesystem)."""
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
-
-
-def _read_history_sync() -> list:
-    if HISTORY_PATH.exists():
-        try:
-            return json.loads(HISTORY_PATH.read_text(encoding="utf-8"))
-        except Exception:
-            return []
-    return []
-
-
-async def _load_history() -> list:
-    # Off the event loop — a synchronous read here jitters any in-flight SSE stream.
-    return await asyncio.to_thread(_read_history_sync)
-
-
-async def _save_history_entry(entry: dict):
-    # Lock the whole read-modify-write so two concurrent /history POSTs can't lose
-    # each other's entry; write atomically so a crash can't truncate the file.
-    async with _history_lock:
-        history = await asyncio.to_thread(_read_history_sync)
-        history = [h for h in history if h.get("url") != entry["url"]]
-        history.insert(0, entry)
-        payload = json.dumps(history[:50], ensure_ascii=False, indent=2)
-        await asyncio.to_thread(_atomic_write_text, HISTORY_PATH, payload)
-
-
-# Windows illegal chars + tilde + control chars
-ILLEGAL_RE = re.compile(r'[<>:"/\\|?*~\x00-\x1f]')
-
-# Set when yt-dlp reports the loaded cookies have been rotated/invalidated. Once
-# that happens the cookies are dead, and passing them is strictly worse than
-# passing none (forces a degraded client + hard format failures), so we drop them
-# for the rest of the run. Persists across the client's retry rounds; reset when
-# the user loads fresh cookies (upload/paste), which deserve a new chance.
-_cookies_disabled = False
-
-# yt-dlp's stale-cookie warning, e.g. "The provided YouTube account cookies are no
-# longer valid. They have likely been rotated in the browser as a security measure."
-_STALE_COOKIE_MARKERS = ("no longer valid", "have likely been rotated")
-
-def cookie_args() -> list:
-    if _cookies_disabled:
-        return []
-    return ["--cookies", str(COOKIES_PATH)] if COOKIES_PATH.exists() else []
-
-
-def _maybe_flag_stale_cookies(line: str) -> Optional[str]:
-    """If a yt-dlp output line signals rotated/invalid cookies, disable cookies for
-    the rest of the run and return a one-time user-facing warning to emit; else None."""
-    global _cookies_disabled
-    if _cookies_disabled or not COOKIES_PATH.exists():
-        return None
-    low = line.lower()
-    if "cookie" in low and any(m in low for m in _STALE_COOKIE_MARKERS):
-        _cookies_disabled = True
-        return ("Your cookies appear stale (rotated/invalidated by the browser). "
-                "Continuing this run without cookies — public videos still download. "
-                "For private/age-restricted videos, re-export cookies from a fresh "
-                "private window and reload them.")
-    return None
-
-
-def is_http_url(url: str) -> bool:
-    """True only for http/https URLs. yt-dlp treats any argv beginning with '-'
-    as a flag (e.g. --exec=…, --config-location=…), so a crafted URL is remote
-    code execution. Callers reject non-http(s) here AND append '--' before the
-    URL so it can never be parsed as an option."""
-    try:
-        return urlparse((url or "").strip()).scheme in ("http", "https")
-    except Exception:
-        return False
-
-
-def sanitize(name: str) -> str:
-    name = ILLEGAL_RE.sub("_", name)
-    name = re.sub(r"_+", "_", name)
-    return name.strip("_. ")[:200]
-
-
-try:
-    # The authoritative function yt-dlp itself uses for --restrict-filenames.
-    # Available when yt-dlp is pip-installed (Linux/macOS, project .venv). On a
-    # Windows bundled yt-dlp.exe the package may be absent — fall back below.
-    from yt_dlp.utils import sanitize_filename as _ytdlp_sanitize_filename
-except Exception:
-    _ytdlp_sanitize_filename = None
-
-
-def _restrict_filename(title: str) -> str:
-    """Mirror yt-dlp's --restrict-filenames transform on a title. Uses yt-dlp's
-    own sanitizer when importable (exact: handles accents like café→cafe, emoji,
-    consecutive separators); otherwise a close ASCII approximation."""
-    if _ytdlp_sanitize_filename is not None:
-        try:
-            return _ytdlp_sanitize_filename(title, restricted=True)
-        except Exception:
-            pass
-    return re.sub(r'[^A-Za-z0-9_.\-]', '_', title)
-
-
-def _output_stem(downloaded_stem: str, suffix: str = "") -> str:
-    """Output stem for a downloaded file. A time-range *suffix* (which the yt-dlp
-    -o template appended to the downloaded name) is kept intact even when the
-    title is long enough for sanitize()'s 200-char cap to bite — otherwise a
-    clip of a long-titled video would truncate to the full video's name."""
-    if not suffix:
-        return sanitize(downloaded_stem)
-    if downloaded_stem.endswith(suffix):
-        downloaded_stem = downloaded_stem[:-len(suffix)]
-    return sanitize(downloaded_stem)[:200 - len(suffix)].rstrip("_. ") + suffix
-
-
-def _predict_output_stem(title: str, suffix: str = "") -> str:
-    """Predict the output file stem for a video title: yt-dlp's --restrict-filenames
-    transform followed by our sanitize() — exactly what the post-download path
-    derives from the real downloaded filename. Used to skip already-encoded videos
-    without diverging from yt-dlp's actual output (H-8)."""
-    return _output_stem(_restrict_filename(title), suffix)
-
-
-# ── Time-range (section) capture (#76) ────────────────────────────────────────
-# A section is (start_s, end_s) in whole seconds, end_s None = to the end of the
-# video. yt-dlp stream-copies just that stretch (no re-encode, so the copy starts
-# at the keyframe at or before start_s) and -copyts keeps YouTube's own timeline
-# in the file. The encode step then seeks frame-exactly to start_s and stops at
-# end_s — we decode every frame there anyway, so precision costs nothing, whereas
-# yt-dlp's --force-keyframes-at-cuts would add a slow CPU re-encode and a second
-# lossy generation before the NVENC one.
-_MAX_SECTION_SECS = 1_000_000
-
-
-def parse_section(start: str, end: str):
-    """(start_s, end_s|None) from the form's whole-second strings, or None when
-    no range applies ("" for both, or 0-to-end). ValueError on anything else —
-    these values end up in a subprocess argv."""
-    s, e = (start or "").strip(), (end or "").strip()
-    if not s and not e:
-        return None
-    for v in (s, e):
-        if v and not (v.isdigit() and int(v) <= _MAX_SECTION_SECS):
-            raise ValueError("time range must be whole seconds, got {!r}".format(v))
-    start_s = int(s) if s else 0
-    end_s = int(e) if e else None
-    if end_s is not None and end_s <= start_s:
-        raise ValueError("time range end ({}s) must be after its start ({}s)".format(end_s, start_s))
-    if start_s == 0 and end_s is None:
-        return None
-    return (start_s, end_s)
-
-
-def _fmt_section_time(secs: int) -> str:
-    h, rem = divmod(secs, 3600)
-    m, s = divmod(rem, 60)
-    return "{}h{:02d}m{:02d}s".format(h, m, s) if h else "{}m{:02d}s".format(m, s)
-
-
-def section_suffix(section) -> str:
-    """Filename marker for a section, e.g. "_12m30s-18m00s" / "_1h02m00s-end"."""
-    if not section:
-        return ""
-    start_s, end_s = section
-    return "_{}-{}".format(_fmt_section_time(start_s),
-                           _fmt_section_time(end_s) if end_s is not None else "end")
-
-
-def section_ytdlp_args(section) -> list:
-    """yt-dlp args to fetch only the section, timestamps preserved."""
-    if not section:
-        return []
-    start_s, end_s = section
-    return [
-        "--download-sections", "*{}-{}".format(start_s, end_s if end_s is not None else "inf"),
-        "--downloader-args", "ffmpeg_o:-copyts",
-    ]
-
-
-def section_input_seek(section, file_start_time: float) -> list:
-    """ffmpeg input options that cut a section download to exactly the section.
-    *file_start_time* is the file's own start (≤ start_s: the copy began at a
-    keyframe), and input -ss is relative to it."""
-    if not section:
-        return []
-    start_s, end_s = section
-    args = ["-ss", "{:.3f}".format(max(0.0, start_s - (file_start_time or 0.0)))]
-    if end_s is not None:
-        args += ["-t", str(end_s - start_s)]
-    return args
-
-
-def _with_input_options(argv: list, input_opts: list) -> list:
-    """Insert input options immediately before the (single) -i of an ffmpeg argv."""
-    if not input_opts:
-        return argv
-    i = argv.index("-i")
-    return argv[:i] + list(input_opts) + argv[i:]
-
-
-def _resolve_section(section, full_duration: float):
-    """The section's end as a number (the video's end when open-ended), or None
-    if it is open-ended and the video's duration is unknown."""
-    start_s, end_s = section
-    return end_s if end_s is not None else (full_duration or None)
-
-
-def _clip_duration(section, full_duration: float):
-    """Seconds the encode will produce from a section download (drives progress)."""
-    end = _resolve_section(section, full_duration)
-    return float(end - section[0]) if end is not None and end > section[0] else None
-
-
-async def _media_time_span(path: Path):
-    """(first, last) timestamp actually present in a media file, from its packets.
-    Format-level duration can't answer this: for a Matroska/WebM file with a
-    nonzero start (a -copyts section) ffprobe reports the END timestamp as its
-    "duration", and other containers report the length — packets mean one thing
-    everywhere. Reads packet headers only (no decode). None if unreadable."""
-    proc = await asyncio.create_subprocess_exec(
-        get_ffprobe(), "-v", "error",
-        "-show_entries", "packet=pts_time,duration_time",
-        "-of", "csv=p=0", str(path),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
-    )
-    out, _ = await proc.communicate()
-    first = last = None
-    for line in out.decode(errors="replace").splitlines():
-        pts, _, dur = line.partition(",")
-        try:
-            t = float(pts)
-        except ValueError:
-            continue   # N/A
-        try:
-            end = t + float(dur.strip(",") or 0)
-        except ValueError:
-            end = t
-        first = t if first is None else min(first, t)
-        last = end if last is None else max(last, end)
-    return (first, last) if first is not None else None
-
-
-async def _section_download_is_complete(path: Path, section, full_duration: float) -> bool:
-    """A section download is complete when the file's own timeline (-copyts)
-    covers the whole requested range, ±2s. Size and the full video's duration
-    say nothing about a clip, so _download_is_complete can't judge it."""
-    if not path.exists():
-        return False
-    need_end = _resolve_section(section, full_duration)
-    if need_end is None:
-        return False
-    span = await _media_time_span(path)
-    if span is None:
-        return False
-    t0, t1 = span
-    return t0 <= section[0] + 2.0 and t1 >= need_end - 2.0
-
-
-def _newest_new_file(cache_dir: Path, pre_existing: set, pattern="*.mkv"):
-    """The most-recently-modified file matching `pattern` that appeared in
-    `cache_dir` since `pre_existing` (a set of Paths) was snapshotted. Lets the
-    pipeline locate THIS download's output without grabbing a sibling video's
-    file already sitting in the shared cache (issue #8). None if nothing new.
-
-    `pattern` may be one glob or an iterable of globs: audio downloads can land
-    with any `_AUDIO_EXTS` suffix, which no single glob covers."""
-    patterns = [pattern] if isinstance(pattern, str) else list(pattern)
-    candidates = set()
-    for pat in patterns:
-        candidates.update(cache_dir.glob(pat))
-    new = sorted(candidates - set(pre_existing), key=os.path.getmtime)
-    return new[-1] if new else None
-
-
-def _cache_snapshot_patterns(is_audio: bool) -> list:
-    """Every file type yt-dlp may write for this download mode. Audio has many
-    possible suffixes, so the snapshot/fallback must cover all of `_AUDIO_EXTS`
-    rather than only `*.mkv` (issue #92)."""
-    if is_audio:
-        return ["*" + ext for ext in sorted(_AUDIO_EXTS)]
-    return ["*.mkv"]
-
-
-def _video_format_selector(vf: str, af: str, prefer_picked: bool) -> str:
-    """Build yt-dlp's -f for a video download.
-
-    `prefer_picked` (a single video, or a batch item that carries its own
-    per-video format choice) honors the exact itags the user selected, but always
-    appends a best-available fallback so a video missing those itags degrades
-    gracefully instead of hard-failing with "Requested format is not available".
-
-    Otherwise — a playlist, whose one picked format was read from only the FIRST
-    video and can't represent a mixed 720p/1080p list — we always take the highest
-    available stream per video (`bv*+ba/b`)."""
-    fallback = "bv*+ba/b"
-    if prefer_picked and vf and af:
-        return "{}+{}/{}".format(vf, af, fallback)
-    return fallback
-
-
-def _audio_format_selector(af: str) -> str:
-    """Build yt-dlp's -f for an audio-only download.
-
-    The video path has had a best-available fallback since #13; audio never did,
-    so a bare itag went straight to yt-dlp and any video lacking it hard-failed
-    with "Requested format is not available" in about four seconds. That is not
-    hypothetical: a playlist's audio pick is read from the FIRST entry only, and
-    the `-drc` (dynamic-range-compressed) variants YouTube offers on some videos
-    are absent on most, so one picked `140-drc` can fail a whole 110-item queue.
-
-    Unlike resolution, audio itags are near-universal (140/251 are on almost
-    everything), so the pick is usually representative and worth honouring even
-    for a playlist -- we keep it and append the fallback, rather than discarding
-    it the way the video selector must for a mixed 720p/1080p list."""
-    fallback = "ba/b"
-    return "{}/{}".format(af, fallback) if af else fallback
-
-
-def _parse_items_payload(items_json: str) -> list:
-    """Parse the client `items` payload into normalized per-item dicts. Every
-    field the old tuple-of-structures model carried is kept on the item itself.
-    Raises ValueError on a non-http url (mirrors the single-url guard) or a bad
-    time range."""
-    items = json.loads(items_json)
-    parsed = []
-    for it in items:
-        u = it["url"]
-        if not is_http_url(u):
-            raise ValueError("URL must be http or https: {}".format(u))
-        parsed.append({
-            "url": u,
-            "title": it.get("title", "") or "",
-            "duration": it.get("duration") or 0,
-            "video_format": it.get("video_format", "") or "",
-            "audio_format": it.get("audio_format", "") or "",
-            "expected_size": int(it.get("expected_size") or 0),
-            "output_dir": it.get("output_dir", "") or "",
-            "tune_mode": it.get("tune_mode", "uhq") or "uhq",
-            "section": parse_section(str(it.get("section_start") or ""),
-                                     str(it.get("section_end") or "")),
-        })
-    return parsed
-
-
-def _resolve_batch_items(items_json: str):
-    """Backward-compatible view over `_parse_items_payload`: returns
-    (video_urls, video_titles, video_durations, per_item)."""
-    parsed = _parse_items_payload(items_json)
-    video_urls = [it["url"] for it in parsed]
-    video_titles = {it["url"]: it["title"] for it in parsed}
-    video_durations = {it["url"]: it["duration"] for it in parsed}
-    return video_urls, video_titles, video_durations, parsed
-
-
-# ── SSE event builders (single source of truth for the wire format) ───────────
-# Every event is `data: {json}\n\n`. Centralizing this kills the f-string-vs-.format
-# split that the file used to carry (the f-string-backslash gotcha is avoided here
-# once, in _sse) and gives each event type one definition. The UI splits `phase`
-# msgs on ": " to separate header from filename — sse_phase enforces that contract.
-def _sse(obj: dict) -> str:
-    return "data: {}\n\n".format(json.dumps(obj))
-
-# Each event type is defined once as a plain dict; `Job.emit` logs that dict and
-# serializes it, and the `sse_*` helpers below are the wire-only view of the same
-# dict (kept because other call sites and the wire-format tests use them).
-def _ev_log(msg: str) -> dict:
-    return {"type": "log", "msg": msg}
-
-def _ev_error(msg: str) -> dict:
-    return {"type": "error", "msg": msg}
-
-def _ev_cookie_warning(msg: str) -> dict:
-    return {"type": "cookie_warning", "msg": msg}
-
-def _ev_cancelled(msg: str = "Cancelled by user.") -> dict:
-    return {"type": "cancelled", "msg": msg}
-
-def _ev_done(msg: str = "All done!") -> dict:
-    return {"type": "done", "msg": msg}
-
-def _ev_shutdown(msg: str = "Shutting down in 60 seconds...") -> dict:
-    return {"type": "shutdown", "msg": msg}
-
-def _ev_phase(header: str, filename: str = "") -> dict:
-    # UI contract: "header: filename" — split on the first ": " in index.html.
-    msg = "{}: {}".format(header, filename) if filename else header
-    return {"type": "phase", "msg": msg}
-
-def _ev_video_start(current: int, total: int) -> dict:
-    return {"type": "video_start", "current": current, "total": total}
-
-def _ev_source_size(size_bytes: int) -> dict:
-    return {"type": "source_size", "bytes": size_bytes}
-
-def _ev_progress(pct: float, overall: float, speed: str, eta: str, size: str, output_bytes: int = 0) -> dict:
-    return {"type": "progress", "pct": pct, "overall": overall,
-            "speed": speed, "eta": eta, "size": size, "output_bytes": output_bytes}
-
-def _ev_dl_progress(pct: float, size: str, speed: str, eta: str, idx: int, total: int) -> dict:
-    return {"type": "dl_progress", "pct": pct, "size": size,
-            "speed": speed, "eta": eta, "idx": idx, "total": total}
-
-def _ev_item_done(idx: int, total: int) -> dict:
-    return {"type": "item_done", "idx": idx, "total": total}
-
-def _ev_item_failed(idx: int, total: int, msg: str) -> dict:
-    return {"type": "item_failed", "idx": idx, "total": total, "msg": msg}
-
-def _ev_size_info(source_bytes: int, output_bytes: int) -> dict:
-    bloat = (output_bytes - source_bytes) / source_bytes * 100 if source_bytes > 0 else 0.0
-    return {"type": "size_info",
-            "source_mb": round(source_bytes / 1024**2, 1),
-            "output_mb": round(output_bytes / 1024**2, 1),
-            "bloat_pct": round(bloat, 1)}
-
-def _ev_encode_params(params: dict) -> dict:
-    return {"type": "encode_params",
-            "cq": params["cq"],
-            "maxrate": params["maxrate"],
-            "preset": params["preset"],
-            "tune": params["tune"],
-            "pix_fmt": params["pix_fmt"]}
-
-def sse_log(msg: str) -> str:
-    return _sse(_ev_log(msg))
-
-def sse_error(msg: str) -> str:
-    return _sse(_ev_error(msg))
-
-def sse_cookie_warning(msg: str) -> str:
-    return _sse(_ev_cookie_warning(msg))
-
-def sse_cancelled(msg: str = "Cancelled by user.") -> str:
-    return _sse(_ev_cancelled(msg))
-
-def sse_done(msg: str = "All done!") -> str:
-    return _sse(_ev_done(msg))
-
-def sse_shutdown(msg: str = "Shutting down in 60 seconds...") -> str:
-    return _sse(_ev_shutdown(msg))
-
-def sse_phase(header: str, filename: str = "") -> str:
-    return _sse(_ev_phase(header, filename))
-
-def sse_video_start(current: int, total: int) -> str:
-    return _sse(_ev_video_start(current, total))
-
-def sse_source_size(size_bytes: int) -> str:
-    return _sse(_ev_source_size(size_bytes))
-
-def sse_progress(pct: float, overall: float, speed: str, eta: str, size: str, output_bytes: int = 0) -> str:
-    return _sse(_ev_progress(pct, overall, speed, eta, size, output_bytes))
-
-def sse_dl_progress(pct: float, size: str, speed: str, eta: str, idx: int, total: int) -> str:
-    return _sse(_ev_dl_progress(pct, size, speed, eta, idx, total))
-
-def sse_item_done(idx: int, total: int) -> str:
-    return _sse(_ev_item_done(idx, total))
-
-def sse_item_failed(idx: int, total: int, msg: str) -> str:
-    return _sse(_ev_item_failed(idx, total, msg))
-
-def sse_size_info(source_bytes: int, output_bytes: int) -> str:
-    return _sse(_ev_size_info(source_bytes, output_bytes))
-
-def sse_encode_params(params: dict) -> str:
-    return _sse(_ev_encode_params(params))
-
-
-# ── Job (#105) ───────────────────────────────────────────────────────────────
-# One admitted /download or /convert-local run. A Job owns everything that used
-# to be module-global state: its sticky cancel event, the live subprocess
-# handles (one slot per role), the wake lock, the job-log lines and the SSE wire
-# format. Only one Job can exist at a time (#89), but a fresh one is created per
-# request, so nothing leaks from a finished or cancelled run.
-class Job:
-    """The state and teardown of one admitted job.
-
-    `emit(event)` is the single sink for job events: it appends the matching
-    job-log line and returns the SSE string, so no code path has to parse an SSE
-    string back into JSON to build the log.
-    """
-
-    def __init__(self, kind: str, *, url: str = "", files: str = ""):
-        self.kind = kind                     # "download" | "local"
-        self.url = url
-        self.files = files
-        self.started = datetime.datetime.now()
-        self.cancel = asyncio.Event()
-        self.ffmpeg = None                   # encoder subprocess (run_encode)
-        self.downloader = None               # yt-dlp subprocess (fetch_item)
-        self.lines = []                      # "[HH:MM:SS] [LEVEL] message"
-        self._wake = None
-
-    # ── wake lock ──────────────────────────────────────────────────────────
-    def __enter__(self):
-        self._wake = _wake_lock()
-        self._wake.__enter__()
-        return self
-
-    def __exit__(self, *exc):
-        return self._wake.__exit__(*exc)
-
-    # ── event log + wire ───────────────────────────────────────────────────
-    def emit(self, event: dict) -> str:
-        """Log `event` and return its SSE wire form."""
-        self.log_event(event)
-        return _sse(event)
-
-    def log_event(self, event: dict) -> None:
-        ts = datetime.datetime.now().strftime("%H:%M:%S")
-        t = event.get("type", "")
-        if t == "phase":
-            level, msg = "PHASE", event.get("msg", "")
-        elif t == "log":
-            level, msg = "LOG", event.get("msg", "")
-        elif t == "error":
-            level, msg = "ERROR", event.get("msg", "")
-        elif t == "done":
-            level, msg = "DONE", event.get("msg", "")
-        elif t == "video_start":
-            level = "VIDEO"
-            msg = "Video {current}/{total}".format(**event)
-        elif t == "size_info":
-            level = "SIZE"
-            msg = "source={source_mb}MB  output={output_mb}MB  bloat={bloat_pct:+.1f}%".format(**event)
-        else:
-            return
-        self.lines.append("[{}] [{}] {}".format(ts, level, msg))
-
-    def status(self) -> str:
-        for ln in reversed(self.lines):
-            if "[ERROR]" in ln:
-                return "FAILED"
-            if "[DONE]" in ln:
-                return "SUCCESS"
-        return "CANCELLED"
-
-    def log_text(self) -> str:
-        if self.kind == "download":
-            header = [
-                "Type    : YouTube Download",
-                "URL     : {}".format(self.url),
-            ]
-        else:
-            try:
-                file_list = json.loads(self.files)
-            except Exception:
-                file_list = [self.files]
-            header = [
-                "Type    : Local Convert",
-                "Files   : {}".format(", ".join(str(f) for f in file_list)),
-            ]
-        elapsed = datetime.datetime.now() - self.started
-        header_lines = [
-            "=== FetchForge Job Log ===",
-            "Started : {}".format(self.started.strftime("%Y-%m-%d %H:%M:%S")),
-            *header,
-            "Elapsed : {}".format(str(elapsed).split(".")[0]),
-            "Status  : {}".format(self.status()),
-            "",
-            "--- Events ---",
-            "",
-        ]
-        return "\n".join(header_lines + self.lines + [""])
-
-    def log_path(self):
-        ts_file = self.started.strftime("%Y-%m-%d_%H-%M-%S")
-        suffix = "download" if self.kind == "download" else "local"
-        return LOGS_DIR / "{}_{}.txt".format(ts_file, suffix)
-
-    # ── cancel / teardown ──────────────────────────────────────────────────
-    def cancel_now(self) -> bool:
-        """Set the cancel flag and synchronously terminate live subprocesses.
-
-        Synchronous on purpose: it must run under a re-delivered anyio
-        cancellation (#87). Returns True if a handle was terminated."""
-        self.cancel.set()
-        terminated = False
-        for attr in ("ffmpeg", "downloader"):
-            proc = getattr(self, attr)
-            if proc is not None:
-                if _terminate_if_running(proc):
-                    terminated = True
-                setattr(self, attr, None)
-        return terminated
-
-    def close(self) -> None:
-        """Release admission exactly once and stop being the current job."""
-        global _current_job
-        if _current_job is self:
-            _current_job = None
-        _release_admission()
-
-    @property
-    def exception_label(self) -> str:
-        return ("Unexpected error in download job" if self.kind == "download"
-                else "Unexpected error in local conversion job")
-
-
-def _job_emit(job: Optional["Job"], event: dict) -> str:
-    """Serialize an event through the job (so it is logged) when there is one."""
-    return job.emit(event) if job is not None else _sse(event)
-
-
-async def _job_stream(job: Job, events):
-    """The one SSE wrapper shared by /download and /convert-local (#105).
-
-    Holds the job's wake lock, forwards every event the runner emitted (the
-    runner logs them through `job.emit`), turns an unexpected exception into a
-    final error event (#96), and always writes the job log."""
-    with job:
-        try:
-            async for chunk in events:
-                yield chunk
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            # A disconnect cancels the task, and cleanup can raise while that
-            # cancellation is pending (#87). Never turn that into a job error:
-            # let the cancellation continue so it propagates as before.
-            task = asyncio.current_task()
-            if task is not None and task.cancelling():
-                raise asyncio.CancelledError() from exc
-            logger.exception(job.exception_label)
-            yield job.emit(_ev_error("Unexpected error: {}".format(exc)))
-        finally:
-            await _write_job_log(job.log_path(), job.log_text())
-
-
-_CUVID_DECODERS = {
-    "vp9":  "vp9_cuvid",
-    "h264": "h264_cuvid",
-    "hevc": "hevc_cuvid",
-    "av1":  "av1_cuvid",
-    "vp8":  "vp8_cuvid",
-}
-
-
-def _ffmpeg_filter_names() -> set:
-    """Every filter name this ffmpeg build lists, from one `-filters` call."""
-    try:
-        out = subprocess.run(
-            [get_ffmpeg(), "-hide_banner", "-filters"],
-            capture_output=True, text=True, timeout=15,
-        ).stdout
-    except Exception:
-        return set()
-    names = set()
-    for line in out.splitlines():
-        parts = line.split()
-        if len(parts) >= 2:
-            names.add(parts[1])
-    return names
-
-
-def _ffmpeg_has_filter(name: str) -> bool:
-    """Whether this ffmpeg build provides a given filter."""
-    return name in _ffmpeg_filter_names()
-
-
-def _ffmpeg_has_encoder(name: str) -> bool:
-    """Whether this ffmpeg build lists a given encoder (e.g. hevc_nvenc)."""
-    try:
-        out = subprocess.run(
-            [get_ffmpeg(), "-hide_banner", "-encoders"],
-            capture_output=True, text=True, timeout=15,
-        ).stdout
-    except Exception:
-        return False
-    return any(line.split()[1:2] == [name] for line in out.splitlines() if line.strip())
-
-
-# GPU-resident pixel-format conversion needs the scale_cuda filter (libnpp).
-# The bundled Windows ffmpeg (gyan.dev) has it; Fedora/Nobara builds ship
-# --disable-libnpp, so it's absent there even though hevc_nvenc encoding works.
-#
-# These are filled in by the one startup probe in `lifespan` (#99), never at
-# import: computing them here used to spawn ffmpeg twice on every import of this
-# module. HAS_NVENC starts optimistic so a handler invoked outside `lifespan`
-# (tests, embedders) behaves as it always did; the filters start pessimistically
-# because their only consumers are encode-argument builders.
-HAS_SCALE_CUDA = False
-HAS_LIBPLACEBO = False
-HAS_NVENC = True
-
-
-def _effective_target_height(source_height: int, target_height: int) -> int:
-    """A requested target equal to the source height is a same-size resample --
-    essentially a no-op scale (#35). Zero it so callers route _decode_filter_args
-    to the cheaper passthrough+sharpen path instead of a full same-size scaler
-    (e.g. libplacebo=w=-2:h=1080 when the source is already 1080p). Sharpen is
-    unaffected -- it's carried by _decode_filter_args's own *sharpen* flag."""
-    if target_height > 0 and source_height > 0 and target_height == source_height:
-        return 0
-    return target_height
-
-
-def _decode_filter_args(input_file: Path, pix_fmt: str, cuvid: Optional[str],
-                        target_height: int = 0, sharpen: bool = False) -> list:
-    """Decode + pixel-format (+ optional scale) args for hevc_nvenc encode.
-
-    When *target_height* > 0 the filter chain includes a scale to that height
-    (even-dimension-safe, aspect-ratio-preserving).  Scaler engine selection:
-    libplacebo (ewa_lanczos via Vulkan) → scale_cuda (NPP lanczos) → CPU
-    (scale=…:flags=lanczos).  target_height=0 produces byte-identical output
-    to the original two-branch logic.
-
-    When *sharpen* is True a gentle Contrast Adaptive Sharpen (cas) filter is
-    appended to -vf after any scaling, with an explicit hwdownload for GPU
-    filter paths."""
-    CAS_STRENGTH = "0.72"
-    cuvid_args = ["-c:v", cuvid] if cuvid else []
-    if target_height > 0:
-        if HAS_LIBPLACEBO:
-            vf = (f"libplacebo=w=-2:h={target_height}"
-                  f":upscaler=ewa_lanczos:downscaler=ewa_lanczos"
-                  f":format={pix_fmt}:tonemapping=none")
-            if sharpen:
-                vf += f",cas={CAS_STRENGTH}"
-            return [
-                "-hwaccel", "cuda",
-                *cuvid_args,
-                "-i", str(input_file),
-                "-vf", vf,
-            ]
-        if HAS_SCALE_CUDA:
-            vf = f"scale_cuda=format={pix_fmt}:w=-2:h={target_height}"
-            if sharpen:
-                vf += f",hwdownload,format={pix_fmt},cas={CAS_STRENGTH}"
-            return [
-                "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
-                *cuvid_args,
-                "-i", str(input_file),
-                "-vf", vf,
-            ]
-        vf = f"scale=w=-2:h={target_height}:flags=lanczos,format={pix_fmt}"
-        if sharpen:
-            vf += f",cas={CAS_STRENGTH}"
-        return [
-            "-hwaccel", "cuda",
-            *cuvid_args,
-            "-i", str(input_file),
-            "-vf", vf,
-        ]
-    # Passthrough — byte-identical to original two-branch logic.
-    if HAS_SCALE_CUDA:
-        vf = f"scale_cuda=format={pix_fmt}"
-        if sharpen:
-            vf += f",hwdownload,format={pix_fmt},cas={CAS_STRENGTH}"
-        return [
-            "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
-            *cuvid_args,
-            "-i", str(input_file),
-            "-vf", vf,
-        ]
-    vf = f"format={pix_fmt}"
-    if sharpen:
-        vf += f",cas={CAS_STRENGTH}"
-    return [
-        "-hwaccel", "cuda",
-        "-i", str(input_file),
-        "-vf", vf,
-    ]
-
-# Audio-stream containers yt-dlp may produce when downloading audio-only formats.
-_AUDIO_EXTS = {".webm", ".m4a", ".opus", ".ogg", ".mp3", ".aac", ".wav", ".flac"}
-
-
-def audio_output_ext(preset: str) -> str:
-    return "wav" if preset == "wav" else "mp3"
-
-
-def build_audio_ffmpeg(input_file: Path, output_file: Path, preset: str,
-                       input_opts: list = ()) -> list:
-    """ffmpeg args for audio extraction. -vn drops video; -progress pipe:1
-    matches the video encode flow so the UI parser stays unified. *input_opts*
-    (e.g. section_input_seek) go immediately before -i."""
-    if preset == "wav":
-        codec_args = ["-c:a", "pcm_s16le"]
-    else:
-        codec_args = ["-c:a", "libmp3lame", "-b:a", "320k"]
-    return _with_input_options([
-        get_ffmpeg(), "-y",
-        "-loglevel", "info",
-        "-i", str(input_file),
-        "-vn",
-        *codec_args,
-        "-progress", "pipe:1",
-        "-nostats",
-        str(output_file),
-    ], list(input_opts))
-
-
-async def _download_is_complete(path: Path, expected_bytes: int,
-                                expected_duration: Optional[float] = None,
-                                min_ratio: float = 0.85) -> bool:
-    """Decide whether a downloaded media file is actually complete after yt-dlp
-    exited non-zero. With a known size, use the byte-ratio check. Without one
-    (live streams, premieres, age-restricted — YouTube reports no filesize),
-    do NOT trust the old existence+1MB heuristic: a 50MB slice of a 4GB video
-    would pass. Instead verify the container's duration against the duration we
-    learned at resolve time (±2s). If neither size nor duration is available we
-    can't prove completeness, so treat it as incomplete (H-9)."""
-    if not path.exists():
-        return False
-    if expected_bytes > 0:
-        return path.stat().st_size >= expected_bytes * min_ratio
-    if expected_duration and expected_duration > 0:
-        info = await probe_video(path)
-        actual = info.get("duration") or 0
-        return actual > 0 and abs(actual - expected_duration) <= 2.0
-    return False
-
-
-async def probe_video(path: Path) -> dict:
-    """Deep-probe a video file and return source metadata."""
-    proc = await asyncio.create_subprocess_exec(
-        get_ffprobe(), "-v", "quiet",
-        "-print_format", "json",
-        "-show_streams", "-show_format",
-        str(path),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    out, _ = await proc.communicate()
-    try:
-        info = json.loads(out)
-    except Exception:
-        return {}
-
-    fmt = info.get("format", {})
-    streams = info.get("streams", [])
-    vs = next((s for s in streams if s.get("codec_type") == "video"), {})
-
-    duration = float(fmt.get("duration", 0) or 0)
-    height = int(vs.get("height", 1080) or 1080)
-    try:
-        num, den = vs.get("r_frame_rate", "30/1").split("/")
-        fps = int(num) / max(int(den), 1)
-    except Exception:
-        fps = 30.0
-
-    # Per-stream bitrate is often absent from MKV; fall back to format total minus ~192k audio
-    video_bps = int(vs.get("bit_rate", 0) or 0)
-    if not video_bps:
-        total_bps = int(fmt.get("bit_rate", 0) or 0)
-        video_bps = max(total_bps - 192_000, 0)
-
-    return {
-        "duration": duration,
-        "start_time": float(fmt.get("start_time", 0) or 0),
-        "height": height,
-        "fps": fps,
-        "codec": vs.get("codec_name", "h264"),
-        "pix_fmt": vs.get("pix_fmt", "yuv420p"),
-        "color_transfer": vs.get("color_transfer", ""),
-        "video_bitrate_kbps": video_bps // 1000,
-    }
-
-
-# ── User-supplied encode overrides (#50) ──────────────────────────────────────
-# Every value below arrives as text from a form field and ends up in a subprocess
-# argv, so validation lives in exactly ONE place: validate_encode_overrides().
-# Anything unparseable, out of range or structurally wrong falls back to auto — an
-# override must never produce an argv NVENC rejects at encoder init, because that
-# happens AFTER the download has finished and costs the user the whole job.
-_OVERRIDE_CQ_RANGE = (16, 34)        # -cq; -b:v must stay 0 (NVENC rejects the pair)
-_OVERRIDE_MAXRATE_RANGE = (1, 25)    # Mbps, before the per-resolution clamp
-_OVERRIDE_PRESETS = ("p1", "p2", "p3", "p4", "p5", "p6", "p7")
-# ll / ull / lossless are deliberately absent: the latency tunes wreck archival
-# quality and lossless conflicts with the -cq VBR model this encoder uses.
-_OVERRIDE_TUNES = ("hq", "uhq")
-_OVERRIDE_PIX_FMTS = ("yuv420p", "yuv420p10le")
-
-_OVERRIDE_INT_RE = re.compile(r"-?\d+")
-_OVERRIDE_MBPS_RE = re.compile(r"(-?\d+)[Mm]?")
-
-
-def _res_ceiling_mbps(height: int, fps: float) -> int:
-    """Absolute maxrate ceiling for an OUTPUT resolution + framerate, in Mbps.
-    4K stays at 20M whatever the framerate — 28M causes
-    'InitializeEncoder failed: invalid param (8)'. Single source of truth, shared
-    by the auto path and the override clamp so the two cannot drift apart."""
-    res_ceil = next(
-        (v for k, v in [(2160, 20), (1440, 12), (1080, 7), (720, 4)] if height >= k), 4
-    )
-    if fps > 35 and height < 2160:  # 60fps headroom for sub-4K only; 4K stays at 20M
-        res_ceil = round(res_ceil * 1.40)
-    return res_ceil
-
-
-def _override_requested(raw) -> bool:
-    """Did the user actually ask for something? "" / "0" / None / 0 mean "auto"."""
-    if raw is None:
-        return False
-    if isinstance(raw, str):
-        return raw.strip() not in ("", "0")
-    if isinstance(raw, bool):
-        return True          # a bool is nobody's encode setting — report it, reject it
-    if isinstance(raw, (int, float)):
-        return raw != 0
-    return True              # lists, objects, …: junk, but junk that was passed in
-
-
-def _override_int(raw) -> Optional[int]:
-    """Strict int coercion for form text. Rejects None, bools, floats, unit
-    suffixes and internally-spaced junk — anything ambiguous becomes None."""
-    if raw is None or isinstance(raw, bool):
-        return None
-    if isinstance(raw, int):
-        return raw
-    if not isinstance(raw, str):
-        return None          # floats included: 22.5 is not a CQ, do not truncate it
-    text = raw.strip()
-    return int(text) if _OVERRIDE_INT_RE.fullmatch(text) else None
-
-
-def _override_mbps(raw) -> Optional[int]:
-    """As _override_int, but tolerating the "20M"/"20m" suffix the UI sends.
-    "20 M", "7.5M" and "1e3M" are junk and become None."""
-    if raw is None or isinstance(raw, bool):
-        return None
-    if isinstance(raw, int):
-        return raw
-    if not isinstance(raw, str):
-        return None
-    m = _OVERRIDE_MBPS_RE.fullmatch(raw.strip())
-    return int(m.group(1)) if m else None
-
-
-def _override_word(raw) -> str:
-    """Normalise an enum-ish override to a bare lowercase token, or "" if it is
-    not one. Only whole tokens survive, so nothing can smuggle whitespace or a
-    separator into an argv."""
-    return raw.strip().lower() if isinstance(raw, str) else ""
-
-
-def _override_text(raw) -> str:
-    """A short, safe rendering of a rejected value for the report."""
-    return (raw if isinstance(raw, str) else repr(raw)).strip()[:32]
-
-
-def validate_encode_overrides(
-    height: int,
-    fps: float,
-    cq_override=0,
-    maxrate_override="",
-    preset_override="",
-    tune_override="",
-    pix_fmt_override="",
-    auto_tune: str = "uhq",
-    probe_tune: str = "uhq",
-) -> dict:
-    """Coerce, clamp and (on failure) discard user-supplied encode overrides.
-
-    Pure: no globals, no I/O. The NVENC capability probe result is *injected* as
-    ``probe_tune`` (call sites pass the module-level ``_nvenc_tune``) rather than
-    read here, so every branch is unit-testable without ffmpeg or a GPU.
-
-    ``height``/``fps`` are the OUTPUT resolution and framerate (i.e. after
-    ``target_res`` has been applied), so the maxrate ceiling matches what the
-    encoder will actually be asked to produce.
-
-    Returns ``{"cq", "maxrate_mbps", "preset", "pix_fmt", "tune", "report"}``
-    where ``0`` / ``""`` mean "no override, use the auto path" and ``tune`` is
-    always resolved. ``report`` maps each *requested* override to
-    ``{requested, applied, status}`` with status one of
-    applied / clamped / downgraded / rejected — a silently rewritten value
-    (25M → 20M on a 4K source) must stay distinguishable from one that was
-    ignored, so the UI can eventually say which happened.
-    """
-    report: dict = {}
-
-    def note(name, requested, applied, status):
-        report[name] = {"requested": requested, "applied": applied, "status": status}
-
-    # ── cq: 0 = auto, else 16–34 ───────────────────────────────────────────
-    cq = 0
-    if _override_requested(cq_override):
-        parsed = _override_int(cq_override)
-        lo, hi = _OVERRIDE_CQ_RANGE
-        if parsed is not None and lo <= parsed <= hi:
-            cq = parsed
-            note("cq", str(parsed), str(cq), "applied")
-        else:
-            note("cq", _override_text(cq_override), "auto", "rejected")
-
-    # ── maxrate: ""/"0" = auto, else 1M–25M clamped to the per-res ceiling ──
-    maxrate_mbps = 0
-    if _override_requested(maxrate_override):
-        parsed = _override_mbps(maxrate_override)
-        lo, hi = _OVERRIDE_MAXRATE_RANGE
-        if parsed is not None and lo <= parsed <= hi:
-            maxrate_mbps = min(parsed, _res_ceiling_mbps(height, fps))
-            note("maxrate", "{}M".format(parsed), "{}M".format(maxrate_mbps),
-                 "applied" if maxrate_mbps == parsed else "clamped")
-        else:
-            note("maxrate", _override_text(maxrate_override), "auto", "rejected")
-
-    def enum_override(name, raw, allowed):
-        """"" if not requested or not one of *allowed*, else the bare token."""
-        if not _override_requested(raw):
-            return ""
-        word = _override_word(raw)
-        if word in allowed:
-            note(name, word, word, "applied")
-            return word
-        note(name, _override_text(raw), "auto", "rejected")
-        return ""
-
-    # ── preset: "" = auto, else p1–p7 ──────────────────────────────────────
-    preset = enum_override("preset", preset_override, _OVERRIDE_PRESETS)
-
-    # ── pix_fmt: "" = auto, else yuv420p | yuv420p10le ─────────────────────
-    pix_out = enum_override("pix_fmt", pix_fmt_override, _OVERRIDE_PIX_FMTS)
-
-    # ── tune: "" = auto, else hq | uhq, downgraded if the probe says so ────
-    tune = enum_override("tune", tune_override, _OVERRIDE_TUNES) or auto_tune
-    if tune == "uhq" and "tune" in report and probe_tune != "uhq":
-        # The startup probe already decided uhq is unavailable; emitting it anyway
-        # fails at encoder init. Read the probe result, never re-run the probe.
-        # Only an *explicit* override is downgraded — an auto tune is the caller's
-        # business and already reflects the probe.
-        tune = probe_tune if probe_tune in _OVERRIDE_TUNES else "hq"
-        report["tune"].update(applied=tune, status="downgraded")
-
-    return {
-        "cq": cq,
-        "maxrate_mbps": maxrate_mbps,
-        "preset": preset,
-        "pix_fmt": pix_out,
-        "tune": tune,
-        "report": report,
-    }
-
-
-def calc_encode_params(
-    height: int,
-    fps: float,
-    video_bitrate_kbps: int,
-    codec: str,
-    pix_fmt: str,
-    color_transfer: str,
-    cq_override: int = 0,
-    maxrate_override: str = "",
-    nvenc_tune: str = "uhq",
-    target_res: int = 0,
-    sharpen: bool = False,
-    preset_override: str = "",
-    tune_override: str = "",
-    pix_fmt_override: str = "",
-    probe_tune: str = "uhq",
-) -> dict:
-    """
-    Derive NVENC encode parameters from source analysis.
-    cq_override=0  → auto-select by resolution.
-    maxrate_override="" → auto-calculate from source bitrate + codec efficiency.
-    preset_override/tune_override/pix_fmt_override="" → auto (see the matrix in #50).
-    probe_tune  → the startup NVENC probe result (_nvenc_tune); an explicit "uhq"
-                  override is downgraded to it when uhq is unsupported.
-    sharpen=True or upscaling enforces a quality floor (CQ≤24, maxrate≥3M, preset≥p4).
-
-    With every override empty this is byte-identical to the pre-#50 behaviour;
-    tests/test_encode_overrides.py pins that against a frozen implementation.
-    """
-    source_height = height
-    if target_res and target_res > 0:
-        height = target_res
-
-    # Every user-supplied value is coerced/clamped here, before any of them is
-    # used. Nothing below this line touches a raw override (#50).
-    ov = validate_encode_overrides(
-        height=height, fps=fps,
-        cq_override=cq_override, maxrate_override=maxrate_override,
-        preset_override=preset_override, tune_override=tune_override,
-        pix_fmt_override=pix_fmt_override,
-        auto_tune=nvenc_tune, probe_tune=probe_tune,
-    )
-    cq_override = ov["cq"]                       # int, 0 = auto
-    nvenc_tune = ov["tune"]                      # explicit override wins, post-downgrade
-    has_maxrate_override = bool(ov["maxrate_mbps"])
-
-    # Quality target: lower = better quality / larger file
-    if cq_override > 0:
-        cq = cq_override
-    elif height >= 2160:
-        cq = 22
-    elif height >= 1440:
-        cq = 24
-    elif height >= 1080:
-        cq = 26
-    else:
-        cq = 28
-
-    # HQ mode gets a 2-point quality boost (source bitrate cap prevents file bloat).
-    if nvenc_tune == "hq" and cq_override == 0:
-        cq = max(cq - 2, 16)
-
-    # How much smaller H.265 NVENC should be vs the source codec at equal perceptual quality.
-    # Fast motion (game footage) narrows the gap — temporal prediction helps both codecs equally.
-    efficiency = {
-        "h264":  0.55,   # H.265 ≈ 45% smaller than H.264
-        "vp9":   0.80,   # H.265 ≈ 20% smaller than VP9 (closer parity, especially at 60fps)
-        "av1":   0.92,   # AV1 and H.265 are nearly equivalent
-        "hevc":  0.88,   # Re-encoding H.265 → diminishing returns
-    }.get(codec.lower(), 0.70)
-
-    # Absolute resolution+fps ceiling (hard cap regardless of source)
-    res_ceil = _res_ceiling_mbps(height, fps)
-
-    # Per-resolution minimum — ensures CQ always has enough headroom to hit its target
-    res_min = next(
-        (v for k, v in [(2160, 8), (1440, 5), (1080, 3), (720, 2)] if height >= k), 2
-    )
-
-    # Source-derived average bitrate target and bloom-capped ceiling.
-    # Using a real b_v average + maxrate ceiling lets NVENC vary around the average
-    # and burst above it for complex frames — proper VBR instead of de-facto CBR.
-    derived_mbps = round(video_bitrate_kbps * efficiency / 1000, 1) if video_bitrate_kbps > 0 else None
-
-    if has_maxrate_override:
-        # User-specified ceiling: pure CQ mode, no average target. Already coerced
-        # and clamped to res_ceil by validate_encode_overrides.
-        maxrate_mbps = ov["maxrate_mbps"]
-    elif derived_mbps:
-        # Burst headroom keyed off derived (expected output) bitrate, not source.
-        # source * 1.875 was too generous for H.264 (0.55 efficiency) — it allowed
-        # burst headroom of 3.4× the expected output, causing H.264 sources to produce
-        # outputs larger than the source. 2× derived gives reasonable burst room while
-        # keeping average bitrate close to the expected output.
-        bloom_cap_mbps = max(round(derived_mbps) + 1, round(derived_mbps * 2))
-        maxrate_mbps = min(bloom_cap_mbps, res_ceil)
-    else:
-        # Bitrate unknown: fall back to half the resolution ceiling
-        maxrate_mbps = max(res_min, res_ceil // 2)
-
-    # HQ mode: cap at source bitrate — re-encoding a lossy source can't recover quality
-    # beyond what the source contains, so exceeding source bitrate only bloats the file.
-    # An explicit maxrate still opts out of this cap — only the ceiling clamp is new.
-    if nvenc_tune == "hq" and video_bitrate_kbps > 0 and not has_maxrate_override:
-        source_cap_mbps = video_bitrate_kbps / 1000
-        maxrate_mbps = max(min(maxrate_mbps, source_cap_mbps), res_min)
-
-    # HDR / 10-bit detection
-    hdr_transfers = {"smpte2084", "arib-std-b67", "smpte428", "bt2020-10", "bt2020-12"}
-    hdr = color_transfer in hdr_transfers
-    ten_bit = "10le" in pix_fmt or "10be" in pix_fmt or hdr
-    pix_out = "yuv420p10le" if ten_bit else "yuv420p"
-
-    if ov["pix_fmt"]:
-        # profile follows pix_fmt so the pair can never be mismatched.
-        pix_out = ov["pix_fmt"]
-        ten_bit = pix_out.endswith("10le")
-        if hdr and not ten_bit:
-            # Permitted — 8-bit output from an HDR source is a real choice — but
-            # recorded so the UI can warn about the loss. "hdr" stays True: it is
-            # a fact about the source, not about the output.
-            ov["report"]["pix_fmt"]["warning"] = "hdr_source_forced_8bit"
-
-    if nvenc_tune == "hq":
-        preset = "p2" if fps > 35 else "p4"
-    elif fps > 35:
-        preset = "p2" if height < 2160 else "p3"
-    else:
-        preset = "p4"
-
-    if ov["preset"]:
-        preset = ov["preset"]
-        if preset == "p2" and nvenc_tune == "uhq":
-            # uhq rejects p2. build_video_ffmpeg_args enforces the same rule as a
-            # backstop for the auto path; resolving it here keeps the *reported*
-            # preset honest about what will actually be encoded.
-            preset = "p4"
-            ov["report"]["preset"].update(applied="p4", status="clamped")
-
-    is_upscale = target_res > 0 and target_res > source_height
-    if sharpen or is_upscale:
-        cq = min(cq, 24)
-        maxrate_mbps = max(maxrate_mbps, 3)
-        if preset == "p2":
-            preset = "p4"
-
-    # Final ceiling guard, applied AFTER the sharpen/upscale floor so the two can
-    # never disagree about the same value. A no-op for every auto path (all of
-    # them already sit at or below res_ceil, and the 3M floor is below the 4M
-    # smallest ceiling) — it exists so no ordering change can leak an over-ceiling
-    # maxrate into the argv (#50).
-    if maxrate_mbps > res_ceil:
-        maxrate_mbps = res_ceil
-        if "maxrate" in ov["report"]:
-            ov["report"]["maxrate"].update(applied="{}M".format(res_ceil), status="clamped")
-
-    return {
-        "cq": cq,
-        "preset": preset,
-        "maxrate": f"{maxrate_mbps}M",
-        "bufsize": f"{maxrate_mbps * 2}M",
-        "pix_fmt": pix_out,
-        "profile": "main10" if ten_bit else "main",
-        "hdr": hdr,
-        "ten_bit": ten_bit,
-        "bf": 3,
-        "b_ref_mode": "middle",
-        # The tune the encode will actually use, after override + probe downgrade.
-        "tune": nvenc_tune,
-        # {name: {requested, applied, status}} for each override the user asked
-        # for; empty when none were. Lets the UI show 25M → 20M instead of
-        # silently appearing to ignore the setting.
-        "overrides": ov["report"],
-    }
-
-# Cancel flag for a bare `run_encode()` call. Real jobs pass their Job instead:
-# the Job owns the cancel event (/cancel sets `job.cancel`) and the subprocess
-# handles, so this global is only the default when run_encode runs standalone.
-_cancel_requested = asyncio.Event()
-# Verified at startup by _probe_nvenc_tune(); falls back to "hq" whenever the probe
-# fails, whatever the reason (old ffmpeg build, driver rejection, or anything else).
-_nvenc_tune: str = "uhq"
-# Why the uhq probe landed where it did — one of the _TUNE_* constants below. Stored
-# alongside _nvenc_tune so the cause can be surfaced later without re-probing.
-_nvenc_tune_cause: str = "supported"
-
-# Probe outcomes. "ffmpeg_too_old" and "driver_rejected" have the same effect (fall
-# back to "hq") but completely different remedies, so they must not be conflated:
-#   ffmpeg_too_old  — ffmpeg rejected the *option name*; the build predates the uhq
-#                     NVENC tune (added in ffmpeg 7.1). The driver never saw it.
-#   driver_rejected — ffmpeg knows -tune uhq; the driver/GPU refused the config.
-#   probe_failed    — the probe failed for some other/unrecognised reason. Degrade to
-#                     "hq" anyway: never leave "uhq" on a setup that just failed.
-_TUNE_SUPPORTED = "supported"
-_TUNE_FFMPEG_TOO_OLD = "ffmpeg_too_old"
-_TUNE_DRIVER_REJECTED = "driver_rejected"
-_TUNE_PROBE_FAILED = "probe_failed"
-_TUNE_NVENC_MISSING = "nvenc_missing"
-_MAX_CONSECUTIVE_ENCODE_FAILURES = 3  # pipeline mode: bail out if the encoder is fundamentally broken
-
-
-def _classify_tune_probe(stderr: str) -> str:
-    """Classify the -tune uhq probe's stderr into one of the _TUNE_* outcomes. Pure —
-    no I/O, no globals — so every branch is unit-testable without ffmpeg or a GPU.
-
-    Order matters: an ffmpeg that predates the uhq tune rejects the *option name*
-    ("Unable to parse option value" / "Error setting option tune") and the driver is
-    never consulted, so that signature is checked first. Only once ffmpeg has accepted
-    the option can "InitializeEncoder failed" / "invalid param" mean the driver said no.
-
-    Anything else that still looks like a failed run is _TUNE_PROBE_FAILED, not
-    supported — an unrecognised failure must never be read as a working uhq."""
-    err = stderr or ""
-    if "Unable to parse option value" in err or "Error setting option tune" in err:
-        return _TUNE_FFMPEG_TOO_OLD
-    if "InitializeEncoder failed" in err or "invalid param" in err:
-        return _TUNE_DRIVER_REJECTED
-    # Generic ffmpeg failure markers: the probe blew up in a way we don't have a
-    # specific remedy for. Still a failure, so still degrade to "hq".
-    generic_failures = (
-        "Conversion failed",
-        "Error while opening encoder",
-        "Error initializing output stream",
-        "Unknown encoder",
-        "Cannot load nvcuda",
-        "No NVENC capable devices found",
-    )
-    if any(marker in err for marker in generic_failures):
-        return _TUNE_PROBE_FAILED
-    return _TUNE_SUPPORTED
-
-
-async def _probe_nvenc_tune():
-    """Test whether hevc_nvenc accepts -tune uhq.
-    Note: -bf at any value (even 0) is incompatible with uhq on all tested NVENC GPUs
-    (RTX 3060, RTX 4080). uhq manages B-frames internally; passing -bf overrides this
-    and causes InitializeEncoder failed: invalid param (8). The probe tests uhq without
-    -bf, which is how it's actually used in encodes."""
-    global _nvenc_tune, _nvenc_tune_cause
-    if not HAS_NVENC:
-        _nvenc_tune = "hq"
-        _nvenc_tune_cause = _TUNE_NVENC_MISSING
-        logger.info("hevc_nvenc is not available in this ffmpeg — video conversion "
-                    "is disabled; download-only and audio extraction still work.")
-        return
-    proc = await asyncio.create_subprocess_exec(
-        get_ffmpeg(), "-f", "lavfi", "-i", "nullsrc=s=1920x1080:d=0.1",
-        "-vframes", "3",
-        "-c:v", "hevc_nvenc",
-        "-preset", "p4",
-        "-tune", "uhq",
-        "-rc", "vbr",
-        "-cq", "26",
-        "-b:v", "0",
-        "-maxrate", "7M",
-        "-bufsize", "14M",
-        "-rc-lookahead", "16",
-        "-f", "null", "-",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    _, stderr = await proc.communicate()
-    err = stderr.decode(errors="replace")
-    cause = _classify_tune_probe(err)
-    # Belt and braces: a non-zero exit means the probe failed even if none of the
-    # known markers appeared in stderr. Never report "supported" on a failed run.
-    if cause == _TUNE_SUPPORTED and proc.returncode not in (0, None):
-        cause = _TUNE_PROBE_FAILED
-
-    _nvenc_tune_cause = cause
-    if cause == _TUNE_SUPPORTED:
-        _nvenc_tune = "uhq"
-        logger.info("hevc_nvenc: 'uhq' supported")
-    else:
-        _nvenc_tune = "hq"
-        if cause == _TUNE_FFMPEG_TOO_OLD:
-            logger.info("hevc_nvenc: this ffmpeg build does not know the 'uhq' tune "
-                        "(added in ffmpeg 7.1) — using 'hq' + AQ. Update ffmpeg to "
-                        "enable it; your GPU driver is not the problem.")
-        elif cause == _TUNE_DRIVER_REJECTED:
-            logger.info("hevc_nvenc: 'uhq' not supported on this driver — using 'hq' + AQ. "
-                        "Update the NVIDIA driver to enable it.")
-        else:
-            logger.info("hevc_nvenc: 'uhq' probe failed for an unrecognised reason — "
-                        "using 'hq' + AQ")
-
-
-async def _probe_ffmpeg_capabilities():
-    """One startup probe for every ffmpeg capability the app branches on (#99).
-
-    Runs from `lifespan`, never at import, so importing this module spawns no
-    subprocess. Records whether hevc_nvenc is listed at all (if not, the uhq
-    probe is skipped and video conversion is refused before any download), the
-    uhq tune outcome, and the two optional filters."""
-    global HAS_NVENC, HAS_SCALE_CUDA, HAS_LIBPLACEBO
-    HAS_NVENC = await asyncio.to_thread(_ffmpeg_has_encoder, "hevc_nvenc")
-    filters = await asyncio.to_thread(_ffmpeg_filter_names)
-    HAS_SCALE_CUDA = "scale_cuda" in filters
-    HAS_LIBPLACEBO = "libplacebo" in filters
-    await _probe_nvenc_tune()
-
-
-# ── Startup capability report (#47) ──────────────────────────────────────────
-# The startup probes in _probe_ffmpeg_capabilities() each quietly select a lesser
-# path when they fail: _probe_nvenc_tune() (the uhq archival tune), HAS_SCALE_CUDA
-# (GPU-resident pixel-format conversion) and HAS_LIBPLACEBO (the ewa_lanczos
-# scaler). None of that ever reached the UI, so an ffmpeg predating a feature
-# could cost output quality for months without a word. The report below turns
-# those *already computed* results into something the UI can show. No probe is
-# re-run here.
-#
-# THE PROBES ARE THE ONLY GATE. The version string is descriptive — it explains a
-# failure, it never decides one. Distro packages, git-master snapshots and vendor
-# builds all version inconsistently, so a version comparison used as the real gate
-# would fire on perfectly healthy installs. Probe for behaviour, report the
-# version to explain it.
-
-FFMPEG_VERSION_UNKNOWN = "unknown version"
-FFMPEG_PATH_UNKNOWN = "unknown path"
-
-_FFMPEG_VERSION_RE = re.compile(r"ffmpeg version\s+(\S+)", re.IGNORECASE)
-
-# Cached at startup by _refresh_capability_report(), served by GET /capabilities.
-_capability_report: dict = {}
-
-
-def _parse_ffmpeg_version(output: str) -> str:
-    """Pull the version/build token out of `ffmpeg -version` output. Pure.
-
-    Covers the shapes seen in the wild:
-        ffmpeg version 7.1.1-full_build-www.gyan.dev Copyright ...
-        ffmpeg version 2023-10-29-git-2532e832d2-full_build-www.gyan.dev ...
-        ffmpeg version n7.1 Copyright ...
-        ffmpeg version 6.1.1 Copyright ...          (Fedora)
-
-    Returns "" when the output is not recognisably ffmpeg. An unusual build must
-    degrade to "unknown version" — never to a bogus one, and never to silence."""
-    m = _FFMPEG_VERSION_RE.search(output or "")
-    return m.group(1) if m else ""
-
-
-def _read_ffmpeg_version() -> str:
-    """The build string from `ffmpeg -version`, or "" if it cannot be read.
-
-    This is the one extra subprocess the report is allowed (the encode probes are
-    emphatically *not* re-run). Returns "" on any failure at all — missing binary,
-    timeout, non-zero exit, unparseable output. The caller degrades to
-    "unknown version" and still warns on whatever the probes found."""
-    try:
-        out = subprocess.run([get_ffmpeg(), "-hide_banner", "-version"],
-                             capture_output=True, text=True, timeout=15)
-    except Exception:
-        return ""
-    return _parse_ffmpeg_version((out.stdout or "") + "\n" + (out.stderr or ""))
-
-
-def _uhq_capability(tune_cause: str, has_nvenc: bool = True) -> dict:
-    """The uhq-tune entry, built from #44's already-resolved cause. Same symptom,
-    different remedies: an ffmpeg that never knew the option and a driver that
-    refused it must not be given the same advice.
-
-    With no NVENC at all the tune probe never ran, so reporting the outcome as an
-    "unrecognised" probe failure would be misleading — name the real blocker."""
-    if not has_nvenc or tune_cause == _TUNE_NVENC_MISSING:
-        return {
-            "key": "nvenc_uhq_tune",
-            "name": "Best-quality encode mode (uhq)",
-            "ok": False,
-            "cause": _TUNE_NVENC_MISSING,
-            "impact": "Video conversion is unavailable.",
-            "remedy": ("NVENC is unavailable, so this mode cannot run. Video "
-                       "conversion needs an ffmpeg built with NVENC and an "
-                       "NVIDIA GPU."),
-        }
-    if tune_cause == _TUNE_FFMPEG_TOO_OLD:
-        remedy = ("Update ffmpeg. This mode arrived in ffmpeg 7.1. "
-                  "Your GPU driver is fine.")
-    elif tune_cause == _TUNE_DRIVER_REJECTED:
-        remedy = ("Update your NVIDIA driver. This ffmpeg has the mode; "
-                  "the driver turned it down.")
-    elif tune_cause == _TUNE_SUPPORTED:
-        remedy = ""
-    else:
-        remedy = ("Check the startup log for the hevc_nvenc probe output — the "
-                  "test failed for a reason we do not recognise.")
-    return {
-        "key": "nvenc_uhq_tune",
-        "name": "Best-quality encode mode (uhq)",
-        "ok": tune_cause == _TUNE_SUPPORTED,
-        "cause": tune_cause,
-        "impact": "Encodes use the faster 'hq' mode instead — slightly lower "
-                  "quality.",
-        "remedy": remedy,
-    }
-
-
-def build_capability_report(*, ffmpeg_path: str, ffmpeg_version: str,
-                            tune_cause: str, has_scale_cuda: bool,
-                            has_libplacebo: bool, has_nvenc: bool = True) -> dict:
-    """Compose the capability report and its warning. Pure — every input is
-    injected, so the whole thing is unit-testable with no ffmpeg, no GPU and no
-    subprocess.
-
-    `warning` is None exactly when every probe passed. It is never keyed off
-    *ffmpeg_version*: an empty version yields "unknown version" in the message and
-    changes nothing about whether the warning exists."""
-    caps = [
-        {
-            "key": "nvenc",
-            "name": "NVENC video encoding (hevc_nvenc)",
-            "ok": bool(has_nvenc),
-            "cause": "supported" if has_nvenc else "encoder_missing",
-            "impact": "Video conversion is unavailable — download-only and "
-                      "audio extraction still work.",
-            "remedy": "" if has_nvenc else
-                      ("Install an ffmpeg built with NVENC (--enable-nvenc) on "
-                       "a machine with an NVIDIA GPU."),
-        },
-        _uhq_capability(tune_cause, has_nvenc),
-        {
-            "key": "scale_cuda",
-            "name": "Colour-format conversion on the GPU (scale_cuda)",
-            "ok": bool(has_scale_cuda),
-            "cause": "supported" if has_scale_cuda else "filter_missing",
-            "impact": "That one step runs on the CPU instead — encodes are a "
-                      "bit slower.",
-            "remedy": "" if has_scale_cuda else
-                      ("Only ffmpeg builds made with --enable-libnpp have it. "
-                       "The Windows gyan.dev and BtbN builds do; most Linux "
-                       "packages do not."),
-        },
-        {
-            "key": "libplacebo",
-            "name": "Best-quality resizing (libplacebo)",
-            "ok": bool(has_libplacebo),
-            "cause": "supported" if has_libplacebo else "filter_missing",
-            "impact": "Resizing uses a simpler, slightly softer scaler.",
-            "remedy": "" if has_libplacebo else
-                      "Only ffmpeg builds made with --enable-libplacebo have it.",
-        },
-    ]
-
-    path = ffmpeg_path or FFMPEG_PATH_UNKNOWN
-    version = ffmpeg_version or FFMPEG_VERSION_UNKNOWN
-    # Without NVENC, no video encode can run at all: lead with that fact and keep
-    # the optional-filter remedies out of a warning that cannot apply yet.
-    failing = [c for c in caps if not c["ok"]] if has_nvenc else \
-              [c for c in caps if c["key"] == "nvenc"]
-
-    warning = None
-    if failing:
-        if not has_nvenc:
-            headline = ("Video conversion is unavailable — this ffmpeg has no "
-                        "NVENC encoder")
-        else:
-            n = len(failing)
-            noun = "feature" if n == 1 else "features"
-            fallback = "a slower fallback" if n == 1 else "slower fallbacks"
-            headline = "ffmpeg is missing {} {} — FetchForge is using {}".format(
-                n, noun, fallback)
-        # The path is the headline fact: the whole confusion this warning exists
-        # to end was not knowing *which* ffmpeg was in use.
-        text = "{} | ffmpeg: {} ({}) | {}".format(
-            headline, path, version,
-            " ".join("{} — {}".format(c["name"], c["remedy"]) for c in failing))
-        warning = {
-            "headline": headline,
-            "ffmpeg_path": path,
-            "ffmpeg_version": version,
-            "items": [{"name": c["name"], "impact": c["impact"],
-                       "remedy": c["remedy"]} for c in failing],
-            "text": text,
-        }
-        # Every optional capability is an EXTRA on top of NVENC encoding. Read
-        # without this line the banner is easily taken to mean the GPU is not
-        # encoding at all — the exact misreading it caused in practice. With no
-        # NVENC encoder, that reassurance would simply be false.
-        if has_nvenc:
-            warning["reassurance"] = ("GPU encoding itself is working — "
-                                      "these are extras on top of it.")
-
-    return {
-        "ffmpeg_path": path,
-        "ffmpeg_version": version,
-        "capabilities": caps,
-        "warning": warning,
-    }
-
-
-def _refresh_capability_report() -> dict:
-    """Build the report from results already computed at startup, cache it, return it.
-
-    DANGER ZONE: called from `lifespan`. A diagnostic must never stop the server
-    booting, so every step that touches the outside world is individually wrapped
-    and the whole body is wrapped again. Worst case is a report that says it is
-    unavailable, next to a server that started fine.
-
-    Note the version read is caught *separately* from the report build: a version
-    that cannot be read degrades to "unknown version" and must never suppress an
-    otherwise-valid probe warning."""
-    global _capability_report
-    try:
-        try:
-            path = get_ffmpeg()
-        except Exception:
-            path = ""
-        try:
-            version = _read_ffmpeg_version()
-        except Exception:
-            version = ""
-        report = build_capability_report(
-            ffmpeg_path=str(path or ""),
-            ffmpeg_version=version,
-            tune_cause=_nvenc_tune_cause,
-            has_nvenc=HAS_NVENC,
-            has_scale_cuda=HAS_SCALE_CUDA,
-            has_libplacebo=HAS_LIBPLACEBO,
-        )
-        if report.get("warning"):
-            logger.warning(report["warning"]["text"])
-        else:
-            logger.info("ffmpeg capabilities: all probes passed ({})".format(
-                report.get("ffmpeg_version")))
-        _capability_report = report
-    except Exception as e:
-        logger.warning("capability report unavailable: {}".format(e))
-        _capability_report = {
-            "ffmpeg_path": FFMPEG_PATH_UNKNOWN,
-            "ffmpeg_version": FFMPEG_VERSION_UNKNOWN,
-            "capabilities": [],
-            "warning": None,
-            "error": "capability report unavailable",
-        }
-    return _capability_report
-
-
-def build_video_ffmpeg_args(input_file: Path, output_file: Path, params: dict,
-                            effective_tune: str, codec: str,
-                            target_height: int = 0, sharpen: bool = False,
-                            input_opts: list = ()) -> list:
-    """Construct the hevc_nvenc ffmpeg argv. Pure (no I/O beyond the module-level
-    capability probes) so it can be unit-tested with a fixture params dict. Single
-    source of truth for the three former copies (H-2).
-
-    *target_height* is forwarded to _decode_filter_args for optional scaling.
-    When 0 (default) the filter chain is byte-identical to the original.
-    *sharpen* appends a gentle CAS filter to the -vf chain.
-    *input_opts* (e.g. section_input_seek) go immediately before -i.
-
-    params["tune"] (set by calc_encode_params, absent from hand-built fixtures)
-    wins over *effective_tune*, so a validated user tune override cannot be lost
-    between calc_encode_params and the argv (#50)."""
-    effective_tune = params.get("tune") or effective_tune
-    # uhq requires p4+ minimum; p2 rejected — guard only needed for the uhq path.
-    effective_preset = "p4" if (effective_tune == "uhq" and params["preset"] == "p2") else params["preset"]
-    cuvid = _CUVID_DECODERS.get((codec or "").lower())
-    return _with_input_options([
-        get_ffmpeg(), "-y",
-        "-loglevel", "info",
-        *_decode_filter_args(input_file, params["pix_fmt"], cuvid, target_height, sharpen),
-        "-c:v", "hevc_nvenc",
-        "-preset", effective_preset,
-        "-profile:v", params["profile"],
-        "-tune", effective_tune,
-        "-rc", "vbr",
-        "-cq", str(params["cq"]),
-        "-b:v", "0",
-        "-maxrate", params["maxrate"],
-        "-bufsize", params["bufsize"],
-        *(["-bf", str(params["bf"]), "-b_ref_mode", params["b_ref_mode"]] if effective_tune == "hq" else []),
-        "-rc-lookahead", "16",
-        # uhq enables AQ internally; explicit flags cause invalid param on SDK 12+.
-        *(["-spatial_aq", "1", "-aq-strength", "8", "-temporal_aq", "1"] if effective_tune != "uhq" else []),
-        "-c:a", "aac",
-        "-b:a", "192k",
-        "-progress", "pipe:1",
-        "-nostats",
-        str(output_file),
-    ], list(input_opts))
-
-
-def _encode_plan(src: dict, input_file: Path, output_file: Path, opts: dict,
-                 input_opts=()) -> tuple:
-    """Build the encode params, ffmpeg argv, and log lines for one video job.
-
-    Single source of truth for the three former copies (H-2). *opts* carries the
-    request-level (or per-item) knobs: ``tune_mode``, ``cq``, ``maxrate``,
-    ``preset``, ``tune``, ``pix_fmt``, ``target_res``, ``sharpen``. *input_opts*
-    (e.g. section_input_seek) is forwarded to build_video_ffmpeg_args.
-
-    Returns ``(params, argv, logs)`` where *logs* is the "Encode params: ..."
-    line plus one "Override ..." line per non-applied override, in order. The
-    helper never emits SSE; callers yield / queue the strings themselves.
-    """
-    tune_mode = opts.get("tune_mode", "")
-    target_res = opts.get("target_res", 0)
-    sharpen = opts.get("sharpen", False)
-    effective_tune = "hq" if tune_mode == "hq" else _nvenc_tune
-    params = calc_encode_params(
-        height=src.get("height", 1080),
-        fps=src.get("fps", 30.0),
-        video_bitrate_kbps=src.get("video_bitrate_kbps", 0),
-        codec=src.get("codec", "h264"),
-        pix_fmt=src.get("pix_fmt", "yuv420p"),
-        color_transfer=src.get("color_transfer", ""),
-        cq_override=opts.get("cq", 0),
-        maxrate_override=opts.get("maxrate", ""),
-        nvenc_tune=effective_tune,
-        target_res=target_res,
-        sharpen=sharpen,
-        preset_override=opts.get("preset", ""),
-        tune_override=opts.get("tune", ""),
-        pix_fmt_override=opts.get("pix_fmt", ""),
-        probe_tune=_nvenc_tune,
-    )
-    effective_tune = params["tune"]   # post-validation/downgrade
-    logs = ["Encode params: CQ={} maxrate={} preset={} tune={} pix={}".format(
-        params["cq"], params["maxrate"], params["preset"], effective_tune, params["pix_fmt"]
-    )]
-    for _name, _rep in params["overrides"].items():
-        if _rep["status"] != "applied":
-            logs.append("Override {}={} {} → {}".format(
-                _name, _rep["requested"], _rep["status"], _rep["applied"]))
-    argv = build_video_ffmpeg_args(
-        input_file, output_file, params, effective_tune, src.get("codec", ""),
-        target_height=_effective_target_height(src.get("height", 1080), target_res),
-        sharpen=sharpen,
-        input_opts=input_opts,
-    )
-    return params, argv, logs
-
-
-async def run_encode(ffmpeg_args: list, *, duration_secs, idx: int, total: int,
-                     result: dict, job: Optional["Job"] = None):
-    """Run one ffmpeg encode/extract, yielding SSE strings for progress + log.
-
-    Drains stdout (the -progress key=value stream) and stderr (ffmpeg's human
-    log) CONCURRENTLY via a single queue, so stderr lines reach the UI within
-    ~100ms even when no stdout arrives during a long codec init (H-4) — no more
-    O(n) list.pop(0) gated on stdout. When `job` is given, its handle slot makes
-    /cancel able to terminate the process and its cancel event stops it; a bare
-    call (tests, ad-hoc reuse) falls back to the module-level flag. The ffmpeg
-    return code is written to result["returncode"]; this is the single encode
-    loop the three call sites share (H-2)."""
-    cancel = job.cancel if job is not None else _cancel_requested
-    emit = job.emit if job is not None else _sse
-    proc = await asyncio.create_subprocess_exec(
-        *ffmpeg_args,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    if job is not None:
-        job.ffmpeg = proc
-
-    q: asyncio.Queue = asyncio.Queue()
-
-    async def _pump(stream, tag):
-        async for raw in stream:
-            await q.put((tag, raw))
-        await q.put((tag + "_eof", None))
-
-    t_out = asyncio.create_task(_pump(proc.stdout, "out"))
-    t_err = asyncio.create_task(_pump(proc.stderr, "err"))
-
-    progress_buf: dict = {}
-    eofs = 0
-    terminated = False
-    try:
-        while eofs < 2:
-            tag, raw = await q.get()
-            if tag in ("out_eof", "err_eof"):
-                eofs += 1
-                continue
-            if cancel.is_set() and not terminated:
-                proc.terminate()
-                terminated = True
-                # keep draining both pipes to EOF so the pump tasks finish cleanly
-                continue
-            line = raw.decode(errors="replace").rstrip()
-            if tag == "err":
-                if line:
-                    yield emit(_ev_log(line))
-                continue
-            # tag == "out": ffmpeg -progress key=value lines
-            if "=" in line:
-                k, _, v = line.partition("=")
-                progress_buf[k.strip()] = v.strip()
-                if k.strip() == "progress":
-                    try:
-                        out_time_us = int(progress_buf.get("out_time_us", 0) or 0)
-                    except (ValueError, TypeError):
-                        out_time_us = 0
-                    current_secs = out_time_us / 1_000_000
-                    speed_str = progress_buf.get("speed", "?")
-                    fps_str = progress_buf.get("fps", "?")
-                    if duration_secs and duration_secs > 0:
-                        file_pct = min(100, (current_secs / duration_secs) * 100)
-                        overall = ((idx - 1) / total * 100) + (file_pct / total)
-                    else:
-                        file_pct = 0.0
-                        overall = ((idx - 1) / total * 100)
-                    live_bytes = int(progress_buf.get("total_size", 0) or 0)
-                    live_size = "{:.0f} MB".format(live_bytes / 1024**2) if live_bytes > 0 else ""
-                    yield emit(_ev_progress(file_pct, overall, speed_str, fps_str + " fps", live_size, live_bytes))
-                    progress_buf = {}
-            elif line:
-                yield emit(_ev_log(line))
-        await t_out
-        await t_err
-        await proc.wait()
-    finally:
-        _terminate_if_running(proc)
-        if job is not None and job.ffmpeg is proc:
-            job.ffmpeg = None
-        result["returncode"] = proc.returncode
-
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
-    html_path = PKG_DIR / "index.html"
+    html_path = config.PKG_DIR / "index.html"
     html = await asyncio.to_thread(html_path.read_text, encoding="utf-8")
     # Hand the page this launch's session token (consumed by /shutdown-now).
     html = html.replace("__DLPR_TOKEN__", _SESSION_TOKEN)
@@ -2326,10 +118,10 @@ async def index():
 @app.get("/fonts/{name}")
 async def font_asset(name: str):
     """Serve one vendored webfont. Exact-match allowlist, woff2 only."""
-    if name not in FONT_FILES:
+    if name not in config.FONT_FILES:
         return JSONResponse({"error": "not found"}, status_code=404)
     return FileResponse(
-        FONTS_DIR / name,
+        config.FONTS_DIR / name,
         media_type="font/woff2",
         # Immutable content at a stable path: a font only changes when the package
         # does, and a stale face is the one thing this whole change exists to avoid.
@@ -2340,62 +132,33 @@ async def font_asset(name: str):
 
 @app.post("/upload-cookies")
 async def upload_cookies(file: UploadFile = File(...)):
-    global _cookies_disabled
     content = await file.read()
-    await asyncio.to_thread(COOKIES_PATH.write_bytes, content)
-    _cookies_disabled = False    # fresh cookies deserve a new chance
+    await asyncio.to_thread(config.COOKIES_PATH.write_bytes, content)
+    cookies._cookies_disabled = False    # fresh cookies deserve a new chance
     return {"status": "ok", "message": "cookies.txt saved"}
-
-
-def _validate_cookies_text(text: str) -> dict:
-    """Parse a Netscape cookie file and report counts. Does not save."""
-    text = (text or "").strip()
-    if not text:
-        return {"valid": False, "reason": "empty input"}
-
-    lines = text.splitlines()
-    cookie_lines = [l for l in lines if l.strip() and not l.lstrip().startswith("#")]
-    if not cookie_lines:
-        return {"valid": False, "reason": "no cookie entries found"}
-
-    valid_cookies = 0
-    youtube_cookies = 0
-    for l in cookie_lines:
-        parts = l.split("\t")
-        if len(parts) >= 7:
-            valid_cookies += 1
-            domain = parts[0].lower()
-            if "youtube" in domain or "google" in domain:
-                youtube_cookies += 1
-
-    if valid_cookies == 0:
-        return {"valid": False, "reason": "lines are not tab-separated Netscape cookies"}
-
-    return {"valid": True, "cookies": valid_cookies, "youtube_cookies": youtube_cookies}
 
 
 @app.post("/paste-cookies")
 async def paste_cookies(text: str = Form(...)):
-    global _cookies_disabled
-    result = _validate_cookies_text(text)
+    result = cookies._validate_cookies_text(text)
     if not result.get("valid"):
         return result
 
     body = text.strip()
     if not any("netscape http cookie file" in l.lower() for l in body.splitlines()[:5]):
         body = "# Netscape HTTP Cookie File\n" + body
-    await asyncio.to_thread(COOKIES_PATH.write_text, body, encoding="utf-8")
-    _cookies_disabled = False    # fresh cookies deserve a new chance
+    await asyncio.to_thread(config.COOKIES_PATH.write_text, body, encoding="utf-8")
+    cookies._cookies_disabled = False    # fresh cookies deserve a new chance
     return result
 
 
 @app.get("/check-cookies")
 async def check_cookies():
-    if not COOKIES_PATH.exists():
+    if not config.COOKIES_PATH.exists():
         return {"exists": False}
     try:
-        text = await asyncio.to_thread(COOKIES_PATH.read_text, encoding="utf-8", errors="replace")
-        info = _validate_cookies_text(text)
+        text = await asyncio.to_thread(config.COOKIES_PATH.read_text, encoding="utf-8", errors="replace")
+        info = cookies._validate_cookies_text(text)
         return {"exists": True, **info}
     except Exception as e:
         return {"exists": True, "valid": False, "reason": str(e)}
@@ -2406,212 +169,9 @@ async def clear_cookies():
     """Remove the loaded cookies.txt so downloads run cookie-free. Public content
     needs no auth, and stale cookies are worse than none (see issue #9). Guarded
     against cross-origin callers by _origin_guard like other mutating routes."""
-    existed = COOKIES_PATH.exists()
-    await asyncio.to_thread(COOKIES_PATH.unlink, missing_ok=True)
+    existed = config.COOKIES_PATH.exists()
+    await asyncio.to_thread(config.COOKIES_PATH.unlink, missing_ok=True)
     return {"status": "ok", "existed": existed}
-
-
-# ── "Attempt to fetch cookies" — read cookies straight from installed browsers ─
-# yt-dlp can decrypt a browser's cookie store directly (same path
-# `--cookies-from-browser` uses). We scan every installed Chromium-family browser
-# and ALL its profiles (the YouTube-logged-in one is often not "Default"), plus
-# Firefox's default, count YouTube/Google cookies in each, and save the richest
-# source. Best-effort by design (issue #12): a profile that errors (locked
-# keyring/DB, no browser) is recorded and skipped, never fatal.
-_CHROMIUM_BROWSERS = ("brave", "chrome", "chromium", "edge", "vivaldi", "opera")
-
-
-def _browser_roots() -> dict:
-    """browser_name → user-data root for the current OS. A Chromium root holds a
-    `Local State` JSON and per-profile subdirs; a missing root = browser absent."""
-    home = Path.home()
-    sysname = platform.system()
-    if sysname == "Windows":
-        local = Path(os.getenv("LOCALAPPDATA", str(home / "AppData/Local")))
-        roaming = Path(os.getenv("APPDATA", str(home / "AppData/Roaming")))
-        return {
-            "brave": local / "BraveSoftware/Brave-Browser/User Data",
-            "chrome": local / "Google/Chrome/User Data",
-            "chromium": local / "Chromium/User Data",
-            "edge": local / "Microsoft/Edge/User Data",
-            "vivaldi": local / "Vivaldi/User Data",
-            "opera": roaming / "Opera Software/Opera Stable",
-        }
-    if sysname == "Darwin":
-        app = home / "Library/Application Support"
-        return {
-            "brave": app / "BraveSoftware/Brave-Browser",
-            "chrome": app / "Google/Chrome",
-            "chromium": app / "Chromium",
-            "edge": app / "Microsoft Edge",
-            "vivaldi": app / "Vivaldi",
-            "opera": app / "com.operasoftware.Opera",
-        }
-    config = Path(os.getenv("XDG_CONFIG_HOME", str(home / ".config")))
-    return {
-        "brave": config / "BraveSoftware/Brave-Browser",
-        "chrome": config / "google-chrome",
-        "chromium": config / "chromium",
-        "edge": config / "microsoft-edge",
-        "vivaldi": config / "vivaldi",
-        "opera": config / "opera",
-    }
-
-
-def _firefox_root() -> Path:
-    home = Path.home()
-    sysname = platform.system()
-    if sysname == "Windows":
-        return Path(os.getenv("APPDATA", str(home / "AppData/Roaming"))) / "Mozilla/Firefox"
-    if sysname == "Darwin":
-        return home / "Library/Application Support/Firefox"
-    return home / ".mozilla/firefox"
-
-
-def _chromium_profiles(root: Path) -> list:
-    """(profile_dir, display_name) pairs for a Chromium root. Reads
-    `Local State` → profile.info_cache for the dir→display-name map (so a profile
-    the user renamed in the browser shows through), falling back to on-disk Default/Profile*
-    dirs, then to ("Default", "Default")."""
-    info = {}
-    ls = root / "Local State"
-    if ls.exists():
-        try:
-            data = json.loads(ls.read_text(encoding="utf-8", errors="replace"))
-            info = (data.get("profile") or {}).get("info_cache") or {}
-        except Exception:
-            info = {}
-    profiles = []
-    if info:
-        for dirname, meta in info.items():
-            profiles.append((dirname, (meta or {}).get("name") or dirname))
-    elif root.exists():
-        for p in sorted(root.iterdir()):
-            if p.is_dir() and (p.name == "Default" or p.name.startswith("Profile")):
-                profiles.append((p.name, p.name))
-    return profiles or [("Default", "Default")]
-
-
-# ── Chromium App-Bound Encryption (issue #46) ────────────────────────────────
-# Chromium 127+ on Windows binds the cookie-encryption key to the browser
-# executable via an elevation service, so no external process can unwrap it —
-# `--cookies-from-browser` can never succeed for Brave/Chrome/Edge/Vivaldi on
-# such a profile. yt-dlp reports it as a bare "Failed to decrypt with DPAPI",
-# which reads like a transient permissions problem; it is permanent. We detect
-# it so the UI can say so and route the user to the extension-export path
-# ("Load cookies.txt" / "Paste cookies"), which works because an extension runs
-# inside the browser. Detection is diagnostic only — never an abort, never a
-# workaround attempt, and Windows-only (ABE has no Linux/macOS equivalent).
-APP_BOUND_ENCRYPTION = "app_bound_encryption"
-
-# yt-dlp's decrypt-failure wording (yt-dlp issues 10927 / 7271). A locked cookie
-# DB ("Could not copy ... cookie database") is a *different*, possibly transient
-# failure and must keep its own reason — so match the decrypt wording only.
-_DECRYPT_FAILURE_HINTS = ("failed to decrypt", "dpapi")
-
-
-def _looks_like_decrypt_failure(msg) -> bool:
-    """True when an extraction error is a cookie *decryption* failure rather
-    than a locked/absent database. Total — never raises."""
-    try:
-        low = str(msg or "").lower()
-    except Exception:
-        return False
-    return any(h in low for h in _DECRYPT_FAILURE_HINTS)
-
-
-def _chromium_uses_app_bound_encryption(root: Path) -> bool:
-    """True when a Chromium user-data root's `Local State` carries an App-Bound
-    Encryption key. Cheap (no DB access, no locked-file copy) and total: a
-    missing, empty, malformed or unreadable `Local State` yields False so the
-    candidate stays reported as a plain error. Windows-only by definition."""
-    if platform.system() != "Windows":
-        return False
-    try:
-        data = json.loads((root / "Local State").read_text(encoding="utf-8", errors="replace"))
-        if not isinstance(data, dict):
-            return False
-        os_crypt = data.get("os_crypt")
-        if not isinstance(os_crypt, dict):
-            return False
-        return bool(os_crypt.get("app_bound_encrypted_key"))
-    except Exception:
-        return False
-
-
-def _failure_reason(root: Path, error_msg) -> str:
-    """Machine-readable reason for a failed Chromium candidate, or "" when the
-    failure has no more specific explanation than its error string."""
-    if _looks_like_decrypt_failure(error_msg) and _chromium_uses_app_bound_encryption(root):
-        return APP_BOUND_ENCRYPTION
-    return ""
-
-
-class _QuietYDLLogger:
-    """Silences yt-dlp's chatty extraction output; we surface our own status."""
-    def debug(self, *a, **k): pass
-    info = warning = error = trouble = debug
-
-
-def _extract_one(browser: str, profile):
-    """Extract cookies for one (browser, profile) into a YoutubeDLCookieJar.
-    Blocking (subprocess + desktop keyring). Raises on any failure."""
-    from yt_dlp.cookies import extract_cookies_from_browser
-    return extract_cookies_from_browser(browser, profile=profile, logger=_QuietYDLLogger())
-
-
-def _count_youtube_cookies(jar) -> tuple:
-    total = yt = 0
-    for c in jar:
-        total += 1
-        dom = (getattr(c, "domain", "") or "").lower()
-        if "youtube" in dom or "google" in dom:
-            yt += 1
-    return total, yt
-
-
-def _save_jar(jar, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    jar.save(str(path), ignore_discard=True, ignore_expires=True)
-
-
-def _scan_all_browser_cookies() -> list:
-    """Enumerate installed browsers + profiles, extract each, count YouTube
-    cookies. Returns [(entry_dict, jar_or_None)] sorted by youtube_cookies desc.
-    Keeps each jar so the caller can save the winner without re-extracting.
-    Blocking — call via asyncio.to_thread."""
-    results = []
-    for browser, root in _browser_roots().items():
-        if not root.exists():
-            continue
-        for profile_dir, display in _chromium_profiles(root):
-            entry = {"browser": browser, "profile_dir": profile_dir,
-                     "display_name": display, "cookies": 0, "youtube_cookies": 0}
-            jar = None
-            try:
-                jar = _extract_one(browser, profile_dir)
-                entry["cookies"], entry["youtube_cookies"] = _count_youtube_cookies(jar)
-            except Exception as e:
-                entry["error"] = str(e)[:200]
-                reason = _failure_reason(root, entry["error"])   # total; cannot raise
-                if reason:
-                    entry["reason"] = reason
-                jar = None
-            results.append((entry, jar))
-    ff = _firefox_root()
-    if ff.exists():
-        entry = {"browser": "firefox", "profile_dir": None,
-                 "display_name": "default", "cookies": 0, "youtube_cookies": 0}
-        jar = None
-        try:
-            jar = _extract_one("firefox", None)
-            entry["cookies"], entry["youtube_cookies"] = _count_youtube_cookies(jar)
-        except Exception as e:
-            entry["error"] = str(e)[:200]
-            jar = None
-        results.append((entry, jar))
-    results.sort(key=lambda r: r[0].get("youtube_cookies", 0), reverse=True)
-    return results
 
 
 @app.post("/fetch-cookies")
@@ -2621,29 +181,27 @@ async def fetch_cookies(browser: str = Form(""), profile: str = Form("")):
     browser (+optional profile dir), extract just that source instead. A fresh
     save clears the stale-cookie flag (#9). Per-candidate failures are reported,
     never fatal. Guarded against cross-origin callers by _origin_guard."""
-    global _cookies_disabled
-
     if browser:
         prof = profile or None
         try:
-            jar = await asyncio.to_thread(_extract_one, browser, prof)
+            jar = await asyncio.to_thread(cookies._extract_one, browser, prof)
         except Exception as e:
             label = "{}{}".format(browser, "/" + profile if profile else "")
-            root = _browser_roots().get(browser)
-            reason = _failure_reason(root, str(e)) if root is not None else ""
+            root = cookies._browser_roots().get(browser)
+            reason = cookies._failure_reason(root, str(e)) if root is not None else ""
             out = {"selected": None, "candidates": [],
                    "error": "Could not read {}: {}".format(label, str(e)[:200])}
             if reason:
                 out["reason"] = reason
             return out
-        total, yt = _count_youtube_cookies(jar)
-        await asyncio.to_thread(_save_jar, jar, COOKIES_PATH)
-        _cookies_disabled = False
+        total, yt = cookies._count_youtube_cookies(jar)
+        await asyncio.to_thread(cookies._save_jar, jar, config.COOKIES_PATH)
+        cookies._cookies_disabled = False
         sel = {"browser": browser, "profile_dir": prof,
                "display_name": profile or "default", "cookies": total, "youtube_cookies": yt}
         return {"selected": sel, "candidates": [sel]}
 
-    results = await asyncio.to_thread(_scan_all_browser_cookies)
+    results = await asyncio.to_thread(cookies._scan_all_browser_cookies)
     candidates = [entry for entry, _ in results]
     best_entry, best_jar = next(
         ((e, j) for e, j in results if e.get("youtube_cookies", 0) > 0 and j is not None),
@@ -2652,8 +210,8 @@ async def fetch_cookies(browser: str = Form(""), profile: str = Form("")):
     if best_entry is None:
         return {"selected": None, "candidates": candidates}
     try:
-        await asyncio.to_thread(_save_jar, best_jar, COOKIES_PATH)
-        _cookies_disabled = False
+        await asyncio.to_thread(cookies._save_jar, best_jar, config.COOKIES_PATH)
+        cookies._cookies_disabled = False
     except Exception as e:
         return {"selected": None, "candidates": candidates,
                 "error": "Found cookies but failed to save: {}".format(str(e)[:200])}
@@ -2662,7 +220,7 @@ async def fetch_cookies(browser: str = Form(""), profile: str = Form("")):
 
 @app.get("/history")
 async def get_history():
-    return await _load_history()
+    return await history._load_history()
 
 
 @app.post("/history")
@@ -2681,22 +239,22 @@ async def add_history(
         "count": int(count) if count.isdigit() else 1,
         "added": datetime.datetime.now().isoformat(timespec="seconds"),
     }
-    await _save_history_entry(entry)
+    await history._save_history_entry(entry)
     return {"status": "ok"}
 
 
 @app.delete("/history")
 async def clear_history():
-    async with _history_lock:
-        if HISTORY_PATH.exists():
-            await asyncio.to_thread(HISTORY_PATH.unlink)
+    async with history._history_lock:
+        if config.HISTORY_PATH.exists():
+            await asyncio.to_thread(config.HISTORY_PATH.unlink)
     return {"status": "ok"}
 
 
 @app.get("/ytdlp-version")
 async def ytdlp_version():
     proc = await asyncio.create_subprocess_exec(
-        *get_ytdlp_argv(), "--version",
+        *ytdlp.get_ytdlp_argv(), "--version",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -2712,12 +270,12 @@ async def update_ytdlp():
     it's only correct for the Windows bundled standalone exe. For the normal
     pip-dependency case we upgrade via pip against this interpreter; a system
     binary we don't own can't be updated in place, so we say so."""
-    ytdlp = get_ytdlp_argv()
-    bundled = PKG_DIR / "yt-dlp.exe"
-    if IS_WINDOWS and ytdlp == [str(bundled)]:
-        cmd = [*ytdlp, "-U"]
-    elif _ytdlp_in_this_env(ytdlp):
-        cmd = _ytdlp_upgrade_cmd()
+    ytdlp_argv = ytdlp.get_ytdlp_argv()
+    bundled = config.PKG_DIR / "yt-dlp.exe"
+    if ytdlp.IS_WINDOWS and ytdlp_argv == [str(bundled)]:
+        cmd = [*ytdlp_argv, "-U"]
+    elif ytdlp._ytdlp_in_this_env(ytdlp_argv):
+        cmd = ytdlp._ytdlp_upgrade_cmd()
         if cmd is None:
             return {"output": (
                 "yt-dlp is installed in this interpreter's environment, but "
@@ -2732,7 +290,7 @@ async def update_ytdlp():
             "FetchForge can't update it in place — update it with your OS package "
             "manager (e.g. `sudo dnf upgrade yt-dlp` or `sudo apt upgrade yt-dlp`), "
             "or run FetchForge from a virtualenv where yt-dlp is a pip dependency."
-        ).format(ytdlp[0])}
+        ).format(ytdlp_argv[0])}
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
@@ -2743,23 +301,23 @@ async def update_ytdlp():
     # the resolver would pick (e.g. a console script appears), so drop the cache
     # and let the next call re-resolve.
     if proc.returncode == 0:
-        get_ytdlp_argv.cache_clear()
+        ytdlp.get_ytdlp_argv.cache_clear()
     return {"output": stdout.decode(errors="replace").strip()}
 
 
 @app.get("/video-info")
 async def video_info(url: str):
-    if not is_http_url(url):
+    if not ytdlp.is_http_url(url):
         return JSONResponse({"error": "URL must be http or https"}, status_code=400)
     # Use --flat-playlist first to detect playlist vs single
     args = [
-        *get_ytdlp_argv(),
+        *ytdlp.get_ytdlp_argv(),
         "--flat-playlist",
         "-J",
         "--no-download",
-        *NODE_ARGS,
+        *ytdlp.NODE_ARGS,
     ]
-    args += cookie_args()
+    args += cookies.cookie_args()
     args += ["--", url]
 
     proc = await asyncio.create_subprocess_exec(
@@ -2793,7 +351,7 @@ async def video_info(url: str):
             })
         # For playlists, fetch format info from the first entry
         first_url = entries[0].get("url") or entries[0].get("webpage_url") if entries else url
-        format_info = await _get_formats(first_url)
+        format_info = await ytdlp._get_formats(first_url)
         return {
             "is_playlist": True,
             "title": info.get("title", "Playlist"),
@@ -2804,7 +362,7 @@ async def video_info(url: str):
             **format_info,
         }
     else:
-        format_info = await _get_formats(url)
+        format_info = await ytdlp._get_formats(url)
         return {
             "is_playlist": False,
             "title": info.get("title", "Unknown"),
@@ -2813,702 +371,6 @@ async def video_info(url: str):
             "uploader": info.get("uploader"),
             **format_info,
         }
-
-
-_YTDLP_REASON_MAX = 300
-
-
-def _ytdlp_error_reason(stderr_text: str, returncode: int) -> str:
-    """Short, DOM-safe reason for a failed yt-dlp call: its last ``ERROR:`` line,
-    else its last non-empty line, capped at _YTDLP_REASON_MAX chars. Raw stderr
-    can run to pages of warnings, so it is never passed through wholesale."""
-    lines = [ln.strip() for ln in stderr_text.splitlines() if ln.strip()]
-    errors = [ln for ln in lines if ln.startswith("ERROR:")]
-    reason = (errors or lines or [""])[-1]
-    if reason.startswith("ERROR:"):
-        reason = reason[len("ERROR:"):].strip()
-    if not reason:
-        reason = "yt-dlp exited with code {}".format(returncode)
-    if len(reason) > _YTDLP_REASON_MAX:
-        reason = reason[:_YTDLP_REASON_MAX - 1] + "…"
-    return reason
-
-
-async def _get_formats(url: str) -> dict:
-    args = [
-        *get_ytdlp_argv(),
-        "-J",
-        "--no-download",
-        "--no-playlist",
-        *NODE_ARGS,
-    ]
-    args += cookie_args()
-    args += ["--", url]
-
-    proc = await asyncio.create_subprocess_exec(
-        *args,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        # #67: never fail silently — an empty pair with no reason renders as two
-        # blank dropdowns and hides bot checks, expired cookies, private videos.
-        reason = _ytdlp_error_reason(stderr.decode(errors="replace"), proc.returncode)
-        logger.warning("format fetch failed for %s: %s", url, reason)
-        return {"video_formats": [], "audio_formats": [], "error": reason}
-
-    info = json.loads(stdout)
-    formats = info.get("formats", [])
-    video_formats = []
-    audio_formats = []
-
-    for f in formats:
-        fid = f.get("format_id", "")
-        ext = f.get("ext", "")
-        vcodec = f.get("vcodec", "none")
-        acodec = f.get("acodec", "none")
-        height = f.get("height")
-        fps = f.get("fps")
-        tbr = f.get("tbr")
-        filesize = f.get("filesize") or f.get("filesize_approx")
-        note = f.get("format_note", "")
-
-        if vcodec != "none" and acodec == "none":
-            label = f"{height}p" if height else ""
-            if fps and fps > 30:
-                label += f"{int(fps)}"
-            if tbr:
-                label += f" ~{int(tbr)}k"
-            if filesize:
-                label += f" ({filesize / 1024**3:.1f}GB)"
-            video_formats.append({
-                "id": fid, "ext": ext, "label": label,
-                "height": height or 0, "fps": fps or 0,
-                "vcodec": vcodec, "note": note,
-                "filesize": filesize or 0,
-            })
-        elif acodec != "none" and vcodec == "none":
-            abr = f.get("abr", 0)
-            label = f"{acodec} {int(abr)}k" if abr else acodec
-            if filesize:
-                label += f" ({filesize / 1024**2:.0f}MB)"
-            # Multi-language videos (YouTube auto-dubs) carry one format per
-            # track. yt-dlp puts the track name first in format_note
-            # ("Spanish (Spain), medium", "English (US) original (default), low"),
-            # so lead the label with it or the tracks are indistinguishable.
-            language = f.get("language")
-            if language:
-                track = note.split(",")[0].strip() or language
-                label = f"{track} · {label}"
-            audio_formats.append({
-                "id": fid, "ext": ext, "label": label,
-                "abr": abr or 0, "acodec": acodec, "note": note,
-                "filesize": filesize or 0, "language": language,
-                "language_preference": f.get("language_preference") or 0,
-            })
-
-    video_formats.sort(key=lambda x: (x["height"], x["fps"]), reverse=True)
-    # Original-language track first (yt-dlp: 10 original, 5 default, -1 dub),
-    # so the pre-selected audio is never an auto-dub that happens to have a
-    # higher bitrate.
-    audio_formats.sort(key=lambda x: (x["language_preference"], x["abr"]), reverse=True)
-    return {"video_formats": video_formats, "audio_formats": audio_formats}
-
-
-_NO_NVENC_VIDEO_MESSAGE = (
-    "Video conversion needs NVENC, but this ffmpeg has no hevc_nvenc encoder. "
-    "Download-only and audio extraction still work."
-)
-
-
-def _nvenc_missing_error(mode: str, converting: bool) -> Optional[str]:
-    """Why a video job must be refused before any download, or None.
-
-    Audio extraction and download-only never touch hevc_nvenc, so they keep
-    working on an ffmpeg without NVENC (#99)."""
-    if converting and mode != "audio" and not HAS_NVENC:
-        return _NO_NVENC_VIDEO_MESSAGE
-    return None
-
-
-async def run_pipelined(items, fetch, process, cancel, *, throttle=None,
-                        finalize=None, shutdown=False, job=None):
-    """Coordinate the pipeline downloader and encoder (one item model).
-
-    `items` is an iterable of opaque item identifiers. For each one,
-    `fetch(item, emit, stopping)` is awaited and returns a payload to encode, or
-    None to skip that item. `process(payload, emit)` is awaited once per queued
-    payload and returns True on success, False on an encode failure; the
-    coordinator owns the consecutive-failure cap. Both bodies publish SSE
-    strings through the async `emit` sink — this async generator yields them in
-    order.
-
-    `throttle(item, emit, stopping)` runs after a payload is queued (the real
-    inter-download sleep), and `finalize(emit)` runs after the download loop.
-
-    This function owns `file_q` (maxsize=1), `abort`, `enc_gone`, cancel
-    polling, the two None sentinels, the encoder's drain-without-delete, and the
-    worker-task cancellation/reaping on generator close (#87). With a `job`, the
-    bodies' event dicts are logged and serialized by that job.
-    """
-    file_q: asyncio.Queue = asyncio.Queue(maxsize=1)
-    msg_q: asyncio.Queue = asyncio.Queue()
-    abort = asyncio.Event()        # set on hard failure (stops the pipeline)
-    enc_gone = asyncio.Event()     # set when the encoder exits (unblocks the fetcher)
-
-    async def emit(msg) -> None:
-        # Event dicts are logged + rendered by the job; an already rendered
-        # wire string (from run_encode) is forwarded untouched.
-        if job is not None and isinstance(msg, dict):
-            msg = job.emit(msg)
-        await msg_q.put(msg)
-
-    def stopping() -> bool:
-        return abort.is_set() or cancel.is_set() or enc_gone.is_set()
-
-    async def _put_file(payload) -> bool:
-        """Hand a downloaded file to the encoder over the maxsize=1 queue, but
-        never block forever if the encoder has stopped consuming (abort, cancel,
-        or encoder exited). Returns False if we gave up without enqueuing.
-        Fixes the dl_worker↔enc_worker deadlock (H-7)."""
-        while not stopping():
-            try:
-                file_q.put_nowait(payload)
-                return True
-            except asyncio.QueueFull:
-                await asyncio.sleep(0.1)
-        return False
-
-    async def _send_sentinel() -> None:
-        """Deliver the None stop-sentinel to the encoder so it can break out of
-        file_q.get(). Keep trying while the encoder is alive (even on
-        cancel/abort — it still needs the sentinel to exit), but give up the
-        moment it has already exited so we never block on a full queue."""
-        while not enc_gone.is_set():
-            try:
-                file_q.put_nowait(None)
-                return
-            except asyncio.QueueFull:
-                await asyncio.sleep(0.1)
-
-    async def dl_worker():
-        try:
-            for item in items:
-                if stopping():
-                    break
-                payload = await fetch(item, emit, stopping)
-                if payload is None:
-                    continue
-                if not await _put_file(payload):
-                    break   # encoder stopped consuming (abort/cancel) — don't hang
-                if throttle is not None:
-                    await throttle(item, emit, stopping)
-            if finalize is not None:
-                await finalize(emit)
-        finally:
-            # Always make sure the encoder receives its stop-sentinel (even on
-            # cancel/abort it may be idle on file_q.get()), but without blocking
-            # if it has already exited. Its own finally sends the msg_q sentinel
-            # the main loop counts.
-            await _send_sentinel()
-            await msg_q.put(None)
-
-    async def enc_worker():
-        consecutive_failures = 0
-        try:
-            while True:
-                item = await file_q.get()
-                if item is None:
-                    break
-                if cancel.is_set():
-                    break
-                ok = await process(item, emit)
-                if cancel.is_set():
-                    break
-                if not ok:
-                    consecutive_failures += 1
-                    # H-6: a single encode failure must NOT abort the pipeline —
-                    # that would kill the fetcher's in-flight download. Surface
-                    # the error and move on; only give up once the encoder looks
-                    # fundamentally broken (N in a row).
-                    if consecutive_failures >= _MAX_CONSECUTIVE_ENCODE_FAILURES:
-                        abort.set()
-                        await emit(_ev_error(
-                            "Aborting pipeline: {} consecutive encode failures.".format(consecutive_failures)))
-                        break
-                    continue
-                consecutive_failures = 0
-        finally:
-            # Unblock any pending _put_file so the fetcher can't hang on the
-            # maxsize=1 queue now that we're gone (H-7). Distinct from `abort`
-            # so a clean finish still reports success.
-            enc_gone.set()
-            # Drain queue without deleting — queued files may still be valid.
-            while True:
-                try:
-                    file_q.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
-            await msg_q.put(None)
-
-    dl_task = asyncio.create_task(dl_worker())
-    enc_task = asyncio.create_task(enc_worker())
-
-    try:
-        done_count = 0
-        while done_count < 2:
-            msg = await msg_q.get()
-            if msg is None:
-                done_count += 1
-                continue
-            yield msg
-
-        # return_exceptions: a worker dying on an unexpected error must surface as
-        # a clean error event, not crash the SSE stream (both workers already sent
-        # their msg_q sentinel via finally, so the loop above has exited).
-        for _r in await asyncio.gather(dl_task, enc_task, return_exceptions=True):
-            if isinstance(_r, Exception):
-                abort.set()
-                yield _job_emit(job, _ev_error("Pipeline worker error: {}".format(_r)))
-
-        if cancel.is_set():
-            yield _job_emit(job, _ev_cancelled('Cancelled by user.'))
-        elif not abort.is_set():
-            yield _job_emit(job, _ev_done('All done!'))
-            if shutdown:
-                # Shutdown is client-driven: emit the event, the UI runs the
-                # visible countdown and calls POST /shutdown-now itself.
-                yield _job_emit(job, _ev_shutdown('Shutting down in 60 seconds...'))
-    finally:
-        # A client disconnect cancels this generator while the workers keep
-        # running as detached tasks. Cancel them so their own finallys terminate
-        # any in-flight yt-dlp/ffmpeg, then reap them (#87).
-        for _t in (dl_task, enc_task):
-            if not _t.done():
-                _t.cancel()
-        await _reap_tasks(dl_task, enc_task)
-
-
-def _min_output_bytes(source_bytes: int, is_audio: bool) -> int:
-    """The single "is this output complete?" rule for every path: an audio
-    output only needs to exist and be at least 1 MB; a video output must be at
-    least 1 MB and 30% of its source (H.265 is 40-100% of source)."""
-    if is_audio:
-        return 1024 * 1024
-    return max(1024 * 1024, int(source_bytes * 0.30))
-
-
-def _item_is_audio(item) -> bool:
-    return item.get("mode", "video") == "audio"
-
-
-def _item_output_ext(item) -> str:
-    return audio_output_ext(item.get("audio_preset", "mp3")) if _item_is_audio(item) else "mp4"
-
-
-def _item_output_suffix(item) -> str:
-    return "" if _item_is_audio(item) else "_h265"
-
-
-def _item_dest_dir(item) -> Path:
-    raw = item.get("output_dir") or ""
-    return Path(raw) if raw else CONVERTED_DIR
-
-
-def _item_output_path(item, stem: str) -> Path:
-    return _item_dest_dir(item) / "{}{}.{}".format(
-        stem, _item_output_suffix(item), _item_output_ext(item))
-
-
-def _make_download_item(idx, data, *, mode, audio_preset, convert, delete_cache,
-                        output_dir, encode_opts) -> dict:
-    """One fully self-describing item. Every per-item value lives here, so both
-    the sequential loop and the pipeline read settings the same way."""
-    item = {
-        "idx": idx,
-        "url": data["url"],
-        "title": data.get("title") or "",
-        "duration": data.get("duration") or 0,
-        "video_format": data.get("video_format") or "",
-        "audio_format": data.get("audio_format") or "",
-        "expected_size": int(data.get("expected_size") or 0),
-        "output_dir": data.get("output_dir") or output_dir or "",
-        "tune_mode": data.get("tune_mode") or "uhq",
-        "section": data.get("section"),
-        "mode": data.get("mode") or mode,
-        "audio_preset": data.get("audio_preset") or audio_preset,
-        "convert": convert,
-        "delete_cache": delete_cache,
-    }
-    item.update(encode_opts)
-    return item
-
-
-async def fetch_item(item, emit, stopping, *, total, pipelined=False, job=None):
-    """Download one item and return its Path, or None when it was skipped,
-    failed or cancelled.
-
-    Owns the yt-dlp argv, progress parsing, cache snapshot/output detection
-    (`_newest_new_file`) and the download-completeness checks for BOTH the
-    sequential loop and the pipeline coordinator. A failed item emits
-    `item_failed` and returns None; the caller keeps going. The live yt-dlp
-    handle lives in the job's downloader slot so /cancel can reach it.
-    """
-    idx = item["idx"]
-    url = item["url"]
-    title = item.get("title") or ""
-    section = item.get("section")
-    is_audio = _item_is_audio(item)
-    convert = bool(item.get("convert", True))
-    label = "[{}/{}] ".format(idx, total) if total > 1 else ""
-    dl_label = "[DL {}/{}] ".format(idx, total) if total > 1 else ""
-
-    dest_dir = _item_dest_dir(item)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-
-    # `video_start` marks the start of processing THIS item for the UI. In
-    # sequential mode the download is the start (encode follows immediately);
-    # in pipelined mode the encoder is a separate worker that may be a whole
-    # video behind, so process_item emits it at encode time instead.
-    if not pipelined:
-        await emit(_ev_video_start(idx, total))
-
-    # Skip only when the output this job produces is already complete. A
-    # skipped item never deletes a cache file it did not download.
-    if title and (convert or is_audio):
-        predicted = _item_output_path(
-            item, _predict_output_stem(title, section_suffix(section)))
-        # A clip's size is unrelated to the full video's reported size.
-        skip_source_bytes = 0 if section else int(item.get("expected_size") or 0)
-        min_output = _min_output_bytes(skip_source_bytes, is_audio)
-        if predicted.exists() and predicted.stat().st_size >= min_output:
-            await emit(_ev_log("{}Skipping \u2014 already encoded: {}".format(
-                label, predicted.name)))
-            await emit(_ev_item_done(idx, total))
-            return None
-
-    # In pipeline mode the main progress bar tracks the concurrent ENCODE;
-    # download progress goes to the separate dl-status row via dl_progress.
-    # A `phase` event here would flip the main bar to indeterminate.
-    if not pipelined:
-        await emit(_ev_phase("{}Downloading".format(label), title))
-    if title:
-        await emit(_ev_log("{}Downloading: {}".format(dl_label, title)))
-    else:
-        await emit(_ev_log("{}Downloading...".format(dl_label)))
-
-    if is_audio:
-        fmt_args = ["-f", _audio_format_selector(item.get("audio_format", ""))]
-        merge_args = []
-    else:
-        fmt_args = ["-f", _video_format_selector(
-            item.get("video_format", ""), item.get("audio_format", ""),
-            prefer_picked=True)]
-        merge_args = ["--merge-output-format", "mkv"]
-
-    dl_args = [
-        *get_ytdlp_argv(),
-        *fmt_args,
-        *NODE_ARGS,
-        "--no-playlist",
-        "--no-overwrites",
-        *merge_args,
-        "--concurrent-fragments", "2",
-        "--retries", "25",
-        "--fragment-retries", "25",
-        "--newline",
-        "--restrict-filenames",
-        "--paths", str(CACHE_DIR),
-        "-o", "%(title)s{}.%(ext)s".format(section_suffix(section)),
-        *section_ytdlp_args(section),
-    ]
-    dl_args += cookie_args()
-    dl_args += ["--", url]
-
-    cache_patterns = _cache_snapshot_patterns(is_audio)
-    pre_existing = {p for pat in cache_patterns for p in CACHE_DIR.glob(pat)}
-    expected_dur = item.get("duration") or 0
-    exp_bytes = 0 if section else int(item.get("expected_size") or 0)
-
-    proc = await asyncio.create_subprocess_exec(
-        *dl_args,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-    )
-    if job is not None:
-        job.downloader = proc
-    output_paths = set()
-
-    try:
-        async for raw in proc.stdout:
-            if stopping():
-                proc.terminate()
-                break
-            line = raw.decode(errors="replace").rstrip()
-            _cw = _maybe_flag_stale_cookies(line)
-            if _cw:
-                await emit(_ev_cookie_warning(_cw))
-            m = re.search(
-                r"\[download\]\s+([\d.]+)%\s+of\s+(\S+)\s+at\s+(.+?)\s+ETA\s+(\S+)",
-                line
-            )
-            if m:
-                pct, size, speed, eta = m.groups()
-                if pipelined:
-                    await emit(_ev_dl_progress(float(pct), size, speed, eta, idx, total))
-                else:
-                    await emit({"type": "progress", "pct": float(pct),
-                                "size": size, "speed": speed, "eta": eta})
-            else:
-                merger = re.search(r'\[Merger\] Merging formats into "(.+?)"', line)
-                # Audio mode and section downloads have no merger — capture the
-                # destination line instead.
-                dest = re.search(r'\[download\] Destination: (.+)', line) if (is_audio or section) else None
-                already = re.search(r'\[download\] (.+?) has already been downloaded', line)
-                if merger:
-                    output_paths.add(merger.group(1))
-                elif dest:
-                    output_paths.add(dest.group(1).strip())
-                elif already:
-                    output_paths.add(already.group(1))
-                await emit(_ev_log(line))
-        await proc.wait()
-    finally:
-        # Synchronous terminate first: a finally under a re-delivered anyio
-        # cancellation must not await before terminating (#87).
-        _terminate_if_running(proc)
-        if job is not None and job.downloader is proc:
-            job.downloader = None
-        await proc.wait()
-
-    if (job.cancel.is_set() if job is not None else _cancel_requested.is_set()) or stopping():
-        return None   # user cancelled / pipeline aborted — not a download failure
-
-    allowed_suffixes = _AUDIO_EXTS if is_audio else {".mkv"}
-    files = []
-    if output_paths:
-        files = sorted(
-            [Path(p) for p in output_paths
-             if Path(p).exists() and Path(p).suffix.lower() in allowed_suffixes],
-            key=os.path.getmtime,
-        )
-        if not files and not is_audio:
-            for p in output_paths:
-                candidate = Path(p) if Path(p).suffix else Path(p).with_suffix(".mkv")
-                if candidate.exists():
-                    files = [candidate]
-                    break
-    if not files:
-        # Only a file that appeared during THIS download — never a sibling
-        # video's file already sitting in the shared cache (#8/#92).
-        found = _newest_new_file(CACHE_DIR, pre_existing, cache_patterns)
-        if found:
-            files = [found]
-
-    if proc.returncode != 0:
-        if files and await (
-                _section_download_is_complete(files[0], section, expected_dur) if section
-                else _download_is_complete(files[0], exp_bytes, expected_dur)):
-            await emit(_ev_log("{}yt-dlp exited with errors but output file verified complete \u2014 continuing.".format(dl_label)))
-        else:
-            size_note = ""
-            if files and exp_bytes > 0:
-                actual = files[0].stat().st_size
-                size_note = " (got {:.0f}MB of expected {:.0f}MB)".format(
-                    actual / 1024**2, exp_bytes / 1024**2)
-            await emit(_ev_item_failed(idx, total, "download failed"))
-            if total == 1:
-                await emit(_ev_error("{}Download failed{}.".format(label, size_note)))
-            await emit(_ev_log("{}Download failed{} \u2014 skipping, continuing with the rest.".format(dl_label, size_note)))
-            return None
-
-    if not files:
-        await emit(_ev_item_failed(idx, total, "no output"))
-        if total == 1:
-            await emit(_ev_error("{}No .mkv found after download.".format(label)))
-        await emit(_ev_log("{}No .mkv found after download \u2014 skipping, continuing with the rest.".format(dl_label)))
-        return None
-
-    await emit(_ev_log("{}Queued for encoding.".format(dl_label)))
-    return files[0]
-
-
-async def process_item(item, path, emit, *, total, pipelined=False, job=None) -> bool:
-    """Encode, audio-extract or leave-as-downloaded one fetched item.
-
-    Returns True on success (including a skipped/already-complete output) and
-    False on an encode failure. Owns the output-completeness rule and the
-    single `delete_cache` deletion site. The live ffmpeg handle lives in the
-    job's encoder slot so /cancel can reach it.
-    """
-    idx = item["idx"]
-    is_audio = _item_is_audio(item)
-    convert = bool(item.get("convert", True))
-    delete_cache = bool(item.get("delete_cache", True))
-    section = item.get("section")
-    label = "[{}/{}] ".format(idx, total) if total > 1 else ""
-    enc_label = "[ENC {}/{}] ".format(idx, total) if total > 1 else ""
-
-    # In pipelined mode the download worker runs a video ahead, so the UI's
-    # "now processing THIS video" signal must come from the encoder (encode
-    # start), not the downloader — otherwise video_start for item N+1 would
-    # fire while item N is still encoding and reset the encode timer early.
-    if pipelined:
-        await emit(_ev_video_start(idx, total))
-
-    if not convert and not is_audio:
-        await emit(_ev_log("{}Saved (no conversion): {}".format(label, path)))
-        await emit(_ev_item_done(idx, total))
-        return True
-
-    dest_dir = _item_dest_dir(item)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    safe_stem = _output_stem(path.stem, section_suffix(section))
-    output_file = _item_output_path(item, safe_stem)
-
-    source_size = path.stat().st_size if path.exists() else 0
-    min_output = _min_output_bytes(source_size, is_audio)
-
-    if output_file.exists():
-        out_size = output_file.stat().st_size
-        if out_size < min_output:
-            await emit(_ev_log("{}Removing incomplete output ({:.0f} MB, expected >={:.0f} MB) \u2014 re-encoding.".format(
-                enc_label, out_size / 1024**2, min_output / 1024**2)))
-            output_file.unlink()
-        else:
-            await emit(_ev_log("{}Skipping \u2014 output already exists: {} ({:.0f} MB)".format(
-                enc_label, output_file.name, out_size / 1024**2)))
-            if delete_cache:
-                path.unlink(missing_ok=True)
-            await emit(_ev_item_done(idx, total))
-            return True
-
-    phase_verb = "Extracting audio" if is_audio else "Converting"
-    await emit(_ev_phase(phase_verb, path.name))
-    await emit(_ev_source_size(source_size))
-
-    src = await probe_video(path)
-    duration_secs = src.get("duration") or None
-    seek = section_input_seek(section, src.get("start_time", 0.0))
-    if section:
-        duration_secs = _clip_duration(section, item.get("duration") or 0)
-    if duration_secs:
-        await emit(_ev_log("Duration: {:.1f}s".format(duration_secs)))
-    else:
-        await emit(_ev_log("Could not read duration \u2014 progress bar will be indeterminate"))
-
-    if is_audio:
-        ffmpeg_args = build_audio_ffmpeg(
-            path, output_file, item.get("audio_preset", "mp3"), input_opts=seek)
-        await emit(_ev_log("Audio extract: {} \u2192 {}".format(
-            item.get("audio_preset", "mp3").upper(), output_file.name)))
-    else:
-        params, ffmpeg_args, enc_logs = _encode_plan(
-            src, path, output_file,
-            {"tune_mode": item.get("tune_mode", "uhq"),
-             "cq": item.get("cq", "0"), "maxrate": item.get("maxrate", ""),
-             "preset": item.get("preset", ""), "tune": item.get("tune", ""),
-             "pix_fmt": item.get("pix_fmt", ""),
-             "target_res": item.get("target_res", 0),
-             "sharpen": item.get("sharpen", False)},
-            input_opts=seek,
-        )
-        await emit(_ev_encode_params(params))
-        for _log in enc_logs:
-            await emit(_ev_log(_log))
-
-    enc_res: dict = {}
-    async for _s in run_encode(ffmpeg_args, duration_secs=duration_secs,
-                               idx=idx, total=total, result=enc_res, job=job):
-        await emit(_s)
-
-    if (job.cancel.is_set() if job is not None else _cancel_requested.is_set()):
-        # User cancelled mid-encode — discard the partial output, don't treat
-        # it as a failure or retry.
-        if output_file.exists():
-            output_file.unlink(missing_ok=True)
-        return True
-
-    if enc_res["returncode"] != 0:
-        if output_file.exists():
-            output_file.unlink(missing_ok=True)
-        fail_verb = "Audio extract" if is_audio else "Conversion"
-        await emit(_ev_error("{}{} failed: {}".format(label, fail_verb, path.name)))
-        await emit(_ev_item_failed(idx, total, "encode failed"))
-        return False
-
-    source_bytes = path.stat().st_size if path.exists() else 0
-    if delete_cache:
-        path.unlink(missing_ok=True)
-    output_bytes = output_file.stat().st_size
-    size_mb = output_bytes / 1024 ** 2
-    cache_note = "cache cleared" if delete_cache else "cache kept"
-    await emit(_ev_log("Done: {} \u2014 {:.0f} MB ({})".format(output_file.name, size_mb, cache_note)))
-    if source_bytes > 0:
-        await emit(_ev_size_info(source_bytes, output_bytes))
-    await emit(_ev_item_done(idx, total))
-    return True
-
-
-async def _iter_sequential(items, *, total, shutdown, job):
-    """Sequential execution: a loop over `fetch_item` / `process_item`. Events
-    are pumped through a queue so the two coroutines can be the exact same ones
-    the pipeline coordinator drives."""
-    q: asyncio.Queue = asyncio.Queue()
-    done_ids, failed_ids = set(), set()
-
-    async def emit(msg):
-        # Our bodies hand in event dicts; `run_encode` hands in an already
-        # rendered (and already logged) wire string, forwarded untouched.
-        if isinstance(msg, dict):
-            if msg.get("type") == "item_done":
-                done_ids.add(msg.get("idx"))
-            elif msg.get("type") == "item_failed":
-                failed_ids.add(msg.get("idx"))
-            msg = job.emit(msg)
-        await q.put(msg)
-
-    async def driver():
-        try:
-            for item in items:
-                if job.cancel.is_set():
-                    break
-                path = await fetch_item(
-                    item, emit, job.cancel.is_set,
-                    total=total, pipelined=False, job=job)
-                if path is None:
-                    if job.cancel.is_set():
-                        break
-                    continue
-                await process_item(item, path, emit, total=total, job=job)
-
-            if job.cancel.is_set():
-                await emit(_ev_cancelled('Cancelled by user.'))
-            elif failed_ids and not done_ids:
-                # Every item failed. A single-item job already emitted its own
-                # `error`; a multi-item one gets one terminal error here.
-                if total > 1:
-                    await emit(_ev_error("All items failed."))
-            else:
-                await emit(_ev_done('All done!'))
-                if shutdown:
-                    await emit(_ev_shutdown('Shutting down in 60 seconds...'))
-        finally:
-            await q.put(None)
-
-    task = asyncio.create_task(driver())
-    try:
-        while True:
-            msg = await q.get()
-            if msg is None:
-                break
-            yield msg
-        await task
-    finally:
-        if not task.done():
-            task.cancel()
-        await _reap_tasks(task)
 
 
 @app.post("/download")
@@ -3541,15 +403,15 @@ async def download(
     section_start: str = Form(""),
     section_end: str = Form(""),
 ):
-    if not _try_admit():
-        return JSONResponse({"error": _BUSY_MESSAGE}, status_code=409)
-    job = _register_job(Job("download", url=url))
+    if not jobs._try_admit():
+        return JSONResponse({"error": jobs._BUSY_MESSAGE}, status_code=409)
+    job = jobs._register_job(jobs.Job("download", url=url))
 
 
     async def _download_stream():
-        refusal = _nvenc_missing_error(mode, convert == "true")
+        refusal = runner._nvenc_missing_error(mode, convert == "true")
         if refusal:
-            yield job.emit(_ev_error(refusal))
+            yield job.emit(events._ev_error(refusal))
             return
 
         _target_res = int(target_res) if target_res.lstrip("-").isdigit() else 0
@@ -3560,7 +422,7 @@ async def download(
 
         # Fail early on an unusable request-level output dir, before any
         # subprocess runs (unchanged from the pre-items flow).
-        base_dest = Path(output_dir) if output_dir else CONVERTED_DIR
+        base_dest = Path(output_dir) if output_dir else config.CONVERTED_DIR
         base_dest.mkdir(parents=True, exist_ok=True)
         encode_opts = {
             "cq": cq,
@@ -3575,15 +437,15 @@ async def download(
         # ── Build the items list: `items` when given, else one item from `url` ──
         if items.strip():
             try:
-                parsed = _parse_items_payload(items)
+                parsed = ytdlp._parse_items_payload(items)
             except (ValueError, KeyError, json.JSONDecodeError) as exc:
-                yield job.emit(_ev_error("Bad batch payload: {}".format(exc)))
+                yield job.emit(events._ev_error("Bad batch payload: {}".format(exc)))
                 return
             if not parsed:
-                yield job.emit(_ev_error("Batch had no items."))
+                yield job.emit(events._ev_error("Batch had no items."))
                 return
             download_items = [
-                _make_download_item(
+                runner._make_download_item(
                     idx, data,
                     mode=mode, audio_preset=audio_preset,
                     convert=_convert, delete_cache=_delete_cache,
@@ -3591,23 +453,23 @@ async def download(
                 for idx, data in enumerate(parsed, 1)
             ]
             total_videos = len(download_items)
-            yield job.emit(_ev_log("Batch: {} item(s) queued.".format(total_videos)))
+            yield job.emit(events._ev_log("Batch: {} item(s) queued.".format(total_videos)))
         else:
-            if not is_http_url(url):
-                yield job.emit(_ev_error('URL must be http or https.'))
+            if not ytdlp.is_http_url(url):
+                yield job.emit(events._ev_error('URL must be http or https.'))
                 return
             try:
-                section = parse_section(section_start, section_end)
+                section = sections.parse_section(section_start, section_end)
             except ValueError as exc:
-                yield job.emit(_ev_error("Bad time range: {}".format(exc)))
+                yield job.emit(events._ev_error("Bad time range: {}".format(exc)))
                 return
 
             # Old clients still send a single URL. Resolve its title/duration,
             # but never expand a playlist server-side — the client already does
             # that and a playlist response here would be silently incomplete.
-            yield job.emit(_ev_phase('Resolving...'))
-            flat_args = [*get_ytdlp_argv(), "--flat-playlist", "-J", "--no-download", *NODE_ARGS]
-            flat_args += cookie_args()
+            yield job.emit(events._ev_phase('Resolving...'))
+            flat_args = [*ytdlp.get_ytdlp_argv(), "--flat-playlist", "-J", "--no-download", *ytdlp.NODE_ARGS]
+            flat_args += cookies.cookie_args()
             flat_args += ["--", url]
 
             flat_proc = await asyncio.create_subprocess_exec(
@@ -3618,24 +480,24 @@ async def download(
             try:
                 flat_out, flat_err = await flat_proc.communicate()
             finally:
-                _terminate_if_running(flat_proc)
+                jobs._terminate_if_running(flat_proc)
                 await flat_proc.wait()
 
             if flat_proc.returncode != 0:
-                yield job.emit(_ev_error('Could not fetch video info: ' + flat_err.decode(errors='replace')[:300]))
+                yield job.emit(events._ev_error('Could not fetch video info: ' + flat_err.decode(errors='replace')[:300]))
                 return
             try:
                 info = json.loads(flat_out)
             except Exception:
-                yield job.emit(_ev_error('Failed to parse video info.'))
+                yield job.emit(events._ev_error('Failed to parse video info.'))
                 return
 
             if info.get("_type") == "playlist":
-                yield job.emit(_ev_error("URL is a playlist. Send one item per video in the items field."))
+                yield job.emit(events._ev_error("URL is a playlist. Send one item per video in the items field."))
                 return
 
             total_videos = 1
-            download_items = [_make_download_item(
+            download_items = [runner._make_download_item(
                 1,
                 {"url": url, "title": info.get("title") or "",
                  "duration": info.get("duration") or 0,
@@ -3650,43 +512,43 @@ async def download(
 
         # ── Execute: pipelined when explicitly requested, else sequential ─────
         if pipeline == "true" and total_videos > 1:
-            yield job.emit(_ev_log('Pipeline mode: next download starts while current video encodes.'))
+            yield job.emit(events._ev_log('Pipeline mode: next download starts while current video encodes.'))
 
             async def _fetch_payload(item, emit, stopping):
-                path = await fetch_item(item, emit, stopping,
-                                        total=total_videos, pipelined=True, job=job)
+                path = await runner.fetch_item(item, emit, stopping,
+                                              total=total_videos, pipelined=True, job=job)
                 return None if path is None else (item, path)
 
             async def _process_payload(payload, emit):
                 item, path = payload
-                return await process_item(item, path, emit,
-                                          total=total_videos, pipelined=True, job=job)
+                return await runner.process_item(item, path, emit,
+                                                total=total_videos, pipelined=True, job=job)
 
             async def _throttle(item, emit, stopping):
                 if item["idx"] < total_videos and not stopping():
                     sleep_s = random.uniform(3, 8)
-                    await emit(_ev_log("Next download in {:.1f}s...".format(sleep_s)))
+                    await emit(events._ev_log("Next download in {:.1f}s...".format(sleep_s)))
                     await asyncio.sleep(sleep_s)
 
-            async with contextlib.aclosing(run_pipelined(
+            async with contextlib.aclosing(runner.run_pipelined(
                     download_items, _fetch_payload, _process_payload,
                     job.cancel, throttle=_throttle,
                     shutdown=_shutdown, job=job)) as _pipeline:
                 async for _event in _pipeline:
                     yield _event
         else:
-            async for _event in _iter_sequential(
+            async for _event in runner._iter_sequential(
                     download_items, total=total_videos, shutdown=_shutdown, job=job):
                 yield _event
 
     return StreamingResponse(
-        _tracked(_job_stream(job, _download_stream()), job),
+        jobs._tracked(jobs._job_stream(job, _download_stream()), job),
         media_type="text/event-stream")
 
 
 @app.post("/cancel")
 async def cancel():
-    job = _current_job
+    job = jobs._current_job
     if job is None:
         return {"status": "nothing running"}
     return {"status": "cancelled" if job.cancel_now() else "nothing running"}
@@ -3698,7 +560,7 @@ async def probe_file(path: str = Form(...)):
     if not p.exists():
         return JSONResponse({"error": "File not found"}, status_code=400)
     proc = await asyncio.create_subprocess_exec(
-        get_ffprobe(), "-v", "quiet",
+        ytdlp.get_ffprobe(), "-v", "quiet",
         "-print_format", "json",
         "-show_streams", "-select_streams", "v:0",
         str(p),
@@ -3747,21 +609,21 @@ async def convert_local(
     tune: str = Form(""),            # "" = auto, else hq | uhq
     pix_fmt: str = Form(""),         # "" = auto, else yuv420p | yuv420p10le
 ):
-    if not _try_admit():
-        return JSONResponse({"error": _BUSY_MESSAGE}, status_code=409)
-    job = _register_job(Job("local", files=files))
+    if not jobs._try_admit():
+        return JSONResponse({"error": jobs._BUSY_MESSAGE}, status_code=409)
+    job = jobs._register_job(jobs.Job("local", files=files))
 
     async def _convert_local_stream():
-        refusal = _nvenc_missing_error(mode, True)
+        refusal = runner._nvenc_missing_error(mode, True)
         if refusal:
-            yield job.emit(_ev_error(refusal))
+            yield job.emit(events._ev_error(refusal))
             return
 
         _target_res = int(target_res) if target_res.lstrip("-").isdigit() else 0
         _sharpen = sharpen == "true"
 
         is_audio = mode == "audio"
-        out_ext = audio_output_ext(audio_preset) if is_audio else "mp4"
+        out_ext = encode.audio_output_ext(audio_preset) if is_audio else "mp4"
         out_suffix = "" if is_audio else "_h265"
 
         file_paths = [Path(f) for f in json.loads(files)]
@@ -3769,7 +631,7 @@ async def convert_local(
         total = len(file_paths)
 
         if not file_paths:
-            yield job.emit(_ev_error('No valid files found.'))
+            yield job.emit(events._ev_error('No valid files found.'))
             return
 
         custom_dest = Path(output_dir) if output_dir else None
@@ -3777,58 +639,58 @@ async def convert_local(
             custom_dest.mkdir(parents=True, exist_ok=True)
 
         action_label = "audio extraction" if is_audio else "conversion"
-        yield job.emit(_ev_log(f'{total} file(s) queued for {action_label}.'))
+        yield job.emit(events._ev_log(f'{total} file(s) queued for {action_label}.'))
 
         for idx, input_file in enumerate(file_paths, 1):
             if job.cancel.is_set():
                 break   # cancel stops the whole queue
-            yield job.emit(_ev_video_start(idx, total))
+            yield job.emit(events._ev_video_start(idx, total))
             dest_dir = custom_dest or (input_file.parent / "converted")
             dest_dir.mkdir(parents=True, exist_ok=True)
-            safe_stem = sanitize(input_file.stem)
+            safe_stem = ytdlp.sanitize(input_file.stem)
             output_file = dest_dir / "{}{}.{}".format(safe_stem, out_suffix, out_ext)
 
             source_bytes = input_file.stat().st_size if input_file.exists() else 0
             if output_file.exists():
                 out_size = output_file.stat().st_size
-                min_output = _min_output_bytes(source_bytes, is_audio)
+                min_output = runner._min_output_bytes(source_bytes, is_audio)
                 if out_size < min_output:
-                    yield job.emit(_ev_log("Removing incomplete output ({:.0f} MB, expected >={:.0f} MB) \u2014 re-encoding.".format(
+                    yield job.emit(events._ev_log("Removing incomplete output ({:.0f} MB, expected >={:.0f} MB) \u2014 re-encoding.".format(
                         out_size / 1024**2, min_output / 1024**2)))
                     output_file.unlink()
                 else:
-                    yield job.emit(_ev_log(f'Skipping — output already exists: {output_file.name} ({out_size / 1024 ** 2:.0f} MB)'))
+                    yield job.emit(events._ev_log(f'Skipping — output already exists: {output_file.name} ({out_size / 1024 ** 2:.0f} MB)'))
                     continue
 
             phase_verb = "Extracting audio" if is_audio else "Converting"
-            yield job.emit(_ev_phase(f'{phase_verb} {idx}/{total}', input_file.name))
+            yield job.emit(events._ev_phase(f'{phase_verb} {idx}/{total}', input_file.name))
             _src_bytes = input_file.stat().st_size if input_file.exists() else 0
-            yield job.emit(_ev_source_size(_src_bytes))
+            yield job.emit(events._ev_source_size(_src_bytes))
 
             # Deep-probe source for smart encode parameters
-            src = await probe_video(input_file)
+            src = await ytdlp.probe_video(input_file)
             duration_secs = src.get("duration") or None
             if duration_secs:
-                yield job.emit(_ev_log(f'Duration: {duration_secs:.1f}s'))
+                yield job.emit(events._ev_log(f'Duration: {duration_secs:.1f}s'))
 
             if is_audio:
-                ffmpeg_args = build_audio_ffmpeg(input_file, output_file, audio_preset)
+                ffmpeg_args = encode.build_audio_ffmpeg(input_file, output_file, audio_preset)
                 enc_log = "Audio extract: {} → {}".format(audio_preset.upper(), output_file.name)
-                yield job.emit(_ev_log(enc_log))
+                yield job.emit(events._ev_log(enc_log))
             else:
-                params, ffmpeg_args, enc_logs = _encode_plan(
+                params, ffmpeg_args, enc_logs = encode._encode_plan(
                     src, input_file, output_file,
                     {"tune_mode": tune_mode, "cq": cq, "maxrate": maxrate,
                      "preset": preset, "tune": tune, "pix_fmt": pix_fmt,
                      "target_res": _target_res, "sharpen": _sharpen},
                 )
-                yield job.emit(_ev_encode_params(params))
+                yield job.emit(events._ev_encode_params(params))
                 for _log in enc_logs:
-                    yield job.emit(_ev_log(_log))
+                    yield job.emit(events._ev_log(_log))
 
             enc_res: dict = {}
-            async for _s in run_encode(ffmpeg_args, duration_secs=duration_secs,
-                                       idx=idx, total=total, result=enc_res, job=job):
+            async for _s in encode.run_encode(ffmpeg_args, duration_secs=duration_secs,
+                                              idx=idx, total=total, result=enc_res, job=job):
                 yield _s
 
             if job.cancel.is_set():
@@ -3840,25 +702,25 @@ async def convert_local(
                 if output_file.exists():
                     output_file.unlink(missing_ok=True)
                 fail_verb = "Audio extract" if is_audio else "Conversion"
-                yield job.emit(_ev_error(f'{fail_verb} failed: {input_file.name}'))
+                yield job.emit(events._ev_error(f'{fail_verb} failed: {input_file.name}'))
                 return
 
             source_bytes = input_file.stat().st_size
             output_bytes = output_file.stat().st_size
-            yield job.emit(_ev_log(f'Done: {output_file.name}'))
+            yield job.emit(events._ev_log(f'Done: {output_file.name}'))
             if source_bytes > 0:
-                yield job.emit(_ev_size_info(source_bytes, output_bytes))
+                yield job.emit(events._ev_size_info(source_bytes, output_bytes))
 
         if job.cancel.is_set():
-            yield job.emit(_ev_cancelled('Cancelled by user.'))
+            yield job.emit(events._ev_cancelled('Cancelled by user.'))
         else:
-            yield job.emit(_ev_done('All done!'))
+            yield job.emit(events._ev_done('All done!'))
             if shutdown == "true":
                 # Client-driven: UI runs the visible countdown and calls /shutdown-now.
-                yield job.emit(_ev_shutdown('Shutting down in 60 seconds...'))
+                yield job.emit(events._ev_shutdown('Shutting down in 60 seconds...'))
 
     return StreamingResponse(
-        _tracked(_job_stream(job, _convert_local_stream()), job),
+        jobs._tracked(jobs._job_stream(job, _convert_local_stream()), job),
         media_type="text/event-stream")
 
 
@@ -3899,18 +761,17 @@ async def get_capabilities():
 
     Served from the cache filled in `lifespan`; the lazy refresh only fires if
     the app was started without its lifespan, and runs off the event loop."""
-    if not _capability_report:
-        await asyncio.to_thread(_refresh_capability_report)
-    return _capability_report
+    if not capabilities.get_capability_report():
+        await asyncio.to_thread(capabilities._refresh_capability_report)
+    return capabilities.get_capability_report()
 
 
 @app.get("/heartbeat")
 async def heartbeat():
     """Keep-alive ping from the open browser tab. When pings stop (tab closed),
     the watchdog self-exits the server after _HEARTBEAT_TIMEOUT seconds."""
-    global _last_heartbeat
-    _last_heartbeat = time.monotonic()
-    return {"ok": True, "timeout": _HEARTBEAT_TIMEOUT}
+    jobs._last_heartbeat = time.monotonic()
+    return {"ok": True, "timeout": jobs._HEARTBEAT_TIMEOUT}
 
 
 @app.get("/browse-folder")
@@ -3946,7 +807,7 @@ async def shutdown_now(request: Request):
     that even a same-origin mishap can't power off the machine accidentally."""
     if request.headers.get("x-dlpr-token") != _SESSION_TOKEN:
         return JSONResponse({"error": "forbidden"}, status_code=403)
-    _poweroff()
+    config._poweroff()
     return {"ok": True}
 
 
@@ -3960,7 +821,6 @@ def _bind_listen_socket(port: int):
     Binding before uvicorn starts means a busy port is known before the startup
     probes run and before the browser is pointed at whatever owns the port.
     """
-    import socket
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     if os.name == "nt":
         # Windows SO_REUSEADDR would let us bind over a live listener; this refuses it.
@@ -3978,7 +838,6 @@ def _bind_listen_socket(port: int):
 
 def _running_fetchforge_version(port: int) -> Optional[str]:
     """Version reported by a FetchForge already serving port, or None if the holder isn't one."""
-    import urllib.request
     try:
         with urllib.request.urlopen("http://{}:{}/version".format(HOST, port), timeout=2) as r:
             data = json.loads(r.read())
@@ -3995,10 +854,8 @@ def run_server(open_browser: bool = True) -> int:
     (a tab opens on it), a port held by anything else is skipped. A second launch
     walks the same order, so it finds an instance that fell back to a later port.
     """
-    global _uvicorn_server
-    import webbrowser
-    _ensure_runtime_dirs()   # create cache/downloads/logs before anything writes to them
-    _setup_logging()         # deferred here (not import time) so a bare import is side-effect-free
+    config._ensure_runtime_dirs()   # create cache/downloads/logs before anything writes to them
+    config._setup_logging()         # deferred here (not import time) so a bare import is side-effect-free
     ports = _candidate_ports()
     sock = None
     for port in ports:
@@ -4008,29 +865,28 @@ def run_server(open_browser: bool = True) -> int:
         running = _running_fetchforge_version(port)
         if running is not None:
             _set_port(port)
-            logger.info("FetchForge %s is already running at %s — opening it", running, APP_URL)
+            config.logger.info("FetchForge %s is already running at %s — opening it", running, APP_URL)
             if open_browser:
                 webbrowser.open(APP_URL)
             return 0
-        logger.info("Port %d is in use by another program — trying the next one", port)
+        config.logger.info("Port %d is in use by another program — trying the next one", port)
     if sock is None:
-        logger.error(
+        config.logger.error(
             "Ports %d-%d are all in use by other programs, so FetchForge cannot start.",
             ports[0], ports[-1])
         return 1
     _set_port(port)
-    logger.info("Starting FetchForge at %s", APP_URL)
+    config.logger.info("Starting FetchForge at %s", APP_URL)
     if open_browser:
-        import threading
         threading.Timer(1.5, lambda: webbrowser.open(APP_URL)).start()
-    config = uvicorn.Config(app, host=HOST, port=PORT)
-    _uvicorn_server = uvicorn.Server(config)
+    uvicorn_config = uvicorn.Config(app, host=HOST, port=PORT)
+    jobs._uvicorn_server = uvicorn.Server(uvicorn_config)
     try:
-        _uvicorn_server.run(sockets=[sock])
+        jobs._uvicorn_server.run(sockets=[sock])
     except Exception:
         # On a headless (no-console) launch this is the only place the failure is
         # visible — make sure it lands in logs/server.log before we die.
-        logger.exception("Server exited with an unhandled exception")
+        config.logger.exception("Server exited with an unhandled exception")
         raise
     finally:
         sock.close()
@@ -4038,6 +894,5 @@ def run_server(open_browser: bool = True) -> int:
 
 
 if __name__ == "__main__":
-    import sys
     from fetchforge.cli import main
     sys.exit(main())

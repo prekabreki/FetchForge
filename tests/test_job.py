@@ -17,7 +17,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from fetchforge import server
+from fetchforge import server, config, events, ytdlp, cookies, jobs
 
 
 _FAKE_YTDLP = textwrap.dedent('''
@@ -59,15 +59,15 @@ class JobLogTest(unittest.IsolatedAsyncioTestCase):
         self.cache.mkdir()
 
         for p in [
-            mock.patch.object(server, "get_ytdlp_argv",
+            mock.patch.object(ytdlp, "get_ytdlp_argv",
                               lambda: [sys.executable, "-c", _FAKE_YTDLP]),
-            mock.patch.object(server, "NODE_ARGS", []),
-            mock.patch.object(server, "cookie_args", lambda: []),
-            mock.patch.object(server, "LOGS_DIR", self.logs),
-            mock.patch.object(server, "CACHE_DIR", self.cache),
-            mock.patch.object(server, "CONVERTED_DIR", self.out),
-            mock.patch.object(server, "_keep_awake", lambda: None),
-            mock.patch.object(server, "_allow_sleep", lambda: None),
+            mock.patch.object(ytdlp, "NODE_ARGS", []),
+            mock.patch.object(cookies, "cookie_args", lambda: []),
+            mock.patch.object(config, "LOGS_DIR", self.logs),
+            mock.patch.object(config, "CACHE_DIR", self.cache),
+            mock.patch.object(config, "CONVERTED_DIR", self.out),
+            mock.patch.object(jobs, "_keep_awake", lambda: None),
+            mock.patch.object(jobs, "_allow_sleep", lambda: None),
         ]:
             p.start()
             self.addCleanup(p.stop)
@@ -142,13 +142,13 @@ class JobLogTest(unittest.IsolatedAsyncioTestCase):
         # still released (covered by test_admission). A started-then-abandoned
         # job logs CANCELLED, which test_wake_lock pins.
         self.assertEqual(list(self.logs.iterdir()), [])
-        self.assertFalse(server._job_admitted)
+        self.assertFalse(jobs._job_admitted)
 
 
 class JobStatusTest(unittest.TestCase):
     def test_emit_logs_and_returns_wire_form(self):
-        job = server.Job("download", url="u")
-        wire = job.emit(server._ev_log("hi"))
+        job = jobs.Job("download", url="u")
+        wire = job.emit(events._ev_log("hi"))
         self.assertTrue(wire.startswith("data: ") and wire.endswith("\n\n"))
         self.assertEqual(json.loads(wire[6:].strip()),
                          {"type": "log", "msg": "hi"})
@@ -156,17 +156,17 @@ class JobStatusTest(unittest.TestCase):
         self.assertTrue(job.lines[0].endswith("[LOG] hi"))
 
     def test_status_detection_and_default(self):
-        job = server.Job("download")
+        job = jobs.Job("download")
         self.assertEqual(job.status(), "CANCELLED")
-        job.emit(server._ev_done("All done!"))
+        job.emit(events._ev_done("All done!"))
         self.assertEqual(job.status(), "SUCCESS")
-        job.emit(server._ev_error("boom"))
+        job.emit(events._ev_error("boom"))
         self.assertEqual(job.status(), "FAILED")
 
     def test_log_file_names(self):
-        with mock.patch.object(server, "LOGS_DIR", Path("/logs")):
-            download = server.Job("download")
-            local = server.Job("local")
+        with mock.patch.object(config, "LOGS_DIR", Path("/logs")):
+            download = jobs.Job("download")
+            local = jobs.Job("local")
             self.assertTrue(download.log_path().name.endswith("_download.txt"))
             self.assertTrue(local.log_path().name.endswith("_local.txt"))
 

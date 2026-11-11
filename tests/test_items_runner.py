@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from fetchforge import server
+from fetchforge import server, config, ytdlp, cookies, jobs
 
 HAS_FFMPEG = shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
 
@@ -74,13 +74,13 @@ class ItemsRunnerTest(unittest.IsolatedAsyncioTestCase):
         self.out_b.mkdir()
 
         for p in [
-            mock.patch.object(server, "get_ytdlp_argv", lambda: [sys.executable, str(self.fake)]),
-            mock.patch.object(server, "CACHE_DIR", self.cache),
-            mock.patch.object(server, "LOGS_DIR", self.logs),
-            mock.patch.object(server, "NODE_ARGS", []),
-            mock.patch.object(server, "cookie_args", lambda: []),
-            mock.patch.object(server, "_keep_awake", lambda: None),
-            mock.patch.object(server, "_allow_sleep", lambda: None),
+            mock.patch.object(ytdlp, "get_ytdlp_argv", lambda: [sys.executable, str(self.fake)]),
+            mock.patch.object(config, "CACHE_DIR", self.cache),
+            mock.patch.object(config, "LOGS_DIR", self.logs),
+            mock.patch.object(ytdlp, "NODE_ARGS", []),
+            mock.patch.object(cookies, "cookie_args", lambda: []),
+            mock.patch.object(jobs, "_keep_awake", lambda: None),
+            mock.patch.object(jobs, "_allow_sleep", lambda: None),
         ]:
             p.start()
             self.addCleanup(p.stop)

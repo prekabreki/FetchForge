@@ -24,7 +24,7 @@ from unittest import mock
 
 import anyio
 
-from fetchforge import server
+from fetchforge import server, config, ytdlp, cookies, jobs
 
 
 class _FakeInhibitor:
@@ -95,7 +95,7 @@ class WakeLockDisconnectTest(unittest.IsolatedAsyncioTestCase):
         self.out.mkdir()
         self.inhibitors = []
 
-        real_popen, real_which = server.subprocess.Popen, server.shutil.which
+        real_popen, real_which = jobs.subprocess.Popen, jobs.shutil.which
 
         def spawn(args, *rest, **kwargs):
             # Patching Popen patches the shared subprocess module, which asyncio's
@@ -115,18 +115,18 @@ class WakeLockDisconnectTest(unittest.IsolatedAsyncioTestCase):
 
         for p in [
             mock.patch.object(Path, "write_text", slow_write_text),
-            mock.patch.object(server, "IS_WINDOWS", False),
-            mock.patch.object(server.shutil, "which",
+            mock.patch.object(jobs, "IS_WINDOWS", False),
+            mock.patch.object(jobs.shutil, "which",
                               lambda name: "/usr/bin/systemd-inhibit" if name == "systemd-inhibit"
                               else real_which(name)),
-            mock.patch.object(server.subprocess, "Popen", spawn),
-            mock.patch.object(server, "_awake_refcount", 0),
-            mock.patch.object(server, "_awake_inhibitor", None),
-            mock.patch.object(server, "LOGS_DIR", self.logs),
-            mock.patch.object(server, "NODE_ARGS", []),
-            mock.patch.object(server, "cookie_args", lambda: []),
+            mock.patch.object(jobs.subprocess, "Popen", spawn),
+            mock.patch.object(jobs, "_awake_refcount", 0),
+            mock.patch.object(jobs, "_awake_inhibitor", None),
+            mock.patch.object(config, "LOGS_DIR", self.logs),
+            mock.patch.object(ytdlp, "NODE_ARGS", []),
+            mock.patch.object(cookies, "cookie_args", lambda: []),
             mock.patch.object(server.asyncio, "create_subprocess_exec", _hanging_subprocess),
-            mock.patch.object(server, "probe_video", _hanging_probe),
+            mock.patch.object(ytdlp, "probe_video", _hanging_probe),
         ]:
             p.start()
             self.addCleanup(p.stop)
@@ -152,7 +152,7 @@ class WakeLockDisconnectTest(unittest.IsolatedAsyncioTestCase):
         return src
 
     def assert_released(self):
-        self.assertEqual(server._awake_refcount, 0)
+        self.assertEqual(jobs._awake_refcount, 0)
         self.assertTrue(self.inhibitors, "the job never took the wake lock")
         self.assertTrue(all(i.terminated for i in self.inhibitors),
                         "an inhibitor was left running")

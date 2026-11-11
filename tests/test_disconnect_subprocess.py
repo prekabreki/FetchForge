@@ -24,7 +24,7 @@ from unittest import mock
 
 import anyio
 
-from fetchforge import server
+from fetchforge import server, config, ytdlp, encode, cookies, jobs
 
 
 class _StreamReader:
@@ -165,16 +165,16 @@ class DisconnectSubprocessTest(unittest.IsolatedAsyncioTestCase):
 
         for p in [
             mock.patch.object(server.asyncio, "create_subprocess_exec", fake_subprocess),
-            mock.patch.object(server, "probe_video", fake_probe),
-            mock.patch.object(server, "get_ffmpeg", lambda: "/usr/bin/ffmpeg"),
-            mock.patch.object(server, "get_ffprobe", lambda: "/usr/bin/ffprobe"),
-            mock.patch.object(server, "NODE_ARGS", []),
-            mock.patch.object(server, "cookie_args", lambda: []),
-            mock.patch.object(server, "LOGS_DIR", self.logs),
-            mock.patch.object(server, "CACHE_DIR", self.cache),
-            mock.patch.object(server, "_keep_awake", lambda: None),
-            mock.patch.object(server, "_allow_sleep", lambda: None),
-            mock.patch.object(server, "_cancel_requested", asyncio.Event()),
+            mock.patch.object(ytdlp, "probe_video", fake_probe),
+            mock.patch.object(ytdlp, "get_ffmpeg", lambda: "/usr/bin/ffmpeg"),
+            mock.patch.object(ytdlp, "get_ffprobe", lambda: "/usr/bin/ffprobe"),
+            mock.patch.object(ytdlp, "NODE_ARGS", []),
+            mock.patch.object(cookies, "cookie_args", lambda: []),
+            mock.patch.object(config, "LOGS_DIR", self.logs),
+            mock.patch.object(config, "CACHE_DIR", self.cache),
+            mock.patch.object(jobs, "_keep_awake", lambda: None),
+            mock.patch.object(jobs, "_allow_sleep", lambda: None),
+            mock.patch.object(encode, "_cancel_requested", asyncio.Event()),
         ]:
             p.start()
             self.addCleanup(p.stop)
