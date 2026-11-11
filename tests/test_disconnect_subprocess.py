@@ -196,16 +196,18 @@ class DisconnectSubprocessTest(unittest.IsolatedAsyncioTestCase):
 
     # ── pipeline download ──────────────────────────────────────────────────
     async def test_pipeline_download_disconnect_terminates_ytdlp(self):
-        self._resolve_output = (json.dumps({
-            "_type": "playlist",
-            "entries": [
-                {"webpage_url": "https://www.youtube.com/watch?v=a", "title": "A", "duration": 10},
-                {"webpage_url": "https://www.youtube.com/watch?v=b", "title": "B", "duration": 10},
-            ],
-        }).encode(), b"")
+        # Playlists are expanded by the client now, so the pipeline is driven
+        # by the explicit `items` payload (server-side expansion is gone).
+        items = [
+            {"url": "https://www.youtube.com/watch?v=a", "title": "A",
+             "duration": 10, "audio_format": "251"},
+            {"url": "https://www.youtube.com/watch?v=b", "title": "B",
+             "duration": 10, "audio_format": "251"},
+        ]
         await _run(server.download, disconnect_after=7,
-                   url="https://www.youtube.com/playlist?list=PLx",
+                   url=items[0]["url"],
                    audio_format="251",
+                   items=json.dumps(items),
                    convert="true",
                    pipeline="true",
                    output_dir=str(self.out))
