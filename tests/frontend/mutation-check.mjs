@@ -130,6 +130,15 @@ const MUTATIONS = [
     expect: ['a /download 409 leaves the item recorded as failed, not done'],
   },
   {
+    id: 'i98/queue-title-escape',
+    guard: 'the escapeHtml() call around q.title in renderDlQueue()',
+    breaks: 'a title containing < or & is injected into the queue row as markup',
+    find: '<span class="queue-title" title="${escapeAttr(tip)}">${tag}${escapeHtml(q.title)}</span>',
+    replace: '<span class="queue-title" title="${escapeAttr(tip)}">${tag}${q.title}</span>',
+    file: 'escaping.test.mjs',
+    expect: ['a queue title with markup characters renders literally'],
+  },
+  {
     id: 'i95/read-error-retries',
     guard: 'the non-AbortError branch in runOneItem()',
     breaks: 'a connection reset mid-stream is rethrown and escapes startDownload, leaving the job flag, Cancel button and wake lock stuck',
