@@ -26,6 +26,7 @@ downloads/
 
 # Agent-workflow scratch (briefs, reports, review packages)
 .superpowers/
+.claude/session-state.md
 
 # IDE
 .vscode/
