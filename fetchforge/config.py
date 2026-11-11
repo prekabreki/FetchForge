@@ -29,6 +29,14 @@ STATE_DIR = Path.cwd()                    # all writable runtime state
 FONTS_DIR = PKG_DIR / "fonts"
 FONT_FILES = frozenset(p.name for p in FONTS_DIR.glob("*.woff2")) if FONTS_DIR.is_dir() else frozenset()
 
+# The frontend's CSS and JS, served by /static/{name}. Exact-match allowlist for
+# the same reason as the fonts: no StaticFiles mount, so only these two files
+# are reachable and a pip install cannot silently miss one.
+STATIC_FILES = {
+    "app.css": "text/css; charset=utf-8",
+    "app.js": "text/javascript; charset=utf-8",
+}
+
 COOKIES_PATH = STATE_DIR / "cookies.txt"
 
 # Intermediate webm/mkv — cleared weekly. Override with FETCHFORGE_CACHE_DIR

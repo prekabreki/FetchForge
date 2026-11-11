@@ -1,8 +1,9 @@
-// jsdom harness for the single-file frontend.
+// jsdom harness for the split frontend.
 //
-// It loads the REAL fetchforge/index.html and lets its own <script> run, so the
-// tests drive the app's actual functions against the app's actual DOM. Nothing
-// here re-implements or copy-pastes page logic.
+// It loads the REAL fetchforge/index.html plus its served app.css/app.js and
+// lets the app's own <script> run, so the tests drive the app's actual
+// functions against the app's actual DOM. Nothing here re-implements or
+// copy-pastes page logic.
 //
 // Why not extract the <script> and eval it: `let`/`const` at the top of a direct
 // eval are scoped to the eval, so extracted functions close over their own copy
@@ -22,11 +23,17 @@ import { JSDOM } from 'jsdom';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = path.resolve(HERE, '..', '..');
 
-// mutation-check.mjs points this at a deliberately broken copy to prove the
+// mutation-check.mjs points APP_JS at a deliberately broken copy to prove the
 // suite actually catches regressions.
 export const INDEX_HTML = process.env.FETCHFORGE_INDEX_HTML
   ? path.resolve(process.env.FETCHFORGE_INDEX_HTML)
   : path.join(REPO_ROOT, 'fetchforge', 'index.html');
+export const APP_CSS = process.env.FETCHFORGE_APP_CSS
+  ? path.resolve(process.env.FETCHFORGE_APP_CSS)
+  : path.join(REPO_ROOT, 'fetchforge', 'app.css');
+export const APP_JS = process.env.FETCHFORGE_APP_JS
+  ? path.resolve(process.env.FETCHFORGE_APP_JS)
+  : path.join(REPO_ROOT, 'fetchforge', 'app.js');
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -215,7 +222,21 @@ function decodeForm(body) {
  * finally/after hook or the heartbeat interval and rAF log pump keep node alive.
  */
 export async function loadPage({ routes } = {}) {
-  const html = fs.readFileSync(INDEX_HTML, 'utf8')
+  // jsdom does not fetch external subresources, so inline the two package files
+  // the server would otherwise serve from /static/. The script tag is replaced
+  // with the real app.js source, which keeps `let`/`const` in the page's own
+  // script scope (see the eval warning above).
+  const css = fs.readFileSync(APP_CSS, 'utf8');
+  const js = fs.readFileSync(APP_JS, 'utf8');
+  const stylesheetTag = '<link rel="stylesheet" href="/static/app.css">';
+  const scriptTag = '<script src="/static/app.js"></script>';
+  let html = fs.readFileSync(INDEX_HTML, 'utf8');
+  if (!html.includes(stylesheetTag) || !html.includes(scriptTag)) {
+    throw new Error(`index.html no longer links ${stylesheetTag} and ${scriptTag}; update the harness`);
+  }
+  html = html
+    .replace(stylesheetTag, () => `<style>\n${css}\n</style>`)
+    .replace(scriptTag, () => `<script>\n${js}\n</script>`)
     // The server substitutes this at serve time; leaving the raw placeholder in
     // would only matter for /shutdown-now, but keep the page honest anyway.
     .replace('__DLPR_TOKEN__', 'test-token');

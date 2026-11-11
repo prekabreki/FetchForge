@@ -22,35 +22,36 @@ from fetchforge import server, config
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PYPROJECT = REPO_ROOT / "pyproject.toml"
 INDEX_HTML = config.PKG_DIR / "index.html"
+APP_CSS = config.PKG_DIR / "app.css"
 
 WOFF2_MAGIC = b"wOF2"
 
 
-def _head() -> str:
-    """Everything up to </style> — where the font wiring lives."""
-    html = INDEX_HTML.read_text(encoding="utf-8")
-    return html[: html.index("</style>")]
+def _css() -> str:
+    """The served stylesheet — where the font wiring lives."""
+    return APP_CSS.read_text(encoding="utf-8")
 
 
 class TestNoCdnReferences(unittest.TestCase):
-    def test_index_html_has_no_google_fonts_host(self):
-        html = INDEX_HTML.read_text(encoding="utf-8").lower()
-        for host in ("fonts.googleapis.com", "fonts.gstatic.com"):
-            self.assertNotIn(host, html, "index.html still reaches out to " + host)
+    def test_ui_has_no_google_fonts_host(self):
+        for text in (_css(), INDEX_HTML.read_text(encoding="utf-8")):
+            for host in ("fonts.googleapis.com", "fonts.gstatic.com"):
+                self.assertNotIn(host, text.lower(), "the UI still reaches out to " + host)
 
-    def test_index_html_has_no_stylesheet_link_at_all(self):
-        # A <link rel=stylesheet> can only be remote here: there is no build step
-        # and the app serves a single file.
-        self.assertNotRegex(
+    def test_index_html_links_only_the_local_stylesheet(self):
+        # The CSS is a package file now, but the link must stay local: a remote
+        # <link rel=stylesheet> would reintroduce the CDN dependency.
+        hrefs = re.findall(
+            r'<link[^>]+rel=["\']stylesheet["\'][^>]*href=["\']([^"\']+)["\']',
             INDEX_HTML.read_text(encoding="utf-8"),
-            r'rel=["\']stylesheet["\']',
         )
+        self.assertEqual(hrefs, ["/static/app.css"])
 
 
 class TestFontFaceWiring(unittest.TestCase):
     def setUp(self):
-        self.head = _head()
-        self.blocks = re.findall(r"@font-face\s*\{(.*?)\}", self.head, re.S)
+        self.css = _css()
+        self.blocks = re.findall(r"@font-face\s*\{(.*?)\}", self.css, re.S)
 
     def test_both_families_declared(self):
         families = {
@@ -62,7 +63,7 @@ class TestFontFaceWiring(unittest.TestCase):
         self.assertEqual(families, {"Outfit", "JetBrains Mono"})
 
     def test_every_src_is_a_shipped_allowlisted_font(self):
-        srcs = re.findall(r"url\('(/fonts/[^']+)'\)", self.head)
+        srcs = re.findall(r"url\('(/fonts/[^']+)'\)", self.css)
         self.assertEqual(len(srcs), 4, "expected 4 @font-face src URLs, got %r" % (srcs,))
         for src in srcs:
             name = src.rsplit("/", 1)[-1]
@@ -77,7 +78,7 @@ class TestFontFaceWiring(unittest.TestCase):
             self.assertRegex(block, r"font-display:\s*swap\s*;")
 
     def test_woff2_only(self):
-        self.assertEqual(re.findall(r"format\('([^']+)'\)", self.head), ["woff2"] * 4)
+        self.assertEqual(re.findall(r"format\('([^']+)'\)", self.css), ["woff2"] * 4)
 
     def test_jetbrains_mono_weight_range_is_not_widened(self):
         # The shipped file's wght axis runs to 800, but the CDN only ever declared
@@ -95,12 +96,12 @@ class TestFontFaceWiring(unittest.TestCase):
             self.assertRegex(block, r"font-weight:\s*400 800\s*;")
 
     def test_preloads_point_at_served_fonts(self):
-        preloads = re.findall(r'<link rel="preload"[^>]*href="(/fonts/[^"]+)"[^>]*>', self.head)
+        preloads = re.findall('<link rel="preload"[^>]*href="(/fonts/[^"]+)"[^>]*>', INDEX_HTML.read_text(encoding="utf-8"))
         self.assertTrue(preloads, "no font preloads found")
         for href in preloads:
             with self.subTest(href=href):
                 # A preload for a URL the page never requests logs a console warning.
-                self.assertIn("url('%s')" % href, self.head)
+                self.assertIn("url('%s')" % href, self.css)
                 self.assertIn(href.rsplit("/", 1)[-1], config.FONT_FILES)
 
 

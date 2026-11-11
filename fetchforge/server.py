@@ -115,6 +115,23 @@ async def index():
     return HTMLResponse(html)
 
 
+@app.get("/static/{name}")
+async def static_asset(name: str):
+    """Serve the frontend's CSS or JS. Exact-match allowlist, no StaticFiles mount."""
+    media_type = config.STATIC_FILES.get(name)
+    if media_type is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return FileResponse(
+        config.PKG_DIR / name,
+        media_type=media_type,
+        # The URL never changes between releases, so a long max-age would keep
+        # running an old app.js/app.css against a freshly-served index.html after
+        # an update. no-cache forces a revalidation each load; FileResponse already
+        # sends ETag + Last-Modified, so an unchanged file is a cheap 304.
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
 @app.get("/fonts/{name}")
 async def font_asset(name: str):
     """Serve one vendored webfont. Exact-match allowlist, woff2 only."""

@@ -6,8 +6,8 @@
 // guard against the broken copy, and require them to FAIL. A mutation that
 // survives means the test that "covers" it does not.
 //
-// Nothing is written to fetchforge/index.html; every mutant is a temp copy
-// under .tmp/ that the harness is pointed at via FETCHFORGE_INDEX_HTML.
+// Nothing is written to fetchforge/app.js; every mutant is a temp copy under
+// .tmp/ that the harness is pointed at via FETCHFORGE_APP_JS.
 //
 //   node mutation-check.mjs          (or: npm run test:mutations)
 
@@ -15,13 +15,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { INDEX_HTML } from './harness.mjs';
+import { INDEX_HTML, APP_JS } from './harness.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const TMP = path.join(HERE, '.tmp');
 
 // Each mutation removes one guard and names the tests that must notice.
-// `find` must match exactly once in index.html; if it stops matching, the
+// `find` must match exactly once in app.js; if it stops matching, the
 // check fails loudly rather than quietly proving nothing.
 const MUTATIONS = [
   {
@@ -185,25 +185,25 @@ function parseTap(out) {
   return results;
 }
 
-const source = fs.readFileSync(INDEX_HTML, 'utf8').replace(/\r\n/g, '\n');
+const source = fs.readFileSync(APP_JS, 'utf8').replace(/\r\n/g, '\n');
 fs.rmSync(TMP, { recursive: true, force: true });
 fs.mkdirSync(TMP, { recursive: true });
 
 const problems = [];
-console.log(`mutation check against ${INDEX_HTML}\n`);
+console.log(`mutation check against ${APP_JS}\n`);
 
 for (const m of MUTATIONS) {
   const hits = countOccurrences(source, m.find);
   if (hits !== 1) {
     problems.push(
-      `[${m.id}] anchor matched ${hits} times, expected exactly 1. index.html moved under the ` +
+      `[${m.id}] anchor matched ${hits} times, expected exactly 1. app.js moved under the ` +
       `mutation check — re-point it at ${m.guard} before trusting this suite.\n    anchor: ${JSON.stringify(m.find)}`,
     );
     console.log(`✗ ${m.id}: ANCHOR NOT FOUND (${hits} matches)`);
     continue;
   }
 
-  const mutantPath = path.join(TMP, m.id.replace(/\W+/g, '-') + '.html');
+  const mutantPath = path.join(TMP, m.id.replace(/\W+/g, '-') + '.js');
   fs.writeFileSync(mutantPath, source.replace(m.find, m.replace));
 
   const pattern = m.expect.map(escapeRe).join('|');
@@ -214,7 +214,7 @@ for (const m of MUTATIONS) {
     // turns that into a plain failure instead of a stalled check.
     ['--test', '--test-timeout=20000', '--test-reporter=tap',
       `--test-name-pattern=^(?:${pattern})$`, m.file],
-    { cwd: HERE, encoding: 'utf8', env: { ...process.env, FETCHFORGE_INDEX_HTML: mutantPath } },
+    { cwd: HERE, encoding: 'utf8', env: { ...process.env, FETCHFORGE_INDEX_HTML: INDEX_HTML, FETCHFORGE_APP_JS: mutantPath } },
   );
   const results = parseTap((run.stdout || '') + (run.stderr || ''));
 
