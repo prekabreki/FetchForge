@@ -158,8 +158,23 @@ _last_heartbeat: float = 0.0     # monotonic timestamp of the last ping
 _active_jobs = 0                 # count of /download + /convert-local SSE streams currently running
 _last_job_end: float = 0.0       # monotonic timestamp when the last job stream finished
 _job_admitted = False            # single-job admission (#89): True while a job owns the server
+_current_job = None              # the admitted Job (#105); /cancel acts on its handles
 _BUSY_MESSAGE = "Another download or conversion is already running. Wait for it to finish and try again."
 _uvicorn_server = None           # set in run_server(); lets the watchdog stop the server
+
+
+def __getattr__(name):
+    """Read-only view of the current job's live subprocess handles.
+
+    `current_process` / `current_dl_process` were mutable module globals until
+    #105; a Job now owns both slots. This keeps callers that merely *read* the
+    handles (diagnostics, tests) working without reintroducing shared state."""
+    if name in ("current_process", "current_dl_process"):
+        job = _current_job
+        if job is None:
+            return None
+        return job.ffmpeg if name == "current_process" else job.downloader
+    raise AttributeError("module {!r} has no attribute {!r}".format(__name__, name))
 
 async def _heartbeat_watchdog():
     """Exit the process once no tab has pinged for _HEARTBEAT_TIMEOUT seconds,
@@ -201,18 +216,26 @@ def _release_admission() -> None:
     _job_admitted = False
 
 
+def _register_job(job):
+    """Make `job` the one /cancel can reach after admission succeeds."""
+    global _current_job
+    _current_job = job
+    return job
+
+
 class _TrackedStream:
     """Cold-safe async iterable wrapping an SSE generator.
 
     Increments _active_jobs for the life of the stream, stamps _last_job_end, and
-    releases the single-job admission exactly once — on exhaustion, error,
-    cancellation, or close. It is a plain object (not a bare async generator) so
-    that aclose() releases admission even when the stream is closed before it is
-    ever iterated: a never-started async generator's finally never runs, which
-    would leak the admission held from the handler (#89)."""
+    closes the Job exactly once — on exhaustion, error, cancellation, or close,
+    which releases the single-job admission. It is a plain object (not a bare
+    async generator) so that aclose() releases admission even when the stream is
+    closed before it is ever iterated: a never-started async generator's finally
+    never runs, which would leak the admission held from the handler (#89)."""
 
-    def __init__(self, agen):
+    def __init__(self, agen, job):
         self._agen = agen
+        self._job = job
         self._started = False
         self._finished = False
 
@@ -250,14 +273,14 @@ class _TrackedStream:
         if self._started:
             _active_jobs -= 1
         _last_job_end = time.monotonic()
-        _release_admission()
+        self._job.close()
 
 
-def _tracked(agen):
+def _tracked(agen, job):
     """Wrap an SSE generator so the heartbeat watchdog knows a job is in flight
-    and the single-job admission is released when the stream ends (whether it
+    and the Job is closed (releasing admission) when the stream ends (whether it
     finished, errored, was cancelled, or was never consumed)."""
-    return _TrackedStream(agen)
+    return _TrackedStream(agen, job)
 
 import secrets
 from contextlib import asynccontextmanager
@@ -899,55 +922,261 @@ def _resolve_batch_items(items_json: str):
 def _sse(obj: dict) -> str:
     return "data: {}\n\n".format(json.dumps(obj))
 
-def sse_log(msg: str) -> str:
-    return _sse({"type": "log", "msg": msg})
+# Each event type is defined once as a plain dict; `Job.emit` logs that dict and
+# serializes it, and the `sse_*` helpers below are the wire-only view of the same
+# dict (kept because other call sites and the wire-format tests use them).
+def _ev_log(msg: str) -> dict:
+    return {"type": "log", "msg": msg}
 
-def sse_error(msg: str) -> str:
-    return _sse({"type": "error", "msg": msg})
+def _ev_error(msg: str) -> dict:
+    return {"type": "error", "msg": msg}
 
-def sse_cookie_warning(msg: str) -> str:
-    return _sse({"type": "cookie_warning", "msg": msg})
+def _ev_cookie_warning(msg: str) -> dict:
+    return {"type": "cookie_warning", "msg": msg}
 
-def sse_cancelled(msg: str = "Cancelled by user.") -> str:
-    return _sse({"type": "cancelled", "msg": msg})
+def _ev_cancelled(msg: str = "Cancelled by user.") -> dict:
+    return {"type": "cancelled", "msg": msg}
 
-def sse_done(msg: str = "All done!") -> str:
-    return _sse({"type": "done", "msg": msg})
+def _ev_done(msg: str = "All done!") -> dict:
+    return {"type": "done", "msg": msg}
 
-def sse_shutdown(msg: str = "Shutting down in 60 seconds...") -> str:
-    return _sse({"type": "shutdown", "msg": msg})
+def _ev_shutdown(msg: str = "Shutting down in 60 seconds...") -> dict:
+    return {"type": "shutdown", "msg": msg}
 
-def sse_phase(header: str, filename: str = "") -> str:
+def _ev_phase(header: str, filename: str = "") -> dict:
     # UI contract: "header: filename" — split on the first ": " in index.html.
     msg = "{}: {}".format(header, filename) if filename else header
-    return _sse({"type": "phase", "msg": msg})
+    return {"type": "phase", "msg": msg}
+
+def _ev_video_start(current: int, total: int) -> dict:
+    return {"type": "video_start", "current": current, "total": total}
+
+def _ev_source_size(size_bytes: int) -> dict:
+    return {"type": "source_size", "bytes": size_bytes}
+
+def _ev_progress(pct: float, overall: float, speed: str, eta: str, size: str, output_bytes: int = 0) -> dict:
+    return {"type": "progress", "pct": pct, "overall": overall,
+            "speed": speed, "eta": eta, "size": size, "output_bytes": output_bytes}
+
+def _ev_dl_progress(pct: float, size: str, speed: str, eta: str, idx: int, total: int) -> dict:
+    return {"type": "dl_progress", "pct": pct, "size": size,
+            "speed": speed, "eta": eta, "idx": idx, "total": total}
+
+def _ev_item_done(idx: int, total: int) -> dict:
+    return {"type": "item_done", "idx": idx, "total": total}
+
+def _ev_item_failed(idx: int, total: int, msg: str) -> dict:
+    return {"type": "item_failed", "idx": idx, "total": total, "msg": msg}
+
+def _ev_size_info(source_bytes: int, output_bytes: int) -> dict:
+    bloat = (output_bytes - source_bytes) / source_bytes * 100 if source_bytes > 0 else 0.0
+    return {"type": "size_info",
+            "source_mb": round(source_bytes / 1024**2, 1),
+            "output_mb": round(output_bytes / 1024**2, 1),
+            "bloat_pct": round(bloat, 1)}
+
+def sse_log(msg: str) -> str:
+    return _sse(_ev_log(msg))
+
+def sse_error(msg: str) -> str:
+    return _sse(_ev_error(msg))
+
+def sse_cookie_warning(msg: str) -> str:
+    return _sse(_ev_cookie_warning(msg))
+
+def sse_cancelled(msg: str = "Cancelled by user.") -> str:
+    return _sse(_ev_cancelled(msg))
+
+def sse_done(msg: str = "All done!") -> str:
+    return _sse(_ev_done(msg))
+
+def sse_shutdown(msg: str = "Shutting down in 60 seconds...") -> str:
+    return _sse(_ev_shutdown(msg))
+
+def sse_phase(header: str, filename: str = "") -> str:
+    return _sse(_ev_phase(header, filename))
 
 def sse_video_start(current: int, total: int) -> str:
-    return _sse({"type": "video_start", "current": current, "total": total})
+    return _sse(_ev_video_start(current, total))
 
 def sse_source_size(size_bytes: int) -> str:
-    return _sse({"type": "source_size", "bytes": size_bytes})
+    return _sse(_ev_source_size(size_bytes))
 
 def sse_progress(pct: float, overall: float, speed: str, eta: str, size: str, output_bytes: int = 0) -> str:
-    return _sse({"type": "progress", "pct": pct, "overall": overall,
-                 "speed": speed, "eta": eta, "size": size, "output_bytes": output_bytes})
+    return _sse(_ev_progress(pct, overall, speed, eta, size, output_bytes))
 
 def sse_dl_progress(pct: float, size: str, speed: str, eta: str, idx: int, total: int) -> str:
-    return _sse({"type": "dl_progress", "pct": pct, "size": size,
-                 "speed": speed, "eta": eta, "idx": idx, "total": total})
+    return _sse(_ev_dl_progress(pct, size, speed, eta, idx, total))
 
 def sse_item_done(idx: int, total: int) -> str:
-    return _sse({"type": "item_done", "idx": idx, "total": total})
+    return _sse(_ev_item_done(idx, total))
 
 def sse_item_failed(idx: int, total: int, msg: str) -> str:
-    return _sse({"type": "item_failed", "idx": idx, "total": total, "msg": msg})
+    return _sse(_ev_item_failed(idx, total, msg))
 
 def sse_size_info(source_bytes: int, output_bytes: int) -> str:
-    bloat = (output_bytes - source_bytes) / source_bytes * 100 if source_bytes > 0 else 0.0
-    return _sse({"type": "size_info",
-                 "source_mb": round(source_bytes / 1024**2, 1),
-                 "output_mb": round(output_bytes / 1024**2, 1),
-                 "bloat_pct": round(bloat, 1)})
+    return _sse(_ev_size_info(source_bytes, output_bytes))
+
+
+# ── Job (#105) ───────────────────────────────────────────────────────────────
+# One admitted /download or /convert-local run. A Job owns everything that used
+# to be module-global state: its sticky cancel event, the live subprocess
+# handles (one slot per role), the wake lock, the job-log lines and the SSE wire
+# format. Only one Job can exist at a time (#89), but a fresh one is created per
+# request, so nothing leaks from a finished or cancelled run.
+class Job:
+    """The state and teardown of one admitted job.
+
+    `emit(event)` is the single sink for job events: it appends the matching
+    job-log line and returns the SSE string, so no code path has to parse an SSE
+    string back into JSON to build the log.
+    """
+
+    def __init__(self, kind: str, *, url: str = "", files: str = ""):
+        self.kind = kind                     # "download" | "local"
+        self.url = url
+        self.files = files
+        self.started = datetime.datetime.now()
+        self.cancel = asyncio.Event()
+        self.ffmpeg = None                   # encoder subprocess (run_encode)
+        self.downloader = None               # yt-dlp subprocess (fetch_item)
+        self.lines = []                      # "[HH:MM:SS] [LEVEL] message"
+        self._wake = None
+
+    # ── wake lock ──────────────────────────────────────────────────────────
+    def __enter__(self):
+        self._wake = _wake_lock()
+        self._wake.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        return self._wake.__exit__(*exc)
+
+    # ── event log + wire ───────────────────────────────────────────────────
+    def emit(self, event: dict) -> str:
+        """Log `event` and return its SSE wire form."""
+        self.log_event(event)
+        return _sse(event)
+
+    def log_event(self, event: dict) -> None:
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        t = event.get("type", "")
+        if t == "phase":
+            level, msg = "PHASE", event.get("msg", "")
+        elif t == "log":
+            level, msg = "LOG", event.get("msg", "")
+        elif t == "error":
+            level, msg = "ERROR", event.get("msg", "")
+        elif t == "done":
+            level, msg = "DONE", event.get("msg", "")
+        elif t == "video_start":
+            level = "VIDEO"
+            msg = "Video {current}/{total}".format(**event)
+        elif t == "size_info":
+            level = "SIZE"
+            msg = "source={source_mb}MB  output={output_mb}MB  bloat={bloat_pct:+.1f}%".format(**event)
+        else:
+            return
+        self.lines.append("[{}] [{}] {}".format(ts, level, msg))
+
+    def status(self) -> str:
+        for ln in reversed(self.lines):
+            if "[ERROR]" in ln:
+                return "FAILED"
+            if "[DONE]" in ln:
+                return "SUCCESS"
+        return "CANCELLED"
+
+    def log_text(self) -> str:
+        if self.kind == "download":
+            header = [
+                "Type    : YouTube Download",
+                "URL     : {}".format(self.url),
+            ]
+        else:
+            try:
+                file_list = json.loads(self.files)
+            except Exception:
+                file_list = [self.files]
+            header = [
+                "Type    : Local Convert",
+                "Files   : {}".format(", ".join(str(f) for f in file_list)),
+            ]
+        elapsed = datetime.datetime.now() - self.started
+        header_lines = [
+            "=== FetchForge Job Log ===",
+            "Started : {}".format(self.started.strftime("%Y-%m-%d %H:%M:%S")),
+            *header,
+            "Elapsed : {}".format(str(elapsed).split(".")[0]),
+            "Status  : {}".format(self.status()),
+            "",
+            "--- Events ---",
+            "",
+        ]
+        return "\n".join(header_lines + self.lines + [""])
+
+    def log_path(self):
+        ts_file = self.started.strftime("%Y-%m-%d_%H-%M-%S")
+        suffix = "download" if self.kind == "download" else "local"
+        return LOGS_DIR / "{}_{}.txt".format(ts_file, suffix)
+
+    # ── cancel / teardown ──────────────────────────────────────────────────
+    def cancel_now(self) -> bool:
+        """Set the cancel flag and synchronously terminate live subprocesses.
+
+        Synchronous on purpose: it must run under a re-delivered anyio
+        cancellation (#87). Returns True if a handle was terminated."""
+        self.cancel.set()
+        terminated = False
+        for attr in ("ffmpeg", "downloader"):
+            proc = getattr(self, attr)
+            if proc is not None:
+                if _terminate_if_running(proc):
+                    terminated = True
+                setattr(self, attr, None)
+        return terminated
+
+    def close(self) -> None:
+        """Release admission exactly once and stop being the current job."""
+        global _current_job
+        if _current_job is self:
+            _current_job = None
+        _release_admission()
+
+    @property
+    def exception_label(self) -> str:
+        return ("Unexpected error in download job" if self.kind == "download"
+                else "Unexpected error in local conversion job")
+
+
+def _job_emit(job: Optional["Job"], event: dict) -> str:
+    """Serialize an event through the job (so it is logged) when there is one."""
+    return job.emit(event) if job is not None else _sse(event)
+
+
+async def _job_stream(job: Job, events):
+    """The one SSE wrapper shared by /download and /convert-local (#105).
+
+    Holds the job's wake lock, forwards every event the runner emitted (the
+    runner logs them through `job.emit`), turns an unexpected exception into a
+    final error event (#96), and always writes the job log."""
+    with job:
+        try:
+            async for chunk in events:
+                yield chunk
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # A disconnect cancels the task, and cleanup can raise while that
+            # cancellation is pending (#87). Never turn that into a job error:
+            # let the cancellation continue so it propagates as before.
+            task = asyncio.current_task()
+            if task is not None and task.cancelling():
+                raise asyncio.CancelledError() from exc
+            logger.exception(job.exception_label)
+            yield job.emit(_ev_error("Unexpected error: {}".format(exc)))
+        finally:
+            await _write_job_log(job.log_path(), job.log_text())
 
 
 _CUVID_DECODERS = {
@@ -1532,12 +1761,9 @@ def calc_encode_params(
         "overrides": ov["report"],
     }
 
-current_process: Optional[asyncio.subprocess.Process] = None
-current_dl_process: Optional[asyncio.subprocess.Process] = None
-# Sticky cancel flag. /cancel sets it; every download/encode loop checks it at the
-# top of each iteration and inside the subprocess read loops, so a cancel stops the
-# WHOLE job (no next item, no retry) — not just the one process it happened to catch.
-# Cleared at the start of every new /download and /convert-local stream.
+# Cancel flag for a bare `run_encode()` call. Real jobs pass their Job instead:
+# the Job owns the cancel event (/cancel sets `job.cancel`) and the subprocess
+# handles, so this global is only the default when run_encode runs standalone.
 _cancel_requested = asyncio.Event()
 # Verified at startup by _probe_nvenc_tune(); falls back to "hq" whenever the probe
 # fails, whatever the reason (old ffmpeg build, driver rejection, or anything else).
@@ -1993,23 +2219,26 @@ def _encode_plan(src: dict, input_file: Path, output_file: Path, opts: dict,
 
 
 async def run_encode(ffmpeg_args: list, *, duration_secs, idx: int, total: int,
-                     result: dict):
+                     result: dict, job: Optional["Job"] = None):
     """Run one ffmpeg encode/extract, yielding SSE strings for progress + log.
 
     Drains stdout (the -progress key=value stream) and stderr (ffmpeg's human
     log) CONCURRENTLY via a single queue, so stderr lines reach the UI within
     ~100ms even when no stdout arrives during a long codec init (H-4) — no more
-    O(n) list.pop(0) gated on stdout. Sets current_process so /cancel can
-    terminate it, and honours the sticky _cancel_requested flag. The ffmpeg
+    O(n) list.pop(0) gated on stdout. When `job` is given, its handle slot makes
+    /cancel able to terminate the process and its cancel event stops it; a bare
+    call (tests, ad-hoc reuse) falls back to the module-level flag. The ffmpeg
     return code is written to result["returncode"]; this is the single encode
     loop the three call sites share (H-2)."""
-    global current_process
+    cancel = job.cancel if job is not None else _cancel_requested
+    emit = job.emit if job is not None else _sse
     proc = await asyncio.create_subprocess_exec(
         *ffmpeg_args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    current_process = proc
+    if job is not None:
+        job.ffmpeg = proc
 
     q: asyncio.Queue = asyncio.Queue()
 
@@ -2030,7 +2259,7 @@ async def run_encode(ffmpeg_args: list, *, duration_secs, idx: int, total: int,
             if tag in ("out_eof", "err_eof"):
                 eofs += 1
                 continue
-            if _cancel_requested.is_set() and not terminated:
+            if cancel.is_set() and not terminated:
                 proc.terminate()
                 terminated = True
                 # keep draining both pipes to EOF so the pump tasks finish cleanly
@@ -2038,7 +2267,7 @@ async def run_encode(ffmpeg_args: list, *, duration_secs, idx: int, total: int,
             line = raw.decode(errors="replace").rstrip()
             if tag == "err":
                 if line:
-                    yield sse_log(line)
+                    yield emit(_ev_log(line))
                 continue
             # tag == "out": ffmpeg -progress key=value lines
             if "=" in line:
@@ -2060,16 +2289,17 @@ async def run_encode(ffmpeg_args: list, *, duration_secs, idx: int, total: int,
                         overall = ((idx - 1) / total * 100)
                     live_bytes = int(progress_buf.get("total_size", 0) or 0)
                     live_size = "{:.0f} MB".format(live_bytes / 1024**2) if live_bytes > 0 else ""
-                    yield sse_progress(file_pct, overall, speed_str, fps_str + " fps", live_size, live_bytes)
+                    yield emit(_ev_progress(file_pct, overall, speed_str, fps_str + " fps", live_size, live_bytes))
                     progress_buf = {}
             elif line:
-                yield sse_log(line)
+                yield emit(_ev_log(line))
         await t_out
         await t_err
         await proc.wait()
     finally:
         _terminate_if_running(proc)
-        current_process = None
+        if job is not None and job.ffmpeg is proc:
+            job.ffmpeg = None
         result["returncode"] = proc.returncode
 
 
@@ -2692,7 +2922,7 @@ def _nvenc_missing_error(mode: str, converting: bool) -> Optional[str]:
 
 
 async def run_pipelined(items, fetch, process, cancel, *, throttle=None,
-                        finalize=None, shutdown=False):
+                        finalize=None, shutdown=False, job=None):
     """Coordinate the pipeline downloader and encoder (one item model).
 
     `items` is an iterable of opaque item identifiers. For each one,
@@ -2708,7 +2938,8 @@ async def run_pipelined(items, fetch, process, cancel, *, throttle=None,
 
     This function owns `file_q` (maxsize=1), `abort`, `enc_gone`, cancel
     polling, the two None sentinels, the encoder's drain-without-delete, and the
-    worker-task cancellation/reaping on generator close (#87).
+    worker-task cancellation/reaping on generator close (#87). With a `job`, the
+    bodies' event dicts are logged and serialized by that job.
     """
     file_q: asyncio.Queue = asyncio.Queue(maxsize=1)
     msg_q: asyncio.Queue = asyncio.Queue()
@@ -2716,6 +2947,10 @@ async def run_pipelined(items, fetch, process, cancel, *, throttle=None,
     enc_gone = asyncio.Event()     # set when the encoder exits (unblocks the fetcher)
 
     async def emit(msg) -> None:
+        # Event dicts are logged + rendered by the job; an already rendered
+        # wire string (from run_encode) is forwarded untouched.
+        if job is not None and isinstance(msg, dict):
+            msg = job.emit(msg)
         await msg_q.put(msg)
 
     def stopping() -> bool:
@@ -2788,7 +3023,7 @@ async def run_pipelined(items, fetch, process, cancel, *, throttle=None,
                     # fundamentally broken (N in a row).
                     if consecutive_failures >= _MAX_CONSECUTIVE_ENCODE_FAILURES:
                         abort.set()
-                        await emit(sse_error(
+                        await emit(_ev_error(
                             "Aborting pipeline: {} consecutive encode failures.".format(consecutive_failures)))
                         break
                     continue
@@ -2824,16 +3059,16 @@ async def run_pipelined(items, fetch, process, cancel, *, throttle=None,
         for _r in await asyncio.gather(dl_task, enc_task, return_exceptions=True):
             if isinstance(_r, Exception):
                 abort.set()
-                yield sse_error("Pipeline worker error: {}".format(_r))
+                yield _job_emit(job, _ev_error("Pipeline worker error: {}".format(_r)))
 
         if cancel.is_set():
-            yield sse_cancelled('Cancelled by user.')
+            yield _job_emit(job, _ev_cancelled('Cancelled by user.'))
         elif not abort.is_set():
-            yield sse_done('All done!')
+            yield _job_emit(job, _ev_done('All done!'))
             if shutdown:
                 # Shutdown is client-driven: emit the event, the UI runs the
                 # visible countdown and calls POST /shutdown-now itself.
-                yield sse_shutdown('Shutting down in 60 seconds...')
+                yield _job_emit(job, _ev_shutdown('Shutting down in 60 seconds...'))
     finally:
         # A client disconnect cancels this generator while the workers keep
         # running as detached tasks. Cancel them so their own finallys terminate
@@ -2899,16 +3134,16 @@ def _make_download_item(idx, data, *, mode, audio_preset, convert, delete_cache,
     return item
 
 
-async def fetch_item(item, emit, stopping, *, total, pipelined=False):
+async def fetch_item(item, emit, stopping, *, total, pipelined=False, job=None):
     """Download one item and return its Path, or None when it was skipped,
     failed or cancelled.
 
     Owns the yt-dlp argv, progress parsing, cache snapshot/output detection
     (`_newest_new_file`) and the download-completeness checks for BOTH the
     sequential loop and the pipeline coordinator. A failed item emits
-    `item_failed` and returns None; the caller keeps going.
+    `item_failed` and returns None; the caller keeps going. The live yt-dlp
+    handle lives in the job's downloader slot so /cancel can reach it.
     """
-    global current_dl_process
     idx = item["idx"]
     url = item["url"]
     title = item.get("title") or ""
@@ -2926,7 +3161,7 @@ async def fetch_item(item, emit, stopping, *, total, pipelined=False):
     # in pipelined mode the encoder is a separate worker that may be a whole
     # video behind, so process_item emits it at encode time instead.
     if not pipelined:
-        await emit(sse_video_start(idx, total))
+        await emit(_ev_video_start(idx, total))
 
     # Skip only when the output this job produces is already complete. A
     # skipped item never deletes a cache file it did not download.
@@ -2937,20 +3172,20 @@ async def fetch_item(item, emit, stopping, *, total, pipelined=False):
         skip_source_bytes = 0 if section else int(item.get("expected_size") or 0)
         min_output = _min_output_bytes(skip_source_bytes, is_audio)
         if predicted.exists() and predicted.stat().st_size >= min_output:
-            await emit(sse_log("{}Skipping \u2014 already encoded: {}".format(
+            await emit(_ev_log("{}Skipping \u2014 already encoded: {}".format(
                 label, predicted.name)))
-            await emit(sse_item_done(idx, total))
+            await emit(_ev_item_done(idx, total))
             return None
 
     # In pipeline mode the main progress bar tracks the concurrent ENCODE;
     # download progress goes to the separate dl-status row via dl_progress.
     # A `phase` event here would flip the main bar to indeterminate.
     if not pipelined:
-        await emit(sse_phase("{}Downloading".format(label), title))
+        await emit(_ev_phase("{}Downloading".format(label), title))
     if title:
-        await emit(sse_log("{}Downloading: {}".format(dl_label, title)))
+        await emit(_ev_log("{}Downloading: {}".format(dl_label, title)))
     else:
-        await emit(sse_log("{}Downloading...".format(dl_label)))
+        await emit(_ev_log("{}Downloading...".format(dl_label)))
 
     if is_audio:
         fmt_args = ["-f", _audio_format_selector(item.get("audio_format", ""))]
@@ -2990,7 +3225,8 @@ async def fetch_item(item, emit, stopping, *, total, pipelined=False):
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
     )
-    current_dl_process = proc
+    if job is not None:
+        job.downloader = proc
     output_paths = set()
 
     try:
@@ -3001,7 +3237,7 @@ async def fetch_item(item, emit, stopping, *, total, pipelined=False):
             line = raw.decode(errors="replace").rstrip()
             _cw = _maybe_flag_stale_cookies(line)
             if _cw:
-                await emit(sse_cookie_warning(_cw))
+                await emit(_ev_cookie_warning(_cw))
             m = re.search(
                 r"\[download\]\s+([\d.]+)%\s+of\s+(\S+)\s+at\s+(.+?)\s+ETA\s+(\S+)",
                 line
@@ -3009,10 +3245,10 @@ async def fetch_item(item, emit, stopping, *, total, pipelined=False):
             if m:
                 pct, size, speed, eta = m.groups()
                 if pipelined:
-                    await emit(sse_dl_progress(float(pct), size, speed, eta, idx, total))
+                    await emit(_ev_dl_progress(float(pct), size, speed, eta, idx, total))
                 else:
-                    await emit(_sse({"type": "progress", "pct": float(pct),
-                                     "size": size, "speed": speed, "eta": eta}))
+                    await emit({"type": "progress", "pct": float(pct),
+                                "size": size, "speed": speed, "eta": eta})
             else:
                 merger = re.search(r'\[Merger\] Merging formats into "(.+?)"', line)
                 # Audio mode and section downloads have no merger — capture the
@@ -3025,16 +3261,17 @@ async def fetch_item(item, emit, stopping, *, total, pipelined=False):
                     output_paths.add(dest.group(1).strip())
                 elif already:
                     output_paths.add(already.group(1))
-                await emit(sse_log(line))
+                await emit(_ev_log(line))
         await proc.wait()
     finally:
         # Synchronous terminate first: a finally under a re-delivered anyio
         # cancellation must not await before terminating (#87).
         _terminate_if_running(proc)
-        current_dl_process = None
+        if job is not None and job.downloader is proc:
+            job.downloader = None
         await proc.wait()
 
-    if _cancel_requested.is_set() or stopping():
+    if (job.cancel.is_set() if job is not None else _cancel_requested.is_set()) or stopping():
         return None   # user cancelled / pipeline aborted — not a download failure
 
     allowed_suffixes = _AUDIO_EXTS if is_audio else {".mkv"}
@@ -3062,38 +3299,38 @@ async def fetch_item(item, emit, stopping, *, total, pipelined=False):
         if files and await (
                 _section_download_is_complete(files[0], section, expected_dur) if section
                 else _download_is_complete(files[0], exp_bytes, expected_dur)):
-            await emit(sse_log("{}yt-dlp exited with errors but output file verified complete \u2014 continuing.".format(dl_label)))
+            await emit(_ev_log("{}yt-dlp exited with errors but output file verified complete \u2014 continuing.".format(dl_label)))
         else:
             size_note = ""
             if files and exp_bytes > 0:
                 actual = files[0].stat().st_size
                 size_note = " (got {:.0f}MB of expected {:.0f}MB)".format(
                     actual / 1024**2, exp_bytes / 1024**2)
-            await emit(sse_item_failed(idx, total, "download failed"))
+            await emit(_ev_item_failed(idx, total, "download failed"))
             if total == 1:
-                await emit(sse_error("{}Download failed{}.".format(label, size_note)))
-            await emit(sse_log("{}Download failed{} \u2014 skipping, continuing with the rest.".format(dl_label, size_note)))
+                await emit(_ev_error("{}Download failed{}.".format(label, size_note)))
+            await emit(_ev_log("{}Download failed{} \u2014 skipping, continuing with the rest.".format(dl_label, size_note)))
             return None
 
     if not files:
-        await emit(sse_item_failed(idx, total, "no output"))
+        await emit(_ev_item_failed(idx, total, "no output"))
         if total == 1:
-            await emit(sse_error("{}No .mkv found after download.".format(label)))
-        await emit(sse_log("{}No .mkv found after download \u2014 skipping, continuing with the rest.".format(dl_label)))
+            await emit(_ev_error("{}No .mkv found after download.".format(label)))
+        await emit(_ev_log("{}No .mkv found after download \u2014 skipping, continuing with the rest.".format(dl_label)))
         return None
 
-    await emit(sse_log("{}Queued for encoding.".format(dl_label)))
+    await emit(_ev_log("{}Queued for encoding.".format(dl_label)))
     return files[0]
 
 
-async def process_item(item, path, emit, *, total, pipelined=False) -> bool:
+async def process_item(item, path, emit, *, total, pipelined=False, job=None) -> bool:
     """Encode, audio-extract or leave-as-downloaded one fetched item.
 
     Returns True on success (including a skipped/already-complete output) and
     False on an encode failure. Owns the output-completeness rule and the
-    single `delete_cache` deletion site.
+    single `delete_cache` deletion site. The live ffmpeg handle lives in the
+    job's encoder slot so /cancel can reach it.
     """
-    global current_process
     idx = item["idx"]
     is_audio = _item_is_audio(item)
     convert = bool(item.get("convert", True))
@@ -3107,11 +3344,11 @@ async def process_item(item, path, emit, *, total, pipelined=False) -> bool:
     # start), not the downloader — otherwise video_start for item N+1 would
     # fire while item N is still encoding and reset the encode timer early.
     if pipelined:
-        await emit(sse_video_start(idx, total))
+        await emit(_ev_video_start(idx, total))
 
     if not convert and not is_audio:
-        await emit(sse_log("{}Saved (no conversion): {}".format(label, path)))
-        await emit(sse_item_done(idx, total))
+        await emit(_ev_log("{}Saved (no conversion): {}".format(label, path)))
+        await emit(_ev_item_done(idx, total))
         return True
 
     dest_dir = _item_dest_dir(item)
@@ -3125,20 +3362,20 @@ async def process_item(item, path, emit, *, total, pipelined=False) -> bool:
     if output_file.exists():
         out_size = output_file.stat().st_size
         if out_size < min_output:
-            await emit(sse_log("{}Removing incomplete output ({:.0f} MB, expected >={:.0f} MB) \u2014 re-encoding.".format(
+            await emit(_ev_log("{}Removing incomplete output ({:.0f} MB, expected >={:.0f} MB) \u2014 re-encoding.".format(
                 enc_label, out_size / 1024**2, min_output / 1024**2)))
             output_file.unlink()
         else:
-            await emit(sse_log("{}Skipping \u2014 output already exists: {} ({:.0f} MB)".format(
+            await emit(_ev_log("{}Skipping \u2014 output already exists: {} ({:.0f} MB)".format(
                 enc_label, output_file.name, out_size / 1024**2)))
             if delete_cache:
                 path.unlink(missing_ok=True)
-            await emit(sse_item_done(idx, total))
+            await emit(_ev_item_done(idx, total))
             return True
 
     phase_verb = "Extracting audio" if is_audio else "Converting"
-    await emit(sse_phase("{}: {}".format(phase_verb, path.name)))
-    await emit(sse_source_size(source_size))
+    await emit(_ev_phase("{}: {}".format(phase_verb, path.name)))
+    await emit(_ev_source_size(source_size))
 
     src = await probe_video(path)
     duration_secs = src.get("duration") or None
@@ -3146,14 +3383,14 @@ async def process_item(item, path, emit, *, total, pipelined=False) -> bool:
     if section:
         duration_secs = _clip_duration(section, item.get("duration") or 0)
     if duration_secs:
-        await emit(sse_log("Duration: {:.1f}s".format(duration_secs)))
+        await emit(_ev_log("Duration: {:.1f}s".format(duration_secs)))
     else:
-        await emit(sse_log("Could not read duration \u2014 progress bar will be indeterminate"))
+        await emit(_ev_log("Could not read duration \u2014 progress bar will be indeterminate"))
 
     if is_audio:
         ffmpeg_args = build_audio_ffmpeg(
             path, output_file, item.get("audio_preset", "mp3"), input_opts=seek)
-        await emit(sse_log("Audio extract: {} \u2192 {}".format(
+        await emit(_ev_log("Audio extract: {} \u2192 {}".format(
             item.get("audio_preset", "mp3").upper(), output_file.name)))
     else:
         params, ffmpeg_args, enc_logs = _encode_plan(
@@ -3167,14 +3404,14 @@ async def process_item(item, path, emit, *, total, pipelined=False) -> bool:
             input_opts=seek,
         )
         for _log in enc_logs:
-            await emit(sse_log(_log))
+            await emit(_ev_log(_log))
 
     enc_res: dict = {}
     async for _s in run_encode(ffmpeg_args, duration_secs=duration_secs,
-                               idx=idx, total=total, result=enc_res):
+                               idx=idx, total=total, result=enc_res, job=job):
         await emit(_s)
 
-    if _cancel_requested.is_set():
+    if (job.cancel.is_set() if job is not None else _cancel_requested.is_set()):
         # User cancelled mid-encode — discard the partial output, don't treat
         # it as a failure or retry.
         if output_file.exists():
@@ -3185,8 +3422,8 @@ async def process_item(item, path, emit, *, total, pipelined=False) -> bool:
         if output_file.exists():
             output_file.unlink(missing_ok=True)
         fail_verb = "Audio extract" if is_audio else "Conversion"
-        await emit(sse_error("{}{} failed: {}".format(label, fail_verb, path.name)))
-        await emit(sse_item_failed(idx, total, "encode failed"))
+        await emit(_ev_error("{}{} failed: {}".format(label, fail_verb, path.name)))
+        await emit(_ev_item_failed(idx, total, "encode failed"))
         return False
 
     source_bytes = path.stat().st_size if path.exists() else 0
@@ -3195,14 +3432,14 @@ async def process_item(item, path, emit, *, total, pipelined=False) -> bool:
     output_bytes = output_file.stat().st_size
     size_mb = output_bytes / 1024 ** 2
     cache_note = "cache cleared" if delete_cache else "cache kept"
-    await emit(sse_log("Done: {} \u2014 {:.0f} MB ({})".format(output_file.name, size_mb, cache_note)))
+    await emit(_ev_log("Done: {} \u2014 {:.0f} MB ({})".format(output_file.name, size_mb, cache_note)))
     if source_bytes > 0:
-        await emit(sse_size_info(source_bytes, output_bytes))
-    await emit(sse_item_done(idx, total))
+        await emit(_ev_size_info(source_bytes, output_bytes))
+    await emit(_ev_item_done(idx, total))
     return True
 
 
-async def _iter_sequential(items, *, total, shutdown):
+async def _iter_sequential(items, *, total, shutdown, job):
     """Sequential execution: a loop over `fetch_item` / `process_item`. Events
     are pumped through a queue so the two coroutines can be the exact same ones
     the pipeline coordinator drives."""
@@ -3210,41 +3447,41 @@ async def _iter_sequential(items, *, total, shutdown):
     done_ids, failed_ids = set(), set()
 
     async def emit(msg):
-        try:
-            evt = json.loads(msg[6:].strip())
-            if evt.get("type") == "item_done":
-                done_ids.add(evt.get("idx"))
-            elif evt.get("type") == "item_failed":
-                failed_ids.add(evt.get("idx"))
-        except Exception:
-            pass
+        # Our bodies hand in event dicts; `run_encode` hands in an already
+        # rendered (and already logged) wire string, forwarded untouched.
+        if isinstance(msg, dict):
+            if msg.get("type") == "item_done":
+                done_ids.add(msg.get("idx"))
+            elif msg.get("type") == "item_failed":
+                failed_ids.add(msg.get("idx"))
+            msg = job.emit(msg)
         await q.put(msg)
 
     async def driver():
         try:
             for item in items:
-                if _cancel_requested.is_set():
+                if job.cancel.is_set():
                     break
                 path = await fetch_item(
-                    item, emit, _cancel_requested.is_set,
-                    total=total, pipelined=False)
+                    item, emit, job.cancel.is_set,
+                    total=total, pipelined=False, job=job)
                 if path is None:
-                    if _cancel_requested.is_set():
+                    if job.cancel.is_set():
                         break
                     continue
-                await process_item(item, path, emit, total=total)
+                await process_item(item, path, emit, total=total, job=job)
 
-            if _cancel_requested.is_set():
-                await emit(sse_cancelled('Cancelled by user.'))
+            if job.cancel.is_set():
+                await emit(_ev_cancelled('Cancelled by user.'))
             elif failed_ids and not done_ids:
                 # Every item failed. A single-item job already emitted its own
                 # `error`; a multi-item one gets one terminal error here.
                 if total > 1:
-                    await emit(sse_error("All items failed."))
+                    await emit(_ev_error("All items failed."))
             else:
-                await emit(sse_done('All done!'))
+                await emit(_ev_done('All done!'))
                 if shutdown:
-                    await emit(sse_shutdown('Shutting down in 60 seconds...'))
+                    await emit(_ev_shutdown('Shutting down in 60 seconds...'))
         finally:
             await q.put(None)
 
@@ -3294,79 +3531,13 @@ async def download(
 ):
     if not _try_admit():
         return JSONResponse({"error": _BUSY_MESSAGE}, status_code=409)
-    async def stream():
-        global current_process
-        _cancel_requested.clear()   # fresh job — drop any stale cancel
-        with _wake_lock():
-            _job_start = datetime.datetime.now()
-            _job_lines = []
+    job = _register_job(Job("download", url=url))
 
-            def _jlog(level, msg):
-                ts = datetime.datetime.now().strftime("%H:%M:%S")
-                _job_lines.append("[{}] [{}] {}".format(ts, level, msg))
-
-            try:
-                async for chunk in _download_stream():
-                    if chunk.startswith("data: "):
-                        try:
-                            evt = json.loads(chunk[6:].strip())
-                            t = evt.get("type", "")
-                            if t == "phase":
-                                _jlog("PHASE", evt.get("msg", ""))
-                            elif t == "log":
-                                _jlog("LOG", evt.get("msg", ""))
-                            elif t == "error":
-                                _jlog("ERROR", evt.get("msg", ""))
-                            elif t == "done":
-                                _jlog("DONE", evt.get("msg", ""))
-                            elif t == "video_start":
-                                _jlog("VIDEO", "Video {current}/{total}".format(**evt))
-                            elif t == "size_info":
-                                _jlog("SIZE", "source={source_mb}MB  output={output_mb}MB  bloat={bloat_pct:+.1f}%".format(**evt))
-                        except Exception:
-                            pass
-                    yield chunk
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                # A disconnect cancels the task, and cleanup can raise while that
-                # cancellation is pending (#87). Never turn that into a job error:
-                # let the cancellation continue so it propagates as before.
-                task = asyncio.current_task()
-                if task is not None and task.cancelling():
-                    raise asyncio.CancelledError() from exc
-                logger.exception("Unexpected error in download job")
-                _jlog("ERROR", "Unexpected error: {}".format(exc))
-                yield sse_error("Unexpected error: {}".format(exc))
-            finally:
-                elapsed = datetime.datetime.now() - _job_start
-                status = "CANCELLED"
-                for ln in reversed(_job_lines):
-                    if "[ERROR]" in ln:
-                        status = "FAILED"
-                        break
-                    if "[DONE]" in ln:
-                        status = "SUCCESS"
-                        break
-                ts_file = _job_start.strftime("%Y-%m-%d_%H-%M-%S")
-                log_path = LOGS_DIR / "{}_download.txt".format(ts_file)
-                header_lines = [
-                    "=== FetchForge Job Log ===",
-                    "Started : {}".format(_job_start.strftime("%Y-%m-%d %H:%M:%S")),
-                    "Type    : YouTube Download",
-                    "URL     : {}".format(url),
-                    "Elapsed : {}".format(str(elapsed).split(".")[0]),
-                    "Status  : {}".format(status),
-                    "",
-                    "--- Events ---",
-                    "",
-                ]
-                await _write_job_log(log_path, "\n".join(header_lines + _job_lines + [""]))
 
     async def _download_stream():
         refusal = _nvenc_missing_error(mode, convert == "true")
         if refusal:
-            yield sse_error(refusal)
+            yield job.emit(_ev_error(refusal))
             return
 
         _target_res = int(target_res) if target_res.lstrip("-").isdigit() else 0
@@ -3394,10 +3565,10 @@ async def download(
             try:
                 parsed = _parse_items_payload(items)
             except (ValueError, KeyError, json.JSONDecodeError) as exc:
-                yield sse_error("Bad batch payload: {}".format(exc))
+                yield job.emit(_ev_error("Bad batch payload: {}".format(exc)))
                 return
             if not parsed:
-                yield sse_error("Batch had no items.")
+                yield job.emit(_ev_error("Batch had no items."))
                 return
             download_items = [
                 _make_download_item(
@@ -3408,21 +3579,21 @@ async def download(
                 for idx, data in enumerate(parsed, 1)
             ]
             total_videos = len(download_items)
-            yield sse_log("Batch: {} item(s) queued.".format(total_videos))
+            yield job.emit(_ev_log("Batch: {} item(s) queued.".format(total_videos)))
         else:
             if not is_http_url(url):
-                yield sse_error('URL must be http or https.')
+                yield job.emit(_ev_error('URL must be http or https.'))
                 return
             try:
                 section = parse_section(section_start, section_end)
             except ValueError as exc:
-                yield sse_error("Bad time range: {}".format(exc))
+                yield job.emit(_ev_error("Bad time range: {}".format(exc)))
                 return
 
             # Old clients still send a single URL. Resolve its title/duration,
             # but never expand a playlist server-side — the client already does
             # that and a playlist response here would be silently incomplete.
-            yield sse_phase('Resolving...')
+            yield job.emit(_ev_phase('Resolving...'))
             flat_args = [*get_ytdlp_argv(), "--flat-playlist", "-J", "--no-download", *NODE_ARGS]
             flat_args += cookie_args()
             flat_args += ["--", url]
@@ -3439,16 +3610,16 @@ async def download(
                 await flat_proc.wait()
 
             if flat_proc.returncode != 0:
-                yield sse_error('Could not fetch video info: ' + flat_err.decode(errors='replace')[:300])
+                yield job.emit(_ev_error('Could not fetch video info: ' + flat_err.decode(errors='replace')[:300]))
                 return
             try:
                 info = json.loads(flat_out)
             except Exception:
-                yield sse_error('Failed to parse video info.')
+                yield job.emit(_ev_error('Failed to parse video info.'))
                 return
 
             if info.get("_type") == "playlist":
-                yield sse_error("URL is a playlist. Send one item per video in the items field.")
+                yield job.emit(_ev_error("URL is a playlist. Send one item per video in the items field."))
                 return
 
             total_videos = 1
@@ -3467,55 +3638,46 @@ async def download(
 
         # ── Execute: pipelined when explicitly requested, else sequential ─────
         if pipeline == "true" and total_videos > 1:
-            yield sse_log('Pipeline mode: next download starts while current video encodes.')
+            yield job.emit(_ev_log('Pipeline mode: next download starts while current video encodes.'))
 
             async def _fetch_payload(item, emit, stopping):
                 path = await fetch_item(item, emit, stopping,
-                                        total=total_videos, pipelined=True)
+                                        total=total_videos, pipelined=True, job=job)
                 return None if path is None else (item, path)
 
             async def _process_payload(payload, emit):
                 item, path = payload
                 return await process_item(item, path, emit,
-                                          total=total_videos, pipelined=True)
+                                          total=total_videos, pipelined=True, job=job)
 
             async def _throttle(item, emit, stopping):
                 if item["idx"] < total_videos and not stopping():
                     sleep_s = random.uniform(3, 8)
-                    await emit(sse_log("Next download in {:.1f}s...".format(sleep_s)))
+                    await emit(_ev_log("Next download in {:.1f}s...".format(sleep_s)))
                     await asyncio.sleep(sleep_s)
 
             async with contextlib.aclosing(run_pipelined(
                     download_items, _fetch_payload, _process_payload,
-                    _cancel_requested, throttle=_throttle,
-                    shutdown=_shutdown)) as _pipeline:
+                    job.cancel, throttle=_throttle,
+                    shutdown=_shutdown, job=job)) as _pipeline:
                 async for _event in _pipeline:
                     yield _event
         else:
             async for _event in _iter_sequential(
-                    download_items, total=total_videos, shutdown=_shutdown):
+                    download_items, total=total_videos, shutdown=_shutdown, job=job):
                 yield _event
 
-    return StreamingResponse(_tracked(stream()), media_type="text/event-stream")
+    return StreamingResponse(
+        _tracked(_job_stream(job, _download_stream()), job),
+        media_type="text/event-stream")
 
 
 @app.post("/cancel")
 async def cancel():
-    global current_process, current_dl_process
-    # Sticky flag first: the running job loops poll this to stop launching the
-    # next item / retry, even for processes not captured in the globals yet.
-    _cancel_requested.set()
-    cancelled = False
-    for proc in [current_process, current_dl_process]:
-        if proc:
-            try:
-                proc.terminate()
-            except Exception:
-                pass
-            cancelled = True
-    current_process = None
-    current_dl_process = None
-    return {"status": "cancelled" if cancelled else "nothing running"}
+    job = _current_job
+    if job is None:
+        return {"status": "nothing running"}
+    return {"status": "cancelled" if job.cancel_now() else "nothing running"}
 
 
 @app.post("/probe-file")
@@ -3575,85 +3737,12 @@ async def convert_local(
 ):
     if not _try_admit():
         return JSONResponse({"error": _BUSY_MESSAGE}, status_code=409)
-    async def stream():
-        global current_process
-        _cancel_requested.clear()   # fresh job — drop any stale cancel
-        with _wake_lock():
-            _job_start = datetime.datetime.now()
-            _job_lines = []
-
-            def _jlog(level, msg):
-                ts = datetime.datetime.now().strftime("%H:%M:%S")
-                _job_lines.append("[{}] [{}] {}".format(ts, level, msg))
-
-            try:
-                async for chunk in _convert_local_stream():
-                    if chunk.startswith("data: "):
-                        try:
-                            evt = json.loads(chunk[6:].strip())
-                            t = evt.get("type", "")
-                            if t == "phase":
-                                _jlog("PHASE", evt.get("msg", ""))
-                            elif t == "log":
-                                _jlog("LOG", evt.get("msg", ""))
-                            elif t == "error":
-                                _jlog("ERROR", evt.get("msg", ""))
-                            elif t == "done":
-                                _jlog("DONE", evt.get("msg", ""))
-                            elif t == "video_start":
-                                _jlog("VIDEO", "Video {current}/{total}".format(**evt))
-                            elif t == "size_info":
-                                _jlog("SIZE", "source={source_mb}MB  output={output_mb}MB  bloat={bloat_pct:+.1f}%".format(**evt))
-                        except Exception:
-                            pass
-                    yield chunk
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                # A disconnect cancels the task, and cleanup can raise while that
-                # cancellation is pending (#87). Never turn that into a job error:
-                # let the cancellation continue so it propagates as before.
-                task = asyncio.current_task()
-                if task is not None and task.cancelling():
-                    raise asyncio.CancelledError() from exc
-                logger.exception("Unexpected error in local conversion job")
-                _jlog("ERROR", "Unexpected error: {}".format(exc))
-                yield sse_error("Unexpected error: {}".format(exc))
-            finally:
-                elapsed = datetime.datetime.now() - _job_start
-                status = "CANCELLED"
-                for ln in reversed(_job_lines):
-                    if "[ERROR]" in ln:
-                        status = "FAILED"
-                        break
-                    if "[DONE]" in ln:
-                        status = "SUCCESS"
-                        break
-                ts_file = _job_start.strftime("%Y-%m-%d_%H-%M-%S")
-                log_path = LOGS_DIR / "{}_local.txt".format(ts_file)
-                try:
-                    file_list = json.loads(files)
-                except Exception:
-                    file_list = [files]
-                header_lines = [
-                    "=== FetchForge Job Log ===",
-                    "Started : {}".format(_job_start.strftime("%Y-%m-%d %H:%M:%S")),
-                    "Type    : Local Convert",
-                    "Files   : {}".format(", ".join(str(f) for f in file_list)),
-                    "Elapsed : {}".format(str(elapsed).split(".")[0]),
-                    "Status  : {}".format(status),
-                    "",
-                    "--- Events ---",
-                    "",
-                ]
-                await _write_job_log(log_path, "\n".join(header_lines + _job_lines + [""]))
+    job = _register_job(Job("local", files=files))
 
     async def _convert_local_stream():
-        global current_process
-
         refusal = _nvenc_missing_error(mode, True)
         if refusal:
-            yield sse_error(refusal)
+            yield job.emit(_ev_error(refusal))
             return
 
         _target_res = int(target_res) if target_res.lstrip("-").isdigit() else 0
@@ -3668,7 +3757,7 @@ async def convert_local(
         total = len(file_paths)
 
         if not file_paths:
-            yield sse_error('No valid files found.')
+            yield job.emit(_ev_error('No valid files found.'))
             return
 
         custom_dest = Path(output_dir) if output_dir else None
@@ -3676,12 +3765,12 @@ async def convert_local(
             custom_dest.mkdir(parents=True, exist_ok=True)
 
         action_label = "audio extraction" if is_audio else "conversion"
-        yield sse_log(f'{total} file(s) queued for {action_label}.')
+        yield job.emit(_ev_log(f'{total} file(s) queued for {action_label}.'))
 
         for idx, input_file in enumerate(file_paths, 1):
-            if _cancel_requested.is_set():
+            if job.cancel.is_set():
                 break   # cancel stops the whole queue
-            yield sse_video_start(idx, total)
+            yield job.emit(_ev_video_start(idx, total))
             dest_dir = custom_dest or (input_file.parent / "converted")
             dest_dir.mkdir(parents=True, exist_ok=True)
             safe_stem = sanitize(input_file.stem)
@@ -3692,28 +3781,28 @@ async def convert_local(
                 out_size = output_file.stat().st_size
                 min_output = _min_output_bytes(source_bytes, is_audio)
                 if out_size < min_output:
-                    yield sse_log("Removing incomplete output ({:.0f} MB, expected >={:.0f} MB) \u2014 re-encoding.".format(
-                        out_size / 1024**2, min_output / 1024**2))
+                    yield job.emit(_ev_log("Removing incomplete output ({:.0f} MB, expected >={:.0f} MB) \u2014 re-encoding.".format(
+                        out_size / 1024**2, min_output / 1024**2)))
                     output_file.unlink()
                 else:
-                    yield sse_log(f'Skipping — output already exists: {output_file.name} ({out_size / 1024 ** 2:.0f} MB)')
+                    yield job.emit(_ev_log(f'Skipping — output already exists: {output_file.name} ({out_size / 1024 ** 2:.0f} MB)'))
                     continue
 
             phase_verb = "Extracting audio" if is_audio else "Converting"
-            yield sse_phase(f'{phase_verb} {idx}/{total}: {input_file.name}')
+            yield job.emit(_ev_phase(f'{phase_verb} {idx}/{total}: {input_file.name}'))
             _src_bytes = input_file.stat().st_size if input_file.exists() else 0
-            yield sse_source_size(_src_bytes)
+            yield job.emit(_ev_source_size(_src_bytes))
 
             # Deep-probe source for smart encode parameters
             src = await probe_video(input_file)
             duration_secs = src.get("duration") or None
             if duration_secs:
-                yield sse_log(f'Duration: {duration_secs:.1f}s')
+                yield job.emit(_ev_log(f'Duration: {duration_secs:.1f}s'))
 
             if is_audio:
                 ffmpeg_args = build_audio_ffmpeg(input_file, output_file, audio_preset)
                 enc_log = "Audio extract: {} → {}".format(audio_preset.upper(), output_file.name)
-                yield sse_log(enc_log)
+                yield job.emit(_ev_log(enc_log))
             else:
                 params, ffmpeg_args, enc_logs = _encode_plan(
                     src, input_file, output_file,
@@ -3722,14 +3811,14 @@ async def convert_local(
                      "target_res": _target_res, "sharpen": _sharpen},
                 )
                 for _log in enc_logs:
-                    yield sse_log(_log)
+                    yield job.emit(_ev_log(_log))
 
             enc_res: dict = {}
             async for _s in run_encode(ffmpeg_args, duration_secs=duration_secs,
-                                       idx=idx, total=total, result=enc_res):
+                                       idx=idx, total=total, result=enc_res, job=job):
                 yield _s
 
-            if _cancel_requested.is_set():
+            if job.cancel.is_set():
                 if output_file.exists():
                     output_file.unlink(missing_ok=True)
                 break   # user cancelled mid-encode — not a failure
@@ -3738,24 +3827,26 @@ async def convert_local(
                 if output_file.exists():
                     output_file.unlink(missing_ok=True)
                 fail_verb = "Audio extract" if is_audio else "Conversion"
-                yield sse_error(f'{fail_verb} failed: {input_file.name}')
+                yield job.emit(_ev_error(f'{fail_verb} failed: {input_file.name}'))
                 return
 
             source_bytes = input_file.stat().st_size
             output_bytes = output_file.stat().st_size
-            yield sse_log(f'Done: {output_file.name}')
+            yield job.emit(_ev_log(f'Done: {output_file.name}'))
             if source_bytes > 0:
-                yield sse_size_info(source_bytes, output_bytes)
+                yield job.emit(_ev_size_info(source_bytes, output_bytes))
 
-        if _cancel_requested.is_set():
-            yield sse_cancelled('Cancelled by user.')
+        if job.cancel.is_set():
+            yield job.emit(_ev_cancelled('Cancelled by user.'))
         else:
-            yield sse_done('All done!')
+            yield job.emit(_ev_done('All done!'))
             if shutdown == "true":
                 # Client-driven: UI runs the visible countdown and calls /shutdown-now.
-                yield sse_shutdown('Shutting down in 60 seconds...')
+                yield job.emit(_ev_shutdown('Shutting down in 60 seconds...'))
 
-    return StreamingResponse(_tracked(stream()), media_type="text/event-stream")
+    return StreamingResponse(
+        _tracked(_job_stream(job, _convert_local_stream()), job),
+        media_type="text/event-stream")
 
 
 def _open_folder_dialog(title: str = "Select Output Folder") -> str:
