@@ -11,11 +11,14 @@ license = { text = "MIT" }
 authors = [{ name = "prekabreki", email = "prekabreki@users.noreply.github.com" }]
 dynamic = ["version"]
 dependencies = [
-    "fastapi",
-    "uvicorn",
-    "python-multipart",
+    "fastapi>=0.143",
+    "uvicorn>=0.54",
+    "python-multipart>=0.0.32",
     "yt-dlp[default]",
 ]
+
+[project.optional-dependencies]
+test = ["httpx", "ruff"]
 
 [project.scripts]
 fetchforge = "fetchforge.cli:main"
@@ -34,3 +37,7 @@ version = { attr = "fetchforge.__version__" }
 # be listed here or it works from a source checkout and 404s from a pip install.
 # fonts/ is vendored webfonts + their OFL licences (see fetchforge/fonts/SOURCES.txt).
 fetchforge = ["index.html", "fonts/*.woff2", "fonts/*.txt"]
+
+[tool.ruff.lint]
+select = ["F", "B", "E9"]
+ignore = ["B008"]

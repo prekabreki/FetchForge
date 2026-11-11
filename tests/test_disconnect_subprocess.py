@@ -43,7 +43,7 @@ class _StreamReader:
         except StopIteration:
             if self._hang:
                 await asyncio.Event().wait()
-            raise StopAsyncIteration
+            raise StopAsyncIteration from None
 
 
 class _FakeProc:

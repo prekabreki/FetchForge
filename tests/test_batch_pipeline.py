@@ -95,7 +95,6 @@ async def _run_batch(n_videos, *, dl_fail=frozenset()):
             await msg_q.put(None)
 
     async def enc_worker():
-        consec = 0
         try:
             while True:
                 item = await file_q.get()
@@ -104,7 +103,6 @@ async def _run_batch(n_videos, *, dl_fail=frozenset()):
                 if cancelled.is_set():
                     break
                 await asyncio.sleep(0)  # fake encode
-                consec = 0
                 await msg_q.put(("item_done", item))
         finally:
             enc_gone.set()
