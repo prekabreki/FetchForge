@@ -203,6 +203,59 @@ class ItemsRunnerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("http", events[0]["msg"].lower())
         self.assertEqual(self._calls(), [])
 
+    async def test_url_only_request_carries_formats_into_single_item(self):
+        # The UI's single-item path posts url + video_format + audio_format +
+        # expected_size as request-level fields (no `items`). Those must reach
+        # the one built item so the chosen quality is honoured, not dropped.
+        self._configure([{"title": "Single"}],
+                        resolve={"title": "Single", "duration": 10})
+        events = await self._run(video_format="137", audio_format="140",
+                                 expected_size="123456", convert="false")
+        self.assertEqual([e["msg"] for e in events if e["type"] == "error"], [])
+        self.assertEqual(events[-1]["type"], "done")
+        calls = self._calls()
+        self.assertEqual(len(calls), 2)          # resolve probe, then the download
+        self.assertIn("-J", calls[0])
+        self.assertEqual(calls[1][calls[1].index("-f") + 1], "137+140/bv*+ba/b")
+        self.assertTrue((self.cache / "Single.mkv").exists())
+
+    async def test_pipelined_video_start_does_not_precede_previous_item_done(self):
+        # In pipelined mode video_start must come from the encoder, so the UI's
+        # "now processing item N+1" signal never fires while item N is still
+        # encoding (which would reset the encode timer early). Assert the event
+        # order: item_done(1) strictly before video_start(2).
+        if not HAS_FFMPEG:
+            self.skipTest("needs ffmpeg/ffprobe")
+        self._configure([
+            {"title": "Clip_One", "ext": "webm", "media": "audio"},
+            {"title": "Clip_Two", "ext": "webm", "media": "audio"},
+        ])
+        items = [
+            {"url": "https://youtu.be/a", "title": "Clip One", "duration": 600,
+             "audio_format": "251", "output_dir": str(self.out_a)},
+            {"url": "https://youtu.be/b", "title": "Clip Two", "duration": 600,
+             "audio_format": "251", "output_dir": str(self.out_b)},
+        ]
+        # Collapse the 3–8s inter-download throttle so the test stays fast.
+        with mock.patch.object(server.random, "uniform", lambda a, b: 0.01):
+            events = await self._run(items=json.dumps(items), mode="audio",
+                                     audio_preset="wav", pipeline="true")
+
+        self.assertEqual([e["msg"] for e in events if e["type"] == "error"], [])
+        self.assertEqual(events[-1]["type"], "done")
+
+        video_start_at = {}
+        item_done_at = {}
+        for i, e in enumerate(events):
+            if e["type"] == "video_start":
+                video_start_at.setdefault(e["current"], i)
+            elif e["type"] == "item_done":
+                item_done_at.setdefault(e["idx"], i)
+
+        self.assertEqual(sorted(video_start_at), [1, 2])
+        self.assertEqual(sorted(item_done_at), [1, 2])
+        self.assertLess(item_done_at[1], video_start_at[2])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2921,7 +2921,12 @@ async def fetch_item(item, emit, stopping, *, total, pipelined=False):
     dest_dir = _item_dest_dir(item)
     dest_dir.mkdir(parents=True, exist_ok=True)
 
-    await emit(sse_video_start(idx, total))
+    # `video_start` marks the start of processing THIS item for the UI. In
+    # sequential mode the download is the start (encode follows immediately);
+    # in pipelined mode the encoder is a separate worker that may be a whole
+    # video behind, so process_item emits it at encode time instead.
+    if not pipelined:
+        await emit(sse_video_start(idx, total))
 
     # Skip only when the output this job produces is already complete. A
     # skipped item never deletes a cache file it did not download.
@@ -3081,7 +3086,7 @@ async def fetch_item(item, emit, stopping, *, total, pipelined=False):
     return files[0]
 
 
-async def process_item(item, path, emit, *, total) -> bool:
+async def process_item(item, path, emit, *, total, pipelined=False) -> bool:
     """Encode, audio-extract or leave-as-downloaded one fetched item.
 
     Returns True on success (including a skipped/already-complete output) and
@@ -3096,6 +3101,13 @@ async def process_item(item, path, emit, *, total) -> bool:
     section = item.get("section")
     label = "[{}/{}] ".format(idx, total) if total > 1 else ""
     enc_label = "[ENC {}/{}] ".format(idx, total) if total > 1 else ""
+
+    # In pipelined mode the download worker runs a video ahead, so the UI's
+    # "now processing THIS video" signal must come from the encoder (encode
+    # start), not the downloader — otherwise video_start for item N+1 would
+    # fire while item N is still encoding and reset the encode timer early.
+    if pipelined:
+        await emit(sse_video_start(idx, total))
 
     if not convert and not is_audio:
         await emit(sse_log("{}Saved (no conversion): {}".format(label, path)))
@@ -3444,6 +3456,9 @@ async def download(
                 1,
                 {"url": url, "title": info.get("title") or "",
                  "duration": info.get("duration") or 0,
+                 "video_format": video_format,
+                 "audio_format": audio_format,
+                 "expected_size": expected_size,
                  "section": section},
                 mode=mode, audio_preset=audio_preset,
                 convert=_convert, delete_cache=_delete_cache,
@@ -3461,7 +3476,8 @@ async def download(
 
             async def _process_payload(payload, emit):
                 item, path = payload
-                return await process_item(item, path, emit, total=total_videos)
+                return await process_item(item, path, emit,
+                                          total=total_videos, pipelined=True)
 
             async def _throttle(item, emit, stopping):
                 if item["idx"] < total_videos and not stopping():
