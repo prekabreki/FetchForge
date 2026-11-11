@@ -137,6 +137,7 @@ All events: `data: {JSON}\n\n`. **Every event is built by an `sse_*` helper** at
 | `item_done` | `idx, total` | One item succeeded (or was skipped) |
 | `item_failed` | `idx, total, msg` | One item failed; the job continues with the rest |
 | `size_info` | `source_mb, output_mb, bloat_pct` | Emitted after each successful encode |
+| `encode_params` | `cq, maxrate, preset, tune, pix_fmt` | The resolved encode plan for the current video; the UI builds the parameter pills from it (never from log text) |
 | `log` | `msg` | Scrolling log line |
 | `error` | `msg` | Shown in red |
 | `cancelled` | `msg` | User hit Cancel — distinct from `error`; terminal, no retry |

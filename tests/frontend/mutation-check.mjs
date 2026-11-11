@@ -156,6 +156,15 @@ const MUTATIONS = [
     file: 'http-errors.test.mjs',
     expect: ['a stream that closes with no outcome leaves the item failed'],
   },
+  {
+    id: 'i102/typed-encode-params',
+    guard: 'the encode_params branch in handleMsg()',
+    breaks: 'the pills row never renders, because the only remaining trigger is the log line the UI no longer parses',
+    find: '  } else if (msg.type === \'encode_params\') {\n    showEncodeParams(msg);\n\n  } else if (msg.type === \'log\') {',
+    replace: '  } else if (msg.type === \'log\') {',
+    file: 'encode-params.test.mjs',
+    expect: ['an encode_params event renders the pills row'],
+  },
 ];
 
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
