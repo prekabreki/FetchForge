@@ -102,5 +102,55 @@ class TestDownloadIsComplete(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await server._download_is_complete(self.tmp / "nope.mkv", 0, 5.0))
 
 
+class TestEncodePlan(unittest.TestCase):
+    """_encode_plan is the single source of truth for the params / argv / log
+    lines the three call sites used to build by hand (H-2)."""
+
+    SRC = {
+        "height": 2160, "fps": 60.0, "video_bitrate_kbps": 100000,
+        "codec": "vp9", "pix_fmt": "yuv420p", "color_transfer": "",
+    }
+    OPTS = {
+        "tune_mode": "hq", "cq": 0, "maxrate": "25M", "preset": "",
+        "tune": "", "pix_fmt": "", "target_res": 0, "sharpen": False,
+    }
+
+    def test_matches_pre_refactor_construction_and_logs(self):
+        input_file, output_file = Path("in.mkv"), Path("out.mp4")
+        seek = ["-ss", "5.000", "-t", "25"]
+
+        params, argv, logs = server._encode_plan(
+            self.SRC, input_file, output_file, self.OPTS, input_opts=seek)
+
+        expected_params = server.calc_encode_params(
+            height=2160, fps=60.0, video_bitrate_kbps=100000, codec="vp9",
+            pix_fmt="yuv420p", color_transfer="",
+            cq_override=0, maxrate_override="25M", nvenc_tune="hq",
+            target_res=0, sharpen=False, preset_override="", tune_override="",
+            pix_fmt_override="", probe_tune=server._nvenc_tune,
+        )
+        self.assertEqual(params, expected_params)
+
+        expected_argv = server.build_video_ffmpeg_args(
+            input_file, output_file, expected_params, expected_params["tune"],
+            "vp9", target_height=server._effective_target_height(2160, 0),
+            sharpen=False, input_opts=seek,
+        )
+        self.assertEqual(argv, expected_argv)
+        self.assertEqual(params["maxrate"], "20M")   # 25M clamped on 4K
+        self.assertIn("-ss", argv[:argv.index("-i")])
+
+        self.assertEqual(logs, [
+            "Encode params: CQ=20 maxrate=20M preset=p2 tune=hq pix=yuv420p",
+            "Override maxrate=25M clamped → 20M",
+        ])
+
+    def test_local_conversion_passes_no_input_opts(self):
+        argv = server._encode_plan(
+            self.SRC, Path("in.mkv"), Path("out.mp4"), self.OPTS)[1]
+        self.assertNotIn("-ss", argv)
+        self.assertNotIn("-t", argv)
+
+
 if __name__ == "__main__":
     unittest.main()
