@@ -10,7 +10,7 @@ Local Python/FastAPI web app, packaged as the `fetchforge` pip package. Download
 - **Provisioning:** `fetchforge/provision.py` — on Windows, auto-downloads an NVENC-capable ffmpeg build into `%LOCALAPPDATA%\FetchForge\ffmpeg` on first run if none is found; on Linux, guides the user to install ffmpeg via the package manager (no auto-download — driver/distro-coupled); macOS has no NVENC and raises `ProvisionError` with guidance (download + audio-extract still work without ffmpeg's NVENC encoder).
 - **Runtime paths:** `PKG_DIR = Path(__file__).parent` (installed package code + `index.html`, read-only) vs. `STATE_DIR = Path.cwd()` (writable: `downloads/`, `logs/`, `cookies.txt`, `history.json`) — runtime state always lands in whatever directory you launch `fetchforge` from, not next to the package.
 - **Downloader:** yt-dlp — a regular pip dependency (`yt-dlp[default]`, pulled in by `pyproject.toml`), resolved lazily by `get_ytdlp_argv()`, which returns an **argv prefix**, not a path: bundled `yt-dlp.exe` next to `PKG_DIR` on Windows (optional manual override), else PATH, else the interpreter's `sys.prefix/{Scripts,bin}` console script, else `[sys.executable, "-m", "yt_dlp"]` when the module is importable. That last fallback is what makes `--user` and Windows Store Python installs work — pip drops their console scripts in a redirected dir that is on neither PATH nor `sys.prefix`.
-- **Encoder:** ffmpeg + NVENC (`hevc_nvenc`) via subprocess, resolved lazily by `get_ffmpeg()`/`get_ffprobe()` → `_resolve_tool()` — bundled `_internal/*.exe` next to `PKG_DIR` on Windows (optional manual override; the auto-provisioned cache under `%LOCALAPPDATA%` is what's normally used instead), else PATH on Linux/macOS. `HAS_SCALE_CUDA` is probed at startup (present on the Windows gyan/BtbN build; absent on Fedora/Nobara ffmpeg → CPU-format fallback path). Being lazy (not module-level/eager) means importing `fetchforge.server` no longer requires ffmpeg to be present — only calling `get_ffmpeg()`/`get_ffprobe()` does.
+- **Encoder:** ffmpeg + NVENC (`hevc_nvenc`) via subprocess, resolved lazily by `get_ffmpeg()`/`get_ffprobe()` → `_resolve_tool()` — bundled `_internal/*.exe` next to `PKG_DIR` on Windows (optional manual override; the auto-provisioned cache under `%LOCALAPPDATA%` is what's normally used instead), else PATH on Linux/macOS. `HAS_SCALE_CUDA` and `HAS_LIBPLACEBO` are probed once in `lifespan` at startup (never at import; present on the Windows gyan/BtbN build; absent on Fedora/Nobara ffmpeg → CPU-format fallback path). Being lazy (not module-level/eager) means importing `fetchforge.server` no longer requires ffmpeg to be present — only calling `get_ffmpeg()`/`get_ffprobe()` does.
 - **Launch:** `pip install fetchforge` then the `fetchforge` command (or `python -m fetchforge`) is the primary flow. From a source clone, `launch.sh` (Linux/macOS) / `launch.bat` (Windows) bootstrap a `.venv` (created if absent, reused if present; `PYTHON` env-var override selects the interpreter used to *create* it), `pip install -e .` into it, then run `python -m fetchforge` from that venv — the server opens the browser itself once listening. The editable install is skipped only while the package is present and `pyproject.toml` is not newer than the `.venv/.fetchforge-installed` stamp the launcher touches after a successful install, so a dependency added to `pyproject.toml` triggers a reinstall on the next launch. On Windows, a `.venv` created from the Microsoft Store build of Python inherits that interpreter's `%LOCALAPPDATA%` filesystem virtualization, which matters because the NVENC-ffmpeg auto-provision cache also lives under `%LOCALAPPDATA%\FetchForge\ffmpeg`.
 
 ## File layout
@@ -81,7 +81,7 @@ Cache (raw MKVs from yt-dlp, deleted after encode):
 | POST | `/download` | Main SSE stream — download + encode. Optional `section_start`/`section_end` (whole seconds) capture a time range of a single video (#76); batch items carry the same two keys |
 | POST | `/convert-local` | SSE stream — encode local files |
 | POST | `/probe-file` | ffprobe a local file, returns height + fps |
-| POST | `/scan-folder` | Recursively lists video files in a folder |
+| POST | `/scan-folder` | Lists video files in a folder's top level (non-recursive: `Path.iterdir()`) |
 | POST | `/cancel` | Terminates current ffmpeg + yt-dlp processes |
 | POST | `/shutdown-now` | Runs `shutdown /s /t 0` (called by UI after countdown) |
 | GET | `/browse-folder` | Opens tkinter folder picker (output dir) |
@@ -283,16 +283,7 @@ Gotchas: this box runs **Linux** (the audit + much of this doc is Windows-flavor
 
 ## Key Python gotcha
 
-**Python < 3.12: backslashes cannot appear inside f-string expressions.**
-All string formatting inside async generators uses `.format()` or extracts variables first:
-```python
-# BAD (crashes Python 3.11):
-yield f"data: {json.dumps({'msg': params['cq']})}\n\n"
-
-# GOOD:
-yield "data: {}\n\n".format(json.dumps({"msg": params["cq"]}))
-```
-`pyproject.toml` now declares `requires-python = ">=3.12"` (a pip install refuses older interpreters), but the code still follows this convention defensively — a source checkout run directly with an older interpreter bypasses that check, and it costs nothing to keep.
+Obsolete under `requires-python = ">=3.12"`: Python 3.12+ allows backslashes inside f-string expressions.
 
 ## Versioning
 
