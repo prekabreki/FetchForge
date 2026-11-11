@@ -2631,6 +2631,159 @@ def _nvenc_missing_error(mode: str, converting: bool) -> Optional[str]:
     return None
 
 
+async def run_pipelined(items, fetch, process, cancel, *, throttle=None,
+                        finalize=None, shutdown=False):
+    """Coordinate the pipeline downloader and encoder (one item model).
+
+    `items` is an iterable of opaque item identifiers. For each one,
+    `fetch(item, emit, stopping)` is awaited and returns a payload to encode, or
+    None to skip that item. `process(payload, emit)` is awaited once per queued
+    payload and returns True on success, False on an encode failure; the
+    coordinator owns the consecutive-failure cap. Both bodies publish SSE
+    strings through the async `emit` sink — this async generator yields them in
+    order.
+
+    `throttle(item, emit, stopping)` runs after a payload is queued (the real
+    inter-download sleep), and `finalize(emit)` runs after the download loop.
+
+    This function owns `file_q` (maxsize=1), `abort`, `enc_gone`, cancel
+    polling, the two None sentinels, the encoder's drain-without-delete, and the
+    worker-task cancellation/reaping on generator close (#87).
+    """
+    file_q: asyncio.Queue = asyncio.Queue(maxsize=1)
+    msg_q: asyncio.Queue = asyncio.Queue()
+    abort = asyncio.Event()        # set on hard failure (stops the pipeline)
+    enc_gone = asyncio.Event()     # set when the encoder exits (unblocks the fetcher)
+
+    async def emit(msg) -> None:
+        await msg_q.put(msg)
+
+    def stopping() -> bool:
+        return abort.is_set() or cancel.is_set() or enc_gone.is_set()
+
+    async def _put_file(payload) -> bool:
+        """Hand a downloaded file to the encoder over the maxsize=1 queue, but
+        never block forever if the encoder has stopped consuming (abort, cancel,
+        or encoder exited). Returns False if we gave up without enqueuing.
+        Fixes the dl_worker↔enc_worker deadlock (H-7)."""
+        while not stopping():
+            try:
+                file_q.put_nowait(payload)
+                return True
+            except asyncio.QueueFull:
+                await asyncio.sleep(0.1)
+        return False
+
+    async def _send_sentinel() -> None:
+        """Deliver the None stop-sentinel to the encoder so it can break out of
+        file_q.get(). Keep trying while the encoder is alive (even on
+        cancel/abort — it still needs the sentinel to exit), but give up the
+        moment it has already exited so we never block on a full queue."""
+        while not enc_gone.is_set():
+            try:
+                file_q.put_nowait(None)
+                return
+            except asyncio.QueueFull:
+                await asyncio.sleep(0.1)
+
+    async def dl_worker():
+        try:
+            for item in items:
+                if stopping():
+                    break
+                payload = await fetch(item, emit, stopping)
+                if payload is None:
+                    continue
+                if not await _put_file(payload):
+                    break   # encoder stopped consuming (abort/cancel) — don't hang
+                if throttle is not None:
+                    await throttle(item, emit, stopping)
+            if finalize is not None:
+                await finalize(emit)
+        finally:
+            # Always make sure the encoder receives its stop-sentinel (even on
+            # cancel/abort it may be idle on file_q.get()), but without blocking
+            # if it has already exited. Its own finally sends the msg_q sentinel
+            # the main loop counts.
+            await _send_sentinel()
+            await msg_q.put(None)
+
+    async def enc_worker():
+        consecutive_failures = 0
+        try:
+            while True:
+                item = await file_q.get()
+                if item is None:
+                    break
+                if cancel.is_set():
+                    break
+                ok = await process(item, emit)
+                if cancel.is_set():
+                    break
+                if not ok:
+                    consecutive_failures += 1
+                    # H-6: a single encode failure must NOT abort the pipeline —
+                    # that would kill the fetcher's in-flight download. Surface
+                    # the error and move on; only give up once the encoder looks
+                    # fundamentally broken (N in a row).
+                    if consecutive_failures >= _MAX_CONSECUTIVE_ENCODE_FAILURES:
+                        abort.set()
+                        await emit(sse_error(
+                            "Aborting pipeline: {} consecutive encode failures.".format(consecutive_failures)))
+                        break
+                    continue
+                consecutive_failures = 0
+        finally:
+            # Unblock any pending _put_file so the fetcher can't hang on the
+            # maxsize=1 queue now that we're gone (H-7). Distinct from `abort`
+            # so a clean finish still reports success.
+            enc_gone.set()
+            # Drain queue without deleting — queued files may still be valid.
+            while True:
+                try:
+                    file_q.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+            await msg_q.put(None)
+
+    dl_task = asyncio.create_task(dl_worker())
+    enc_task = asyncio.create_task(enc_worker())
+
+    try:
+        done_count = 0
+        while done_count < 2:
+            msg = await msg_q.get()
+            if msg is None:
+                done_count += 1
+                continue
+            yield msg
+
+        # return_exceptions: a worker dying on an unexpected error must surface as
+        # a clean error event, not crash the SSE stream (both workers already sent
+        # their msg_q sentinel via finally, so the loop above has exited).
+        for _r in await asyncio.gather(dl_task, enc_task, return_exceptions=True):
+            if isinstance(_r, Exception):
+                abort.set()
+                yield sse_error("Pipeline worker error: {}".format(_r))
+
+        if cancel.is_set():
+            yield sse_cancelled('Cancelled by user.')
+        elif not abort.is_set():
+            yield sse_done('All done!')
+            if shutdown:
+                # Shutdown is client-driven: emit the event, the UI runs the
+                # visible countdown and calls POST /shutdown-now itself.
+                yield sse_shutdown('Shutting down in 60 seconds...')
+    finally:
+        # A client disconnect cancels this generator while the workers keep
+        # running as detached tasks. Cancel them so their own finallys terminate
+        # any in-flight yt-dlp/ffmpeg, then reap them (#87).
+        for _t in (dl_task, enc_task):
+            if not _t.done():
+                _t.cancel()
+        await _reap_tasks(dl_task, enc_task)
+
+
 @app.post("/download")
 async def download(
     url: str = Form(...),
@@ -2859,408 +3012,299 @@ async def download(
             # ── Pipeline mode: downloader and encoder run concurrently ─────────
             yield sse_log('Pipeline mode: next download starts while current video encodes.')
 
-            file_q: asyncio.Queue = asyncio.Queue(maxsize=1)
-            msg_q: asyncio.Queue = asyncio.Queue()
-            abort = asyncio.Event()        # set on hard failure (stops the pipeline)
-            enc_gone = asyncio.Event()     # set when enc_worker exits (unblocks dl_worker)
+            failed_videos = []   # videos skipped in a playlist/batch (reported at the end)
 
-            def _stopping() -> bool:
-                return abort.is_set() or _cancel_requested.is_set() or enc_gone.is_set()
-
-            async def _put_file(item) -> bool:
-                """Hand a downloaded MKV to the encoder over the maxsize=1 queue,
-                but never block forever if the encoder has stopped consuming
-                (abort, cancel, or encoder exited). Returns False if we gave up
-                without enqueuing. Fixes the dl_worker↔enc_worker deadlock (H-7)."""
-                while not _stopping():
-                    try:
-                        file_q.put_nowait(item)
-                        return True
-                    except asyncio.QueueFull:
-                        await asyncio.sleep(0.1)
-                return False
-
-            async def _send_sentinel():
-                """Deliver the None stop-sentinel to enc_worker so it can break out
-                of file_q.get(). Keep trying while the encoder is alive (even on
-                cancel/abort — it still needs the sentinel to exit), but give up the
-                moment it has already exited so we never block on a full queue."""
-                while not enc_gone.is_set():
-                    try:
-                        file_q.put_nowait(None)
-                        return
-                    except asyncio.QueueFull:
-                        await asyncio.sleep(0.1)
-
-            async def dl_worker():
+            async def _fetch_one(item, emit, stopping):
                 global current_dl_process
-                failed_videos = []   # videos skipped in a playlist/batch (reported at the end)
+                vid_idx, vid_url = item
+                dl_label = "[DL {}/{}] ".format(vid_idx, total_videos)
+
+                # Per-item lookups (batch mode) vs request-level scalars.
+                cfg = per_item[vid_idx - 1] if batch else None
+                vf = cfg["video_format"] if cfg else video_format
+                af = cfg["audio_format"] if cfg else audio_format
+                item_dest = Path(cfg["output_dir"]) if (cfg and cfg["output_dir"]) else dest_dir
+                item_dest.mkdir(parents=True, exist_ok=True)
+                exp_bytes = cfg["expected_size"] if cfg else (int(expected_size) if expected_size else 0)
+                section = _section_for(vid_idx)
+                if section:
+                    exp_bytes = 0   # the full video's size says nothing about a clip
+
+                # Skip download if output MP4 already exists and looks complete
+                min_output = max(1024 * 1024, int(exp_bytes * 0.30))
+                vid_title = video_titles.get(vid_url, "")
+                if vid_title:
+                    predicted = item_dest / "{}_h265.mp4".format(
+                        _predict_output_stem(vid_title, section_suffix(section)))
+                    if predicted.exists() and predicted.stat().st_size >= min_output:
+                        await emit(sse_log("{}Skipping \u2014 already encoded: {}".format(dl_label, predicted.name)))
+                        if batch:
+                            await emit(sse_item_done(vid_idx, total_videos))
+                        return None
+
+                # NOTE: pipeline mode only — do NOT emit a `phase` event here.
+                # The main progress bar tracks the concurrent ENCODE (sse_progress);
+                # pipeline download progress is shown separately via sse_dl_progress
+                # (the dl-status-row). A `phase` event would flip the main bar to
+                # indeterminate/scrolling with nothing to clear it during the download.
+                # The title still surfaces here in the log and in the dl-status-row.
+                if vid_title:
+                    await emit(sse_log("{}Downloading: {}".format(dl_label, vid_title)))
+                else:
+                    await emit(sse_log("{}Downloading...".format(dl_label)))
+
+                dl_args = [
+                    *get_ytdlp_argv(),
+                    "-f", _video_format_selector(vf, af, prefer_picked=batch),
+                    *NODE_ARGS,
+                    "--no-playlist",
+                    "--no-overwrites",
+                    "--merge-output-format", "mkv",
+                    "--concurrent-fragments", "2",
+                    "--retries", "25",
+                    "--fragment-retries", "25",
+                    "--newline",
+                    "--restrict-filenames",
+                    "--paths", str(CACHE_DIR),
+                    "-o", _output_template(section),
+                    *section_ytdlp_args(section),
+                ]
+                dl_args += cookie_args()
+                dl_args += ["--", vid_url]
+
+                # Snapshot the cache so the post-download fallback can tell
+                # THIS download's output from sibling MKVs already present
+                # (in pipeline mode the previous video is still encoding in
+                # the same CACHE_DIR — see issue #8).
+                pre_existing_mkvs = set(CACHE_DIR.glob("*.mkv"))
+
+                proc = await asyncio.create_subprocess_exec(
+                    *dl_args,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+                current_dl_process = proc
+                output_paths = set()
+
                 try:
-                    for vid_idx, vid_url in enumerate(video_urls, 1):
-                        if _stopping():
+                    async for raw in proc.stdout:
+                        if stopping():
+                            proc.terminate()
                             break
-                        dl_label = "[DL {}/{}] ".format(vid_idx, total_videos)
-
-                        # Per-item lookups (batch mode) vs request-level scalars.
-                        cfg = per_item[vid_idx - 1] if batch else None
-                        vf = cfg["video_format"] if cfg else video_format
-                        af = cfg["audio_format"] if cfg else audio_format
-                        item_dest = Path(cfg["output_dir"]) if (cfg and cfg["output_dir"]) else dest_dir
-                        item_dest.mkdir(parents=True, exist_ok=True)
-                        exp_bytes = cfg["expected_size"] if cfg else (int(expected_size) if expected_size else 0)
-                        section = _section_for(vid_idx)
-                        if section:
-                            exp_bytes = 0   # the full video's size says nothing about a clip
-
-                        # Skip download if output MP4 already exists and looks complete
-                        min_output = max(1024 * 1024, int(exp_bytes * 0.30))
-                        vid_title = video_titles.get(vid_url, "")
-                        if vid_title:
-                            predicted = item_dest / "{}_h265.mp4".format(
-                                _predict_output_stem(vid_title, section_suffix(section)))
-                            if predicted.exists() and predicted.stat().st_size >= min_output:
-                                await msg_q.put(sse_log("{}Skipping \u2014 already encoded: {}".format(dl_label, predicted.name)))
-                                if batch:
-                                    await msg_q.put(sse_item_done(vid_idx, total_videos))
-                                continue
-
-                        # NOTE: pipeline mode only — do NOT emit a `phase` event here.
-                        # The main progress bar tracks the concurrent ENCODE (sse_progress);
-                        # pipeline download progress is shown separately via sse_dl_progress
-                        # (the dl-status-row). A `phase` event would flip the main bar to
-                        # indeterminate/scrolling with nothing to clear it during the download.
-                        # The title still surfaces here in the log and in the dl-status-row.
-                        if vid_title:
-                            await msg_q.put(sse_log("{}Downloading: {}".format(dl_label, vid_title)))
+                        line = raw.decode(errors="replace").rstrip()
+                        _cw = _maybe_flag_stale_cookies(line)
+                        if _cw:
+                            await emit(sse_cookie_warning(_cw))
+                        m = re.search(
+                            r"\[download\]\s+([\d.]+)%\s+of\s+(\S+)\s+at\s+(.+?)\s+ETA\s+(\S+)",
+                            line
+                        )
+                        if m:
+                            dl_pct, dl_size, dl_speed, dl_eta = m.groups()
+                            await emit(sse_dl_progress(float(dl_pct), dl_size, dl_speed, dl_eta, vid_idx, total_videos))
                         else:
-                            await msg_q.put(sse_log("{}Downloading...".format(dl_label)))
+                            merger = re.search(r'\[Merger\] Merging formats into "(.+?)"', line)
+                            # A section download is written merged in one go:
+                            # no [Merger] line, only its Destination.
+                            dest = re.search(r'\[download\] Destination: (.+)', line) if section else None
+                            already = re.search(r'\[download\] (.+?) has already been downloaded', line)
+                            if merger:
+                                output_paths.add(merger.group(1))
+                            elif dest:
+                                output_paths.add(dest.group(1).strip())
+                            elif already:
+                                output_paths.add(already.group(1))
+                            await emit(sse_log(line))
 
-                        dl_args = [
-                            *get_ytdlp_argv(),
-                            "-f", _video_format_selector(vf, af, prefer_picked=batch),
-                            *NODE_ARGS,
-                            "--no-playlist",
-                            "--no-overwrites",
-                            "--merge-output-format", "mkv",
-                            "--concurrent-fragments", "2",
-                            "--retries", "25",
-                            "--fragment-retries", "25",
-                            "--newline",
-                            "--restrict-filenames",
-                            "--paths", str(CACHE_DIR),
-                            "-o", _output_template(section),
-                            *section_ytdlp_args(section),
-                        ]
-                        dl_args += cookie_args()
-                        dl_args += ["--", vid_url]
-
-                        # Snapshot the cache so the post-download fallback can tell
-                        # THIS download's output from sibling MKVs already present
-                        # (in pipeline mode the previous video is still encoding in
-                        # the same CACHE_DIR — see issue #8).
-                        pre_existing_mkvs = set(CACHE_DIR.glob("*.mkv"))
-
-                        proc = await asyncio.create_subprocess_exec(
-                            *dl_args,
-                            stdout=asyncio.subprocess.PIPE,
-                            stderr=asyncio.subprocess.STDOUT,
-                        )
-                        current_dl_process = proc
-                        output_paths = set()
-
-                        try:
-                            async for raw in proc.stdout:
-                                if _stopping():
-                                    proc.terminate()
-                                    break
-                                line = raw.decode(errors="replace").rstrip()
-                                _cw = _maybe_flag_stale_cookies(line)
-                                if _cw:
-                                    await msg_q.put(sse_cookie_warning(_cw))
-                                m = re.search(
-                                    r"\[download\]\s+([\d.]+)%\s+of\s+(\S+)\s+at\s+(.+?)\s+ETA\s+(\S+)",
-                                    line
-                                )
-                                if m:
-                                    dl_pct, dl_size, dl_speed, dl_eta = m.groups()
-                                    await msg_q.put(sse_dl_progress(float(dl_pct), dl_size, dl_speed, dl_eta, vid_idx, total_videos))
-                                else:
-                                    merger = re.search(r'\[Merger\] Merging formats into "(.+?)"', line)
-                                    # A section download is written merged in one go:
-                                    # no [Merger] line, only its Destination.
-                                    dest = re.search(r'\[download\] Destination: (.+)', line) if section else None
-                                    already = re.search(r'\[download\] (.+?) has already been downloaded', line)
-                                    if merger:
-                                        output_paths.add(merger.group(1))
-                                    elif dest:
-                                        output_paths.add(dest.group(1).strip())
-                                    elif already:
-                                        output_paths.add(already.group(1))
-                                    await msg_q.put(sse_log(line))
-
-                            await proc.wait()
-                        finally:
-                            _terminate_if_running(proc)
-                            current_dl_process = None
-                            await proc.wait()
-
-                        if _cancel_requested.is_set():
-                            break   # user cancelled — not a download failure
-
-                        mkv_files = []
-                        if output_paths:
-                            mkv_files = sorted(
-                                [Path(p) for p in output_paths if Path(p).exists() and p.endswith(".mkv")],
-                                key=os.path.getmtime
-                            )
-                            if not mkv_files:
-                                for p in output_paths:
-                                    candidate = Path(p) if Path(p).suffix else Path(p).with_suffix(".mkv")
-                                    if candidate.exists():
-                                        mkv_files = [candidate]
-                                        break
-                        if not mkv_files:
-                            # Fallback only to a file that appeared during THIS
-                            # download — never a sibling video's MKV still in the
-                            # shared cache. A blind glob here would grab the
-                            # previous (still-encoding) video and mis-report this
-                            # failed download as complete (issue #8).
-                            found = _newest_new_file(CACHE_DIR, pre_existing_mkvs)
-                            if found:
-                                mkv_files = [found]
-
-                        expected_dur = video_durations.get(vid_url) or 0
-
-                        if proc.returncode != 0:
-                            if mkv_files and await (
-                                    _section_download_is_complete(mkv_files[0], section, expected_dur) if section
-                                    else _download_is_complete(mkv_files[0], exp_bytes, expected_dur)):
-                                await msg_q.put(sse_log("{}yt-dlp exited with errors but output file verified complete \u2014 continuing.".format(dl_label)))
-                            else:
-                                # Batch: skip this bad video and keep going; single/playlist: abort.
-                                await msg_q.put(sse_item_failed(vid_idx, total_videos, "download failed"))
-                                size_note = ""
-                                if mkv_files and exp_bytes > 0:
-                                    actual = mkv_files[0].stat().st_size
-                                    size_note = " (got {:.0f}MB of expected {:.0f}MB)".format(actual / 1024**2, exp_bytes / 1024**2)
-                                if total_videos > 1 or batch:
-                                    # One un-downloadable video must not abort the
-                                    # rest of a playlist/batch \u2014 record it and keep
-                                    # going; the whole job still completes.
-                                    failed_videos.append(vid_title or vid_url)
-                                    await msg_q.put(sse_log("{}Download failed{} \u2014 skipping, continuing with the rest.".format(dl_label, size_note)))
-                                    continue
-                                abort.set()
-                                await msg_q.put(sse_error("{}Download failed{}.".format(dl_label, size_note)))
-                                break
-
-                        if not mkv_files:
-                            await msg_q.put(sse_item_failed(vid_idx, total_videos, "no mkv"))
-                            if total_videos > 1 or batch:
-                                failed_videos.append(vid_title or vid_url)
-                                await msg_q.put(sse_log("{}No .mkv found after download \u2014 skipping, continuing with the rest.".format(dl_label)))
-                                continue
-                            abort.set()
-                            await msg_q.put(sse_error("{}No .mkv found after download.".format(dl_label)))
-                            break
-
-                        await msg_q.put(sse_log("{}Queued for encoding.".format(dl_label)))
-                        if not await _put_file((vid_idx, mkv_files[0])):
-                            break   # encoder stopped consuming (abort/cancel) — don't hang
-
-                        if vid_idx < total_videos and not _stopping():
-                            sleep_s = random.uniform(3, 8)
-                            await msg_q.put(sse_log("Next download in {:.1f}s...".format(sleep_s)))
-                            await asyncio.sleep(sleep_s)
-
-                    if failed_videos:
-                        shown = "; ".join(failed_videos[:10]) + (" …" if len(failed_videos) > 10 else "")
-                        await msg_q.put(sse_log("⚠ Skipped {} video(s) that couldn't be downloaded: {}".format(len(failed_videos), shown)))
-
+                    await proc.wait()
                 finally:
-                    # Always make sure the encoder receives its stop-sentinel (even on
-                    # cancel/abort it may be idle on file_q.get()), but without blocking
-                    # if it has already exited. Its own finally sends the msg_q sentinel
-                    # the main loop counts.
-                    await _send_sentinel()
-                    await msg_q.put(None)
-
-            async def enc_worker():
-                global current_process
-                consecutive_failures = 0
-                try:
-                    while True:
-                        item = await file_q.get()
-                        if item is None:
-                            break
-                        if _cancel_requested.is_set():
-                            break
-                        vid_idx, input_file = item
-                        await msg_q.put(sse_video_start(vid_idx, total_videos))
-                        enc_label = "[ENC {}/{}] ".format(vid_idx, total_videos)
-
-                        # Per-item output-dir + tune (batch mode) vs request-level.
-                        cfg = per_item[vid_idx - 1] if batch else None
-                        item_dest = Path(cfg["output_dir"]) if (cfg and cfg["output_dir"]) else dest_dir
-                        item_tune = cfg["tune_mode"] if cfg else tune_mode
-                        item_dest.mkdir(parents=True, exist_ok=True)
-
-                        section = _section_for(vid_idx)
-                        safe_stem = _output_stem(input_file.stem, section_suffix(section))
-                        output_file = item_dest / "{}_h265.mp4".format(safe_stem)
-                        source_size = input_file.stat().st_size if input_file.exists() else 0
-                        min_output = max(1024 * 1024, int(source_size * 0.30))
-
-                        if output_file.exists():
-                            out_size = output_file.stat().st_size
-                            if out_size < min_output:
-                                await msg_q.put(sse_log("{}Removing incomplete output ({:.0f} MB, expected >={:.0f} MB) \u2014 re-encoding.".format(enc_label, out_size / 1024**2, min_output / 1024**2)))
-                                output_file.unlink()
-                            else:
-                                await msg_q.put(sse_log("{}Skipping \u2014 output already exists: {} ({:.0f} MB)".format(enc_label, output_file.name, out_size / 1024**2)))
-                                if delete_cache == "true":
-                                    input_file.unlink(missing_ok=True)
-                                if batch:
-                                    await msg_q.put(sse_item_done(vid_idx, total_videos))
-                                continue
-
-                        await msg_q.put(sse_phase("{}Converting: {}".format(enc_label, input_file.name)))
-                        await msg_q.put(sse_source_size(source_size))
-
-                        src = await probe_video(input_file)
-                        duration_secs = src.get("duration") or None
-                        seek = section_input_seek(section, src.get("start_time", 0.0))
-                        if section:
-                            duration_secs = _clip_duration(section, video_durations.get(video_urls[vid_idx - 1]) or 0)
-                        if duration_secs:
-                            await msg_q.put(sse_log("Duration: {:.1f}s".format(duration_secs)))
-                        else:
-                            await msg_q.put(sse_log("Could not read duration \u2014 progress bar will be indeterminate"))
-
-                        effective_tune = "hq" if item_tune == "hq" else _nvenc_tune
-                        params = calc_encode_params(
-                            height=src.get("height", 1080),
-                            fps=src.get("fps", 30.0),
-                            video_bitrate_kbps=src.get("video_bitrate_kbps", 0),
-                            codec=src.get("codec", "h264"),
-                            pix_fmt=src.get("pix_fmt", "yuv420p"),
-                            color_transfer=src.get("color_transfer", ""),
-                            cq_override=cq,
-                            maxrate_override=maxrate,
-                            nvenc_tune=effective_tune,
-                            target_res=_target_res,
-                            sharpen=_sharpen,
-                            preset_override=preset,
-                            tune_override=tune,
-                            pix_fmt_override=pix_fmt,
-                            probe_tune=_nvenc_tune,
-                        )
-                        effective_tune = params["tune"]   # post-validation/downgrade
-                        enc_log = "Encode params: CQ={} maxrate={} preset={} tune={} pix={}".format(
-                            params["cq"], params["maxrate"], params["preset"], effective_tune, params["pix_fmt"]
-                        )
-                        await msg_q.put(sse_log(enc_log))
-                        for _name, _rep in params["overrides"].items():
-                            if _rep["status"] != "applied":
-                                await msg_q.put(sse_log("Override {}={} {} → {}".format(
-                                    _name, _rep["requested"], _rep["status"], _rep["applied"])))
-
-                        enc_args = build_video_ffmpeg_args(
-                            input_file, output_file, params, effective_tune, src.get("codec", ""),
-                            target_height=_effective_target_height(src.get("height", 1080), _target_res),
-                            sharpen=_sharpen,
-                            input_opts=seek,
-                        )
-                        enc_res: dict = {}
-                        async for _s in run_encode(enc_args, duration_secs=duration_secs,
-                                                   idx=vid_idx, total=total_videos, result=enc_res):
-                            await msg_q.put(_s)
-
-                        if _cancel_requested.is_set():
-                            # User cancelled mid-encode — discard the partial output,
-                            # don't treat it as a failure or retry.
-                            if output_file.exists():
-                                output_file.unlink(missing_ok=True)
-                            break
-
-                        if enc_res["returncode"] != 0:
-                            # Remove partial output so retries don't falsely skip.
-                            if output_file.exists():
-                                output_file.unlink(missing_ok=True)
-                            consecutive_failures += 1
-                            # H-6: a single encode failure must NOT abort the pipeline —
-                            # that would kill dl_worker's in-flight download. Surface the
-                            # error and move on to the next queued MKV. Only give up once
-                            # the encoder looks fundamentally broken (N in a row).
-                            await msg_q.put(sse_error("{}Conversion failed: {}".format(enc_label, input_file.name)))
-                            await msg_q.put(sse_item_failed(vid_idx, total_videos, "encode failed"))
-                            if consecutive_failures >= _MAX_CONSECUTIVE_ENCODE_FAILURES:
-                                abort.set()
-                                await msg_q.put(sse_error("Aborting pipeline: {} consecutive encode failures.".format(consecutive_failures)))
-                                break
-                            continue
-
-                        consecutive_failures = 0
-                        source_bytes = input_file.stat().st_size if input_file.exists() else 0
-                        if delete_cache == "true":
-                            input_file.unlink(missing_ok=True)
-                        output_bytes = output_file.stat().st_size
-                        size_mb = output_bytes / 1024 ** 2
-                        cache_note = "cache cleared" if delete_cache == "true" else "cache kept"
-                        await msg_q.put(sse_log("Done: {} \u2014 {:.0f} MB ({})".format(output_file.name, size_mb, cache_note)))
-                        if source_bytes > 0:
-                            await msg_q.put(sse_size_info(source_bytes, output_bytes))
-                        await msg_q.put(sse_item_done(vid_idx, total_videos))
-
-                finally:
-                    # Unblock any pending _put_file so dl_worker can't hang on the
-                    # maxsize=1 queue now that we're gone (H-7). Distinct from `abort`
-                    # so a clean finish still reports success.
-                    enc_gone.set()
-                    # Drain queue without deleting — queued MKVs may still be valid.
-                    while True:
-                        try:
-                            file_q.get_nowait()
-                        except asyncio.QueueEmpty:
-                            break
-                    await msg_q.put(None)
-
-            dl_task = asyncio.create_task(dl_worker())
-            enc_task = asyncio.create_task(enc_worker())
-
-            try:
-                done_count = 0
-                while done_count < 2:
-                    msg = await msg_q.get()
-                    if msg is None:
-                        done_count += 1
-                        continue
-                    yield msg
-
-                # return_exceptions: a worker dying on an unexpected error must surface as
-                # a clean error event, not crash the SSE stream (both workers already sent
-                # their msg_q sentinel via finally, so the loop above has exited).
-                for _r in await asyncio.gather(dl_task, enc_task, return_exceptions=True):
-                    if isinstance(_r, Exception):
-                        abort.set()
-                        yield sse_error("Pipeline worker error: {}".format(_r))
+                    _terminate_if_running(proc)
+                    current_dl_process = None
+                    await proc.wait()
 
                 if _cancel_requested.is_set():
-                    yield sse_cancelled('Cancelled by user.')
-                elif not abort.is_set():
-                    yield sse_done('All done!')
-                    if shutdown == "true":
-                        # Shutdown is client-driven: emit the event, the UI runs the
-                        # visible countdown and calls POST /shutdown-now itself.
-                        yield sse_shutdown('Shutting down in 60 seconds...')
-            finally:
-                # A client disconnect cancels this generator while the workers keep
-                # running as detached tasks. Cancel them so their own finallys
-                # terminate any in-flight yt-dlp/ffmpeg, then reap them (#87).
-                for _t in (dl_task, enc_task):
-                    if not _t.done():
-                        _t.cancel()
-                await _reap_tasks(dl_task, enc_task)
+                    return None   # user cancelled — not a download failure
+
+                mkv_files = []
+                if output_paths:
+                    mkv_files = sorted(
+                        [Path(p) for p in output_paths if Path(p).exists() and p.endswith(".mkv")],
+                        key=os.path.getmtime
+                    )
+                    if not mkv_files:
+                        for p in output_paths:
+                            candidate = Path(p) if Path(p).suffix else Path(p).with_suffix(".mkv")
+                            if candidate.exists():
+                                mkv_files = [candidate]
+                                break
+                if not mkv_files:
+                    # Fallback only to a file that appeared during THIS
+                    # download — never a sibling video's MKV still in the
+                    # shared cache. A blind glob here would grab the
+                    # previous (still-encoding) video and mis-report this
+                    # failed download as complete (issue #8).
+                    found = _newest_new_file(CACHE_DIR, pre_existing_mkvs)
+                    if found:
+                        mkv_files = [found]
+
+                expected_dur = video_durations.get(vid_url) or 0
+
+                if proc.returncode != 0:
+                    if mkv_files and await (
+                            _section_download_is_complete(mkv_files[0], section, expected_dur) if section
+                            else _download_is_complete(mkv_files[0], exp_bytes, expected_dur)):
+                        await emit(sse_log("{}yt-dlp exited with errors but output file verified complete \u2014 continuing.".format(dl_label)))
+                    else:
+                        # Batch/playlist: skip this bad video and keep going.
+                        await emit(sse_item_failed(vid_idx, total_videos, "download failed"))
+                        size_note = ""
+                        if mkv_files and exp_bytes > 0:
+                            actual = mkv_files[0].stat().st_size
+                            size_note = " (got {:.0f}MB of expected {:.0f}MB)".format(actual / 1024**2, exp_bytes / 1024**2)
+                        # One un-downloadable video must not abort the rest of a
+                        # playlist/batch — record it and keep going; the whole
+                        # job still completes.
+                        failed_videos.append(vid_title or vid_url)
+                        await emit(sse_log("{}Download failed{} \u2014 skipping, continuing with the rest.".format(dl_label, size_note)))
+                        return None
+
+                if not mkv_files:
+                    await emit(sse_item_failed(vid_idx, total_videos, "no mkv"))
+                    failed_videos.append(vid_title or vid_url)
+                    await emit(sse_log("{}No .mkv found after download \u2014 skipping, continuing with the rest.".format(dl_label)))
+                    return None
+
+                await emit(sse_log("{}Queued for encoding.".format(dl_label)))
+                return (vid_idx, mkv_files[0])
+
+            async def _process_one(item, emit):
+                global current_process
+                vid_idx, input_file = item
+                await emit(sse_video_start(vid_idx, total_videos))
+                enc_label = "[ENC {}/{}] ".format(vid_idx, total_videos)
+
+                # Per-item output-dir + tune (batch mode) vs request-level.
+                cfg = per_item[vid_idx - 1] if batch else None
+                item_dest = Path(cfg["output_dir"]) if (cfg and cfg["output_dir"]) else dest_dir
+                item_tune = cfg["tune_mode"] if cfg else tune_mode
+                item_dest.mkdir(parents=True, exist_ok=True)
+
+                section = _section_for(vid_idx)
+                safe_stem = _output_stem(input_file.stem, section_suffix(section))
+                output_file = item_dest / "{}_h265.mp4".format(safe_stem)
+                source_size = input_file.stat().st_size if input_file.exists() else 0
+                min_output = max(1024 * 1024, int(source_size * 0.30))
+
+                if output_file.exists():
+                    out_size = output_file.stat().st_size
+                    if out_size < min_output:
+                        await emit(sse_log("{}Removing incomplete output ({:.0f} MB, expected >={:.0f} MB) \u2014 re-encoding.".format(enc_label, out_size / 1024**2, min_output / 1024**2)))
+                        output_file.unlink()
+                    else:
+                        await emit(sse_log("{}Skipping \u2014 output already exists: {} ({:.0f} MB)".format(enc_label, output_file.name, out_size / 1024**2)))
+                        if delete_cache == "true":
+                            input_file.unlink(missing_ok=True)
+                        if batch:
+                            await emit(sse_item_done(vid_idx, total_videos))
+                        return True
+
+                await emit(sse_phase("{}Converting: {}".format(enc_label, input_file.name)))
+                await emit(sse_source_size(source_size))
+
+                src = await probe_video(input_file)
+                duration_secs = src.get("duration") or None
+                seek = section_input_seek(section, src.get("start_time", 0.0))
+                if section:
+                    duration_secs = _clip_duration(section, video_durations.get(video_urls[vid_idx - 1]) or 0)
+                if duration_secs:
+                    await emit(sse_log("Duration: {:.1f}s".format(duration_secs)))
+                else:
+                    await emit(sse_log("Could not read duration \u2014 progress bar will be indeterminate"))
+
+                effective_tune = "hq" if item_tune == "hq" else _nvenc_tune
+                params = calc_encode_params(
+                    height=src.get("height", 1080),
+                    fps=src.get("fps", 30.0),
+                    video_bitrate_kbps=src.get("video_bitrate_kbps", 0),
+                    codec=src.get("codec", "h264"),
+                    pix_fmt=src.get("pix_fmt", "yuv420p"),
+                    color_transfer=src.get("color_transfer", ""),
+                    cq_override=cq,
+                    maxrate_override=maxrate,
+                    nvenc_tune=effective_tune,
+                    target_res=_target_res,
+                    sharpen=_sharpen,
+                    preset_override=preset,
+                    tune_override=tune,
+                    pix_fmt_override=pix_fmt,
+                    probe_tune=_nvenc_tune,
+                )
+                effective_tune = params["tune"]   # post-validation/downgrade
+                enc_log = "Encode params: CQ={} maxrate={} preset={} tune={} pix={}".format(
+                    params["cq"], params["maxrate"], params["preset"], effective_tune, params["pix_fmt"]
+                )
+                await emit(sse_log(enc_log))
+                for _name, _rep in params["overrides"].items():
+                    if _rep["status"] != "applied":
+                        await emit(sse_log("Override {}={} {} → {}".format(
+                            _name, _rep["requested"], _rep["status"], _rep["applied"])))
+
+                enc_args = build_video_ffmpeg_args(
+                    input_file, output_file, params, effective_tune, src.get("codec", ""),
+                    target_height=_effective_target_height(src.get("height", 1080), _target_res),
+                    sharpen=_sharpen,
+                    input_opts=seek,
+                )
+                enc_res: dict = {}
+                async for _s in run_encode(enc_args, duration_secs=duration_secs,
+                                           idx=vid_idx, total=total_videos, result=enc_res):
+                    await emit(_s)
+
+                if _cancel_requested.is_set():
+                    # User cancelled mid-encode — discard the partial output,
+                    # don't treat it as a failure or retry.
+                    if output_file.exists():
+                        output_file.unlink(missing_ok=True)
+                    return True
+
+                if enc_res["returncode"] != 0:
+                    # Remove partial output so retries don't falsely skip.
+                    if output_file.exists():
+                        output_file.unlink(missing_ok=True)
+                    await emit(sse_error("{}Conversion failed: {}".format(enc_label, input_file.name)))
+                    await emit(sse_item_failed(vid_idx, total_videos, "encode failed"))
+                    return False
+
+                source_bytes = input_file.stat().st_size if input_file.exists() else 0
+                if delete_cache == "true":
+                    input_file.unlink(missing_ok=True)
+                output_bytes = output_file.stat().st_size
+                size_mb = output_bytes / 1024 ** 2
+                cache_note = "cache cleared" if delete_cache == "true" else "cache kept"
+                await emit(sse_log("Done: {} \u2014 {:.0f} MB ({})".format(output_file.name, size_mb, cache_note)))
+                if source_bytes > 0:
+                    await emit(sse_size_info(source_bytes, output_bytes))
+                await emit(sse_item_done(vid_idx, total_videos))
+                return True
+
+            async def _throttle(item, emit, stopping):
+                vid_idx, _vid_url = item
+                if vid_idx < total_videos and not stopping():
+                    sleep_s = random.uniform(3, 8)
+                    await emit(sse_log("Next download in {:.1f}s...".format(sleep_s)))
+                    await asyncio.sleep(sleep_s)
+
+            async def _finalize(emit):
+                if failed_videos:
+                    shown = "; ".join(failed_videos[:10]) + (" …" if len(failed_videos) > 10 else "")
+                    await emit(sse_log("⚠ Skipped {} video(s) that couldn't be downloaded: {}".format(len(failed_videos), shown)))
+
+            async with contextlib.aclosing(run_pipelined(
+                    list(enumerate(video_urls, 1)), _fetch_one, _process_one,
+                    _cancel_requested, throttle=_throttle, finalize=_finalize,
+                    shutdown=(shutdown == "true"))) as _pipeline:
+                async for _event in _pipeline:
+                    yield _event
 
         else:
             # ── Sequential: download → convert → delete, one at a time ─────────
