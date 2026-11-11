@@ -83,3 +83,32 @@ test('a stream that errors mid-read leaves the Start button visible and Cancel h
   assert.match(entries[0].textContent, /socket hang up/i, 'the read error is kept as the reason');
   assert.ok(entries[0].classList.contains('transient'), 'a read error retries');
 });
+
+test('a stream that closes with no outcome leaves the item failed', async (t) => {
+  const page = await loadPage({
+    routes: (f) => {
+      f.sse('/download');
+      f.json('/cancel', { status: 'cancelled' });
+    },
+  });
+  t.after(() => page.close());
+  await queueVideos(page, ['https://youtu.be/silent']);
+
+  const run = page.window.startDownload();
+  const s = await page.fetchStub.nextStream(0);
+  s.send({ type: 'phase', msg: 'Downloading: silent' });
+  // A clean close with neither an item event nor the terminal `done`: this is
+  // the dropped-stream / encoder-abort-cap shape, so it must not count as done.
+  s.close();
+  await flush(10);
+
+  const entries = failureEntries(page);
+  assert.equal(entries.length, 1, 'an item with no outcome is recorded as failed');
+  assert.match(entries[0].textContent, /Video 1/, 'the item is identified by its title');
+  assert.match(entries[0].textContent, /no result/i, 'the missing-outcome reason is kept');
+  assert.ok(entries[0].classList.contains('transient'), 'a missing outcome retries');
+
+  // End the run without waiting out the retry backoff.
+  page.$('#cancel-btn').dispatchEvent(new page.window.MouseEvent('click', { bubbles: true }));
+  await run;
+});

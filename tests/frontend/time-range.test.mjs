@@ -33,6 +33,9 @@ async function errors(page) {
 }
 const queueRows = (page) => page.$$('#dl-queue-items > div');
 const downloads = (page) => page.fetchStub.callsTo('/download');
+// A single video is sent as a one-element items list (#104), so its range
+// lives in the per-item payload rather than at the top level of the form.
+const firstItem = (page) => JSON.parse(downloads(page)[0].form.items)[0];
 
 async function startAndFinish(page) {
   const run = page.window.startDownload();
@@ -47,26 +50,26 @@ test('a From/To range rides the /download request as whole seconds', async (t) =
   setRange(page, '12:30', '18:00');
   await startAndFinish(page);
 
-  const form = downloads(page)[0].form;
-  assert.equal(form.section_start, '750');
-  assert.equal(form.section_end, '1080');
+  const item = firstItem(page);
+  assert.equal(item.section_start, 750);
+  assert.equal(item.section_end, 1080);
 });
 
 test('H:MM:SS and bare seconds parse, and a blank To means to the end', async (t) => {
   const page = await pageWithVideo(t);
   setRange(page, '0:45:05', '');
   await startAndFinish(page);
-  const form = downloads(page)[0].form;
-  assert.equal(form.section_start, '2705');
-  assert.equal(form.section_end, '');
+  const item = firstItem(page);
+  assert.equal(item.section_start, 2705);
+  assert.equal(item.section_end, null);
 });
 
 test('blank fields send no range at all', async (t) => {
   const page = await pageWithVideo(t);
   await startAndFinish(page);
-  const form = downloads(page)[0].form;
-  assert.equal(form.section_start, '');
-  assert.equal(form.section_end, '');
+  const item = firstItem(page);
+  assert.equal(item.section_start, null);
+  assert.equal(item.section_end, null);
 });
 
 test('To before From is refused and nothing is queued or sent', async (t) => {
