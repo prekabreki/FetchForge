@@ -2095,7 +2095,7 @@ function showEncodeParams(logMsg) {
     const val = pair.slice(eq + 1);
     const pill = document.createElement('span');
     pill.className = 'encode-pill';
-    pill.innerHTML = '<span class="pill-key">' + key + '</span>' + val;
+    pill.innerHTML = '<span class="pill-key">' + escapeHtml(key) + '</span>' + escapeHtml(val);
     container.appendChild(pill);
   });
   document.getElementById('encode-params-row').style.display = '';
@@ -2604,10 +2604,10 @@ function renderHistory() {
   document.getElementById('history-toggle-label').textContent = 'Recent (' + _historyItems.length + ')';
   list.innerHTML = _historyItems.map((item, i) => {
     const thumb = item.thumbnail
-      ? `<img class="history-thumb" src="${item.thumbnail}" alt="">`
+      ? `<img class="history-thumb" src="${escapeAttr(item.thumbnail)}" alt="">`
       : `<div class="history-thumb-blank"></div>`;
     const sub = (item.is_playlist ? `Playlist \u00b7 ${item.count} videos \u00b7 ` : '') + (item.added ? item.added.replace('T', ' ') : '');
-    return `<div class="history-item" onclick="loadFromHistory(${i})" role="button" tabindex="0">${thumb}<div class="history-meta"><div class="history-title">${item.title || item.url}</div><div class="history-sub">${sub}</div></div></div>`;
+    return `<div class="history-item" onclick="loadFromHistory(${i})" role="button" tabindex="0">${thumb}<div class="history-meta"><div class="history-title">${escapeHtml(item.title || item.url)}</div><div class="history-sub">${sub}</div></div></div>`;
   }).join('');
 }
 
@@ -4116,8 +4116,8 @@ function renderDlQueue() {
       ? '<span style="background:var(--accent3);color:#111;font-size: 11px;padding:1px 5px;border-radius:3px;margin-right:6px;">ENC</span>'
       : '<span style="background:var(--accent);color:#111;font-size: 11px;padding:1px 5px;border-radius:3px;margin-right:6px;">DL</span>';
     const fmtLabel = q.video_format
-      ? `${q.video_format}+${q.audio_format}`
-      : (currentMode === 'audio' ? `audio:${q.audio_format}` : `best+${q.audio_format}`);
+      ? `${escapeHtml(q.video_format)}+${escapeHtml(q.audio_format)}`
+      : (currentMode === 'audio' ? `audio:${escapeHtml(q.audio_format)}` : `best+${escapeHtml(q.audio_format)}`);
     const detail = q.type === 'local'
       ? `<span class="queue-detail">${q.size_gb} GB</span>`
       : `<span class="queue-detail">${sectionLabel(q) ? `<span class="queue-range">${sectionLabel(q)}</span> \u00b7 ` : ''}${fmtLabel}${q.expected_size > 0 && !sectionLabel(q) ? ' \u00b7 ' + (q.expected_size / 1024**3).toFixed(1) + 'GB' : ''}</span>`;
@@ -4133,7 +4133,7 @@ function renderDlQueue() {
            aria-label="Output folder for this item" onchange="dlQueue[${i}].output_dir=this.value.trim()">`
       : '';
     return `<div class="queue-row">
-      <span class="queue-title" title="${tip}">${tag}${q.title}</span>
+      <span class="queue-title" title="${escapeAttr(tip)}">${tag}${escapeHtml(q.title)}</span>
       ${detail}
       ${tuneCtl}
       ${dirCtl}
@@ -4210,7 +4210,7 @@ function renderLocalFiles() {
   count.textContent = localFiles.length;
   items.innerHTML = localFiles.map((f, i) => `
     <div style="display:flex;justify-content:space-between;align-items:center;padding:5px 10px;border-bottom:1px solid var(--border);">
-      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${f.path}">${f.name}</span>
+      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeAttr(f.path)}">${escapeHtml(f.name)}</span>
       <span style="color:var(--muted);margin:0 12px;flex-shrink:0;">${f.size_gb} GB</span>
       <span style="color:var(--accent2);cursor:pointer;flex-shrink:0;" onclick="removeLocalFile(${i})" role="button" tabindex="0" aria-label="Remove file from list"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></span>
     </div>
