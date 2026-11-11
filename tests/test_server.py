@@ -630,6 +630,14 @@ class TestSseBuilders(unittest.TestCase):
                                      "output_mb": round(ob / 1024**2, 1),
                                      "bloat_pct": round(bloat, 1)}))
 
+    def test_encode_params_event(self):
+        params = {"cq": 22, "maxrate": "20M", "preset": "p4",
+                  "tune": "uhq", "pix_fmt": "yuv420p"}
+        self.assertEqual(server.sse_encode_params(params),
+                         self._wire({"type": "encode_params", "cq": 22,
+                                     "maxrate": "20M", "preset": "p4",
+                                     "tune": "uhq", "pix_fmt": "yuv420p"}))
+
 
 class TestGetFormatsFailure(unittest.TestCase):
     """#67 — a failed format fetch must carry a reason, not two silent empty lists."""

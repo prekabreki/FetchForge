@@ -2082,20 +2082,26 @@ function setPhaseState(phase) {
 }
 
 // ---- ENCODE BADGES (F2) ----
-function showEncodeParams(logMsg) {
-  const match = logMsg.match(/Encode params:\s*(.+)/);
-  if (!match) return;
-  const pairs = match[1].match(/\S+=\S+/g);
-  if (!pairs || pairs.length === 0) return;
+function showEncodeParams(params) {
+  const fields = [
+    ['CQ', params.cq],
+    ['maxrate', params.maxrate],
+    ['preset', params.preset],
+    ['tune', params.tune],
+    ['pix', params.pix_fmt],
+  ];
   const container = document.getElementById('encode-params-pills');
   container.innerHTML = '';
-  pairs.forEach(function(pair) {
-    const eq = pair.indexOf('=');
-    const key = pair.slice(0, eq);
-    const val = pair.slice(eq + 1);
+  fields.forEach(function(field) {
+    const key = field[0];
+    const val = field[1];
     const pill = document.createElement('span');
     pill.className = 'encode-pill';
-    pill.innerHTML = '<span class="pill-key">' + escapeHtml(key) + '</span>' + escapeHtml(val);
+    const keyEl = document.createElement('span');
+    keyEl.className = 'pill-key';
+    keyEl.textContent = key;
+    pill.appendChild(keyEl);
+    pill.appendChild(document.createTextNode(String(val)));
     container.appendChild(pill);
   });
   document.getElementById('encode-params-row').style.display = '';
@@ -3783,9 +3789,11 @@ function handleMsg(msg) {
     document.getElementById('dl-status-eta').textContent = 'ETA ' + msg.eta;
     chartDl.push(parseDownloadSpeed(msg.speed));
 
+  } else if (msg.type === 'encode_params') {
+    showEncodeParams(msg);
+
   } else if (msg.type === 'log') {
     log(msg.msg);
-    if (msg.msg.indexOf('Encode params:') !== -1) showEncodeParams(msg.msg);
 
   } else if (msg.type === 'error') {
     _lastErrorMsg = msg.msg || '';

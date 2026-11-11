@@ -975,6 +975,14 @@ def _ev_size_info(source_bytes: int, output_bytes: int) -> dict:
             "output_mb": round(output_bytes / 1024**2, 1),
             "bloat_pct": round(bloat, 1)}
 
+def _ev_encode_params(params: dict) -> dict:
+    return {"type": "encode_params",
+            "cq": params["cq"],
+            "maxrate": params["maxrate"],
+            "preset": params["preset"],
+            "tune": params["tune"],
+            "pix_fmt": params["pix_fmt"]}
+
 def sse_log(msg: str) -> str:
     return _sse(_ev_log(msg))
 
@@ -1016,6 +1024,9 @@ def sse_item_failed(idx: int, total: int, msg: str) -> str:
 
 def sse_size_info(source_bytes: int, output_bytes: int) -> str:
     return _sse(_ev_size_info(source_bytes, output_bytes))
+
+def sse_encode_params(params: dict) -> str:
+    return _sse(_ev_encode_params(params))
 
 
 # ── Job (#105) ───────────────────────────────────────────────────────────────
@@ -3374,7 +3385,7 @@ async def process_item(item, path, emit, *, total, pipelined=False, job=None) ->
             return True
 
     phase_verb = "Extracting audio" if is_audio else "Converting"
-    await emit(_ev_phase("{}: {}".format(phase_verb, path.name)))
+    await emit(_ev_phase(phase_verb, path.name))
     await emit(_ev_source_size(source_size))
 
     src = await probe_video(path)
@@ -3403,6 +3414,7 @@ async def process_item(item, path, emit, *, total, pipelined=False, job=None) ->
              "sharpen": item.get("sharpen", False)},
             input_opts=seek,
         )
+        await emit(_ev_encode_params(params))
         for _log in enc_logs:
             await emit(_ev_log(_log))
 
@@ -3789,7 +3801,7 @@ async def convert_local(
                     continue
 
             phase_verb = "Extracting audio" if is_audio else "Converting"
-            yield job.emit(_ev_phase(f'{phase_verb} {idx}/{total}: {input_file.name}'))
+            yield job.emit(_ev_phase(f'{phase_verb} {idx}/{total}', input_file.name))
             _src_bytes = input_file.stat().st_size if input_file.exists() else 0
             yield job.emit(_ev_source_size(_src_bytes))
 
@@ -3810,6 +3822,7 @@ async def convert_local(
                      "preset": preset, "tune": tune, "pix_fmt": pix_fmt,
                      "target_res": _target_res, "sharpen": _sharpen},
                 )
+                yield job.emit(_ev_encode_params(params))
                 for _log in enc_logs:
                     yield job.emit(_ev_log(_log))
 
