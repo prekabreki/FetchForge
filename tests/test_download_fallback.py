@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from fetchforge import server
+from fetchforge import server, config, ytdlp, jobs
 
 
 # A stand-in for yt-dlp. It answers the -J resolve, then for a download reads a
@@ -40,11 +40,11 @@ _FAKE_YTDLP = textwrap.dedent('''
 
 class CacheSnapshotPatternsTest(unittest.TestCase):
     def test_audio_patterns_cover_every_audio_suffix(self):
-        self.assertEqual({p[1:] for p in server._cache_snapshot_patterns(True)},
-                         server._AUDIO_EXTS)
+        self.assertEqual({p[1:] for p in ytdlp._cache_snapshot_patterns(True)},
+                         ytdlp._AUDIO_EXTS)
 
     def test_video_pattern_is_mkv_only(self):
-        self.assertEqual(server._cache_snapshot_patterns(False), ["*.mkv"])
+        self.assertEqual(ytdlp._cache_snapshot_patterns(False), ["*.mkv"])
 
 
 class SequentialDownloadFallbackTest(unittest.IsolatedAsyncioTestCase):
@@ -62,12 +62,12 @@ class SequentialDownloadFallbackTest(unittest.IsolatedAsyncioTestCase):
         self.older.write_bytes(b"o" * (3 * 1024 * 1024))
 
         for p in [
-            mock.patch.object(server, "get_ytdlp_argv", lambda: [sys.executable, str(self.fake)]),
-            mock.patch.object(server, "CACHE_DIR", self.cache),
-            mock.patch.object(server, "LOGS_DIR", self.tmp / "logs"),
-            mock.patch.object(server, "NODE_ARGS", []),
-            mock.patch.object(server, "_keep_awake", lambda: None),
-            mock.patch.object(server, "_allow_sleep", lambda: None),
+            mock.patch.object(ytdlp, "get_ytdlp_argv", lambda: [sys.executable, str(self.fake)]),
+            mock.patch.object(config, "CACHE_DIR", self.cache),
+            mock.patch.object(config, "LOGS_DIR", self.tmp / "logs"),
+            mock.patch.object(ytdlp, "NODE_ARGS", []),
+            mock.patch.object(jobs, "_keep_awake", lambda: None),
+            mock.patch.object(jobs, "_allow_sleep", lambda: None),
         ]:
             p.start()
             self.addCleanup(p.stop)

@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from fetchforge import server
+from fetchforge import config, events, ytdlp, encode, capabilities, cookies
 from yt_dlp.utils import sanitize_filename
 
 
@@ -16,42 +16,42 @@ class TestStaleCookieDetection(unittest.TestCase):
     """Issue #9: yt-dlp's rotated-cookie warning must flip cookies off for the run."""
 
     def setUp(self):
-        server._cookies_disabled = False
+        cookies._cookies_disabled = False
 
     def tearDown(self):
-        server._cookies_disabled = False
+        cookies._cookies_disabled = False
 
     def test_flags_and_drops_cookies_on_rotation_warning(self):
         with tempfile.TemporaryDirectory() as d:
             ck = Path(d) / "cookies.txt"
             ck.write_text("x")
-            with mock.patch.object(server, "COOKIES_PATH", ck):
-                self.assertEqual(server.cookie_args(), ["--cookies", str(ck)])
+            with mock.patch.object(config, "COOKIES_PATH", ck):
+                self.assertEqual(cookies.cookie_args(), ["--cookies", str(ck)])
                 line = ("WARNING: [youtube] The provided YouTube account cookies are "
                         "no longer valid. They have likely been rotated in the browser.")
-                msg = server._maybe_flag_stale_cookies(line)
+                msg = cookies._maybe_flag_stale_cookies(line)
                 self.assertIsNotNone(msg)
-                self.assertTrue(server._cookies_disabled)
-                self.assertEqual(server.cookie_args(), [])            # dropped for the run
-                self.assertIsNone(server._maybe_flag_stale_cookies(line))  # one-shot
+                self.assertTrue(cookies._cookies_disabled)
+                self.assertEqual(cookies.cookie_args(), [])            # dropped for the run
+                self.assertIsNone(cookies._maybe_flag_stale_cookies(line))  # one-shot
 
     def test_benign_line_does_not_flag(self):
         with tempfile.TemporaryDirectory() as d:
             ck = Path(d) / "cookies.txt"
             ck.write_text("x")
-            with mock.patch.object(server, "COOKIES_PATH", ck):
-                self.assertIsNone(server._maybe_flag_stale_cookies("[download]  50% of 10MiB"))
-                self.assertFalse(server._cookies_disabled)
+            with mock.patch.object(config, "COOKIES_PATH", ck):
+                self.assertIsNone(cookies._maybe_flag_stale_cookies("[download]  50% of 10MiB"))
+                self.assertFalse(cookies._cookies_disabled)
 
     def test_no_flag_when_no_cookies_loaded(self):
         with tempfile.TemporaryDirectory() as d:
             ck = Path(d) / "cookies.txt"   # never created
-            with mock.patch.object(server, "COOKIES_PATH", ck):
-                self.assertIsNone(server._maybe_flag_stale_cookies("cookies are no longer valid"))
-                self.assertFalse(server._cookies_disabled)
+            with mock.patch.object(config, "COOKIES_PATH", ck):
+                self.assertIsNone(cookies._maybe_flag_stale_cookies("cookies are no longer valid"))
+                self.assertFalse(cookies._cookies_disabled)
 
     def test_sse_cookie_warning_shape(self):
-        s = server.sse_cookie_warning("hi")
+        s = events.sse_cookie_warning("hi")
         self.assertTrue(s.startswith("data: ") and s.endswith("\n\n"))
         self.assertEqual(json.loads(s[6:].strip()), {"type": "cookie_warning", "msg": "hi"})
 
@@ -61,15 +61,15 @@ class TestVideoFormatSelector(unittest.TestCase):
     video / batch item honors the pick but never hard-fails."""
 
     def test_playlist_takes_highest(self):
-        self.assertEqual(server._video_format_selector("298", "140", prefer_picked=False),
+        self.assertEqual(ytdlp._video_format_selector("298", "140", prefer_picked=False),
                          "bv*+ba/b")
 
     def test_single_honors_pick_with_fallback(self):
-        self.assertEqual(server._video_format_selector("298", "140", prefer_picked=True),
+        self.assertEqual(ytdlp._video_format_selector("298", "140", prefer_picked=True),
                          "298+140/bv*+ba/b")
 
     def test_falls_back_to_highest_when_pick_missing(self):
-        self.assertEqual(server._video_format_selector("", "", prefer_picked=True),
+        self.assertEqual(ytdlp._video_format_selector("", "", prefer_picked=True),
                          "bv*+ba/b")
 
 
@@ -80,16 +80,16 @@ class TestAudioFormatSelector(unittest.TestCase):
     absent on most videos."""
 
     def test_pick_is_honoured_with_a_fallback(self):
-        self.assertEqual(server._audio_format_selector("140-drc"), "140-drc/ba/b")
+        self.assertEqual(ytdlp._audio_format_selector("140-drc"), "140-drc/ba/b")
 
     def test_no_pick_falls_back_to_best_audio(self):
-        self.assertEqual(server._audio_format_selector(""), "ba/b")
+        self.assertEqual(ytdlp._audio_format_selector(""), "ba/b")
 
     def test_selector_is_never_a_bare_itag(self):
         """The regression itself: whatever we emit must carry a fallback, or a
         video missing the itag dies on 'Requested format is not available'."""
         for pick in ("140", "140-drc", "251", ""):
-            self.assertIn("/", server._audio_format_selector(pick))
+            self.assertIn("/", ytdlp._audio_format_selector(pick))
 
 
 class TestCookieFetch(unittest.TestCase):
@@ -104,7 +104,7 @@ class TestCookieFetch(unittest.TestCase):
                     "Profile 1": {"name": "Vinna"},
                 }}
             }), encoding="utf-8")
-            profs = dict(server._chromium_profiles(root))
+            profs = dict(cookies._chromium_profiles(root))
             self.assertEqual(profs["Default"], "Persónulegt")
             self.assertEqual(profs["Profile 1"], "Vinna")
 
@@ -114,17 +114,17 @@ class TestCookieFetch(unittest.TestCase):
             (root / "Default").mkdir()
             (root / "Profile 2").mkdir()
             (root / "Cache").mkdir()          # not a profile dir
-            profs = dict(server._chromium_profiles(root))
+            profs = dict(cookies._chromium_profiles(root))
             self.assertIn("Default", profs)
             self.assertIn("Profile 2", profs)
             self.assertNotIn("Cache", profs)
 
     def test_chromium_profiles_default_when_empty(self):
         with tempfile.TemporaryDirectory() as d:
-            self.assertEqual(server._chromium_profiles(Path(d)), [("Default", "Default")])
+            self.assertEqual(cookies._chromium_profiles(Path(d)), [("Default", "Default")])
 
     def test_browser_roots_has_expected_browsers(self):
-        roots = server._browser_roots()
+        roots = cookies._browser_roots()
         for b in ("brave", "chrome", "chromium", "edge", "vivaldi", "opera"):
             self.assertIn(b, roots)
 
@@ -132,7 +132,7 @@ class TestCookieFetch(unittest.TestCase):
         class _C:
             def __init__(self, domain): self.domain = domain
         jar = [_C(".youtube.com"), _C(".google.com"), _C(".example.com"), _C("")]
-        total, yt = server._count_youtube_cookies(jar)
+        total, yt = cookies._count_youtube_cookies(jar)
         self.assertEqual(total, 4)
         self.assertEqual(yt, 2)
 
@@ -147,11 +147,11 @@ class TestNewestNewFile(unittest.TestCase):
             (cache / "part1.mkv").write_text("x")     # previous video, still in cache
             pre = set(cache.glob("*.mkv"))
             # A failed download produced nothing new -> must NOT grab part1.
-            self.assertIsNone(server._newest_new_file(cache, pre))
+            self.assertIsNone(ytdlp._newest_new_file(cache, pre))
             # A successful download drops part2 -> that's the one we want.
             current = cache / "part2.mkv"
             current.write_text("y")
-            self.assertEqual(server._newest_new_file(cache, pre), current)
+            self.assertEqual(ytdlp._newest_new_file(cache, pre), current)
 
     def test_returns_newest_of_multiple_new(self):
         with tempfile.TemporaryDirectory() as d:
@@ -159,21 +159,21 @@ class TestNewestNewFile(unittest.TestCase):
             a, b = cache / "a.mkv", cache / "b.mkv"
             a.write_text("a"); b.write_text("b")
             os.utime(a, (1000, 1000)); os.utime(b, (2000, 2000))
-            self.assertEqual(server._newest_new_file(cache, set()), b)
+            self.assertEqual(ytdlp._newest_new_file(cache, set()), b)
 
     def test_none_when_nothing_new(self):
         with tempfile.TemporaryDirectory() as d:
-            self.assertIsNone(server._newest_new_file(Path(d), set()))
+            self.assertIsNone(ytdlp._newest_new_file(Path(d), set()))
 
 
 class TestUrlValidation(unittest.TestCase):
     def test_accepts_http_https(self):
-        self.assertTrue(server.is_http_url("https://youtube.com/watch?v=x"))
-        self.assertTrue(server.is_http_url("http://localhost/x"))
+        self.assertTrue(ytdlp.is_http_url("https://youtube.com/watch?v=x"))
+        self.assertTrue(ytdlp.is_http_url("http://localhost/x"))
 
     def test_rejects_injection_and_other_schemes(self):
         for bad in ("--exec=calc", "file:///etc/passwd", "ftp://x", "", "   ", None):
-            self.assertFalse(server.is_http_url(bad), bad)
+            self.assertFalse(ytdlp.is_http_url(bad), bad)
 
 
 class TestOutputStem(unittest.TestCase):
@@ -183,8 +183,8 @@ class TestOutputStem(unittest.TestCase):
     def test_matches_ytdlp_sanitizer(self):
         for title in ["café", "🎮 Game", "Episode 1.", "Foo  —  Bar",
                       "Naïve résumé", "a/b\\c", "plain title 123"]:
-            expected = server.sanitize(sanitize_filename(title, restricted=True))
-            self.assertEqual(server._predict_output_stem(title), expected, title)
+            expected = ytdlp.sanitize(sanitize_filename(title, restricted=True))
+            self.assertEqual(ytdlp._predict_output_stem(title), expected, title)
 
 
 class TestEncodeParams(unittest.TestCase):
@@ -192,7 +192,7 @@ class TestEncodeParams(unittest.TestCase):
         base = dict(height=1080, fps=30.0, video_bitrate_kbps=8000, codec="vp9",
                     pix_fmt="yuv420p", color_transfer="")
         base.update(kw)
-        return server.calc_encode_params(**base)
+        return encode.calc_encode_params(**base)
 
     def test_cq_by_resolution_uhq(self):
         self.assertEqual(self._p(height=2160, nvenc_tune="uhq")["cq"], 22)
@@ -294,12 +294,12 @@ class TestDecodeFilterArgs(unittest.TestCase):
     """_decode_filter_args filter-chain unit tests (issue #18)."""
 
     def setUp(self):
-        self._lib = server.HAS_LIBPLACEBO
-        self._cuda = server.HAS_SCALE_CUDA
+        self._lib = capabilities.HAS_LIBPLACEBO
+        self._cuda = capabilities.HAS_SCALE_CUDA
 
     def tearDown(self):
-        server.HAS_LIBPLACEBO = self._lib
-        server.HAS_SCALE_CUDA = self._cuda
+        capabilities.HAS_LIBPLACEBO = self._lib
+        capabilities.HAS_SCALE_CUDA = self._cuda
 
     @staticmethod
     def _vf(args):
@@ -308,33 +308,33 @@ class TestDecodeFilterArgs(unittest.TestCase):
     # -- passthrough (target_height=0, byte-identical) --
 
     def test_passthrough_gpu(self):
-        server.HAS_LIBPLACEBO = False
-        server.HAS_SCALE_CUDA = True
-        a = server._decode_filter_args(Path("in.mkv"), "yuv420p", "h264_cuvid")
+        capabilities.HAS_LIBPLACEBO = False
+        capabilities.HAS_SCALE_CUDA = True
+        a = encode._decode_filter_args(Path("in.mkv"), "yuv420p", "h264_cuvid")
         vf = self._vf(a)
         self.assertEqual(vf, "scale_cuda=format=yuv420p")
         self.assertIn("-hwaccel_output_format", a)
 
     def test_passthrough_cpu(self):
-        server.HAS_LIBPLACEBO = False
-        server.HAS_SCALE_CUDA = False
-        a = server._decode_filter_args(Path("in.mkv"), "yuv420p", None)
+        capabilities.HAS_LIBPLACEBO = False
+        capabilities.HAS_SCALE_CUDA = False
+        a = encode._decode_filter_args(Path("in.mkv"), "yuv420p", None)
         vf = self._vf(a)
         self.assertEqual(vf, "format=yuv420p")
         self.assertNotIn("-hwaccel_output_format", a)
 
     def test_passthrough_hdr_10bit_gpu(self):
-        server.HAS_LIBPLACEBO = False
-        server.HAS_SCALE_CUDA = True
-        a = server._decode_filter_args(Path("in.mkv"), "yuv420p10le", "hevc_cuvid")
+        capabilities.HAS_LIBPLACEBO = False
+        capabilities.HAS_SCALE_CUDA = True
+        a = encode._decode_filter_args(Path("in.mkv"), "yuv420p10le", "hevc_cuvid")
         self.assertIn("yuv420p10le", self._vf(a))
 
     # -- scaling: libplacebo path --
 
     def test_downscale_libplacebo(self):
-        server.HAS_LIBPLACEBO = True
-        server.HAS_SCALE_CUDA = False
-        a = server._decode_filter_args(Path("in.mkv"), "yuv420p", None, target_height=720)
+        capabilities.HAS_LIBPLACEBO = True
+        capabilities.HAS_SCALE_CUDA = False
+        a = encode._decode_filter_args(Path("in.mkv"), "yuv420p", None, target_height=720)
         vf = self._vf(a)
         self.assertIn("libplacebo=", vf)
         self.assertIn("w=-2:h=720", vf)
@@ -343,57 +343,57 @@ class TestDecodeFilterArgs(unittest.TestCase):
         self.assertIn("tonemapping=none", vf)
 
     def test_upscale_libplacebo(self):
-        server.HAS_LIBPLACEBO = True
-        server.HAS_SCALE_CUDA = False
-        a = server._decode_filter_args(Path("in.mkv"), "yuv420p", "h264_cuvid", target_height=2160)
+        capabilities.HAS_LIBPLACEBO = True
+        capabilities.HAS_SCALE_CUDA = False
+        a = encode._decode_filter_args(Path("in.mkv"), "yuv420p", "h264_cuvid", target_height=2160)
         vf = self._vf(a)
         self.assertIn("h=2160", vf)
 
     def test_hdr_10bit_preserved_libplacebo(self):
-        server.HAS_LIBPLACEBO = True
-        server.HAS_SCALE_CUDA = False
-        a = server._decode_filter_args(Path("in.mkv"), "yuv420p10le", None, target_height=1080)
+        capabilities.HAS_LIBPLACEBO = True
+        capabilities.HAS_SCALE_CUDA = False
+        a = encode._decode_filter_args(Path("in.mkv"), "yuv420p10le", None, target_height=1080)
         vf = self._vf(a)
         self.assertIn("yuv420p10le", vf)
         self.assertIn("tonemapping=none", vf)
 
     def test_libplacebo_preferred_over_scale_cuda(self):
-        server.HAS_LIBPLACEBO = True
-        server.HAS_SCALE_CUDA = True
-        a = server._decode_filter_args(Path("in.mkv"), "yuv420p", "h264_cuvid", target_height=1080)
+        capabilities.HAS_LIBPLACEBO = True
+        capabilities.HAS_SCALE_CUDA = True
+        a = encode._decode_filter_args(Path("in.mkv"), "yuv420p", "h264_cuvid", target_height=1080)
         self.assertIn("libplacebo=", self._vf(a))
         self.assertNotIn("scale_cuda", self._vf(a))
 
     # -- scaling: scale_cuda path --
 
     def test_downscale_cuda(self):
-        server.HAS_LIBPLACEBO = False
-        server.HAS_SCALE_CUDA = True
-        a = server._decode_filter_args(Path("in.mkv"), "yuv420p", "h264_cuvid", target_height=720)
+        capabilities.HAS_LIBPLACEBO = False
+        capabilities.HAS_SCALE_CUDA = True
+        a = encode._decode_filter_args(Path("in.mkv"), "yuv420p", "h264_cuvid", target_height=720)
         vf = self._vf(a)
         self.assertEqual(vf, "scale_cuda=format=yuv420p:w=-2:h=720")
         self.assertIn("-hwaccel_output_format", a)
 
     def test_upscale_cuda(self):
-        server.HAS_LIBPLACEBO = False
-        server.HAS_SCALE_CUDA = True
-        a = server._decode_filter_args(Path("in.mkv"), "yuv420p10le", None, target_height=2160)
+        capabilities.HAS_LIBPLACEBO = False
+        capabilities.HAS_SCALE_CUDA = True
+        a = encode._decode_filter_args(Path("in.mkv"), "yuv420p10le", None, target_height=2160)
         self.assertIn("h=2160", self._vf(a))
         self.assertIn("yuv420p10le", self._vf(a))
 
     # -- scaling: CPU fallback --
 
     def test_downscale_cpu(self):
-        server.HAS_LIBPLACEBO = False
-        server.HAS_SCALE_CUDA = False
-        a = server._decode_filter_args(Path("in.mkv"), "yuv420p", None, target_height=720)
+        capabilities.HAS_LIBPLACEBO = False
+        capabilities.HAS_SCALE_CUDA = False
+        a = encode._decode_filter_args(Path("in.mkv"), "yuv420p", None, target_height=720)
         vf = self._vf(a)
         self.assertEqual(vf, "scale=w=-2:h=720:flags=lanczos,format=yuv420p")
 
     def test_upscale_cpu(self):
-        server.HAS_LIBPLACEBO = False
-        server.HAS_SCALE_CUDA = False
-        a = server._decode_filter_args(Path("in.mkv"), "yuv420p10le", None, target_height=2160)
+        capabilities.HAS_LIBPLACEBO = False
+        capabilities.HAS_SCALE_CUDA = False
+        a = encode._decode_filter_args(Path("in.mkv"), "yuv420p10le", None, target_height=2160)
         vf = self._vf(a)
         self.assertIn("h=2160", vf)
         self.assertIn("yuv420p10le", vf)
@@ -401,72 +401,72 @@ class TestDecodeFilterArgs(unittest.TestCase):
     # -- sharpen (CAS) toggle (issue #19) --
 
     def test_sharpen_off_cpu_passthrough(self):
-        server.HAS_LIBPLACEBO = False
-        server.HAS_SCALE_CUDA = False
-        a = server._decode_filter_args(Path("in.mkv"), "yuv420p", None, sharpen=False)
+        capabilities.HAS_LIBPLACEBO = False
+        capabilities.HAS_SCALE_CUDA = False
+        a = encode._decode_filter_args(Path("in.mkv"), "yuv420p", None, sharpen=False)
         self.assertEqual(self._vf(a), "format=yuv420p")
 
     def test_sharpen_on_cpu_passthrough(self):
-        server.HAS_LIBPLACEBO = False
-        server.HAS_SCALE_CUDA = False
-        a = server._decode_filter_args(Path("in.mkv"), "yuv420p", None, sharpen=True)
+        capabilities.HAS_LIBPLACEBO = False
+        capabilities.HAS_SCALE_CUDA = False
+        a = encode._decode_filter_args(Path("in.mkv"), "yuv420p", None, sharpen=True)
         vf = self._vf(a)
         self.assertIn("cas=0.72", vf)
         self.assertNotIn("hwdownload", vf)
 
     def test_sharpen_on_gpu_passthrough(self):
-        server.HAS_LIBPLACEBO = False
-        server.HAS_SCALE_CUDA = True
-        a = server._decode_filter_args(Path("in.mkv"), "yuv420p", "h264_cuvid", sharpen=True)
+        capabilities.HAS_LIBPLACEBO = False
+        capabilities.HAS_SCALE_CUDA = True
+        a = encode._decode_filter_args(Path("in.mkv"), "yuv420p", "h264_cuvid", sharpen=True)
         vf = self._vf(a)
         self.assertIn("cas=0.72", vf)
         self.assertIn("hwdownload", vf)
 
     def test_sharpen_on_cpu_scale(self):
-        server.HAS_LIBPLACEBO = False
-        server.HAS_SCALE_CUDA = False
-        a = server._decode_filter_args(Path("in.mkv"), "yuv420p", None, target_height=720, sharpen=True)
+        capabilities.HAS_LIBPLACEBO = False
+        capabilities.HAS_SCALE_CUDA = False
+        a = encode._decode_filter_args(Path("in.mkv"), "yuv420p", None, target_height=720, sharpen=True)
         vf = self._vf(a)
         self.assertIn("cas=0.72", vf)
         self.assertNotIn("hwdownload", vf)
 
     def test_sharpen_on_gpu_scale_cuda(self):
-        server.HAS_LIBPLACEBO = False
-        server.HAS_SCALE_CUDA = True
-        a = server._decode_filter_args(Path("in.mkv"), "yuv420p", "h264_cuvid", target_height=720, sharpen=True)
+        capabilities.HAS_LIBPLACEBO = False
+        capabilities.HAS_SCALE_CUDA = True
+        a = encode._decode_filter_args(Path("in.mkv"), "yuv420p", "h264_cuvid", target_height=720, sharpen=True)
         vf = self._vf(a)
         self.assertIn("cas=0.72", vf)
         self.assertIn("hwdownload", vf)
 
     def test_sharpen_on_libplacebo_scale(self):
-        server.HAS_LIBPLACEBO = True
-        server.HAS_SCALE_CUDA = False
-        a = server._decode_filter_args(Path("in.mkv"), "yuv420p10le", None, target_height=1080, sharpen=True)
+        capabilities.HAS_LIBPLACEBO = True
+        capabilities.HAS_SCALE_CUDA = False
+        a = encode._decode_filter_args(Path("in.mkv"), "yuv420p10le", None, target_height=1080, sharpen=True)
         vf = self._vf(a)
         self.assertIn("cas=0.72", vf)
         self.assertNotIn("hwdownload", vf)
         self.assertIn("tonemapping=none", vf)
 
     def test_sharpen_default_off(self):
-        server.HAS_LIBPLACEBO = False
-        server.HAS_SCALE_CUDA = True
-        a = server._decode_filter_args(Path("in.mkv"), "yuv420p", "h264_cuvid")
+        capabilities.HAS_LIBPLACEBO = False
+        capabilities.HAS_SCALE_CUDA = True
+        a = encode._decode_filter_args(Path("in.mkv"), "yuv420p", "h264_cuvid")
         self.assertNotIn("cas=", self._vf(a))
 
     # -- CAS_STRENGTH value (issue #39): 0.72 is in-range (0.70-0.75) and must
     # never regress to the old near-invisible 0.5 or the unusable >=0.9 zone. --
 
     def test_cas_strength_not_old_value(self):
-        server.HAS_LIBPLACEBO = False
-        server.HAS_SCALE_CUDA = False
-        a = server._decode_filter_args(Path("in.mkv"), "yuv420p", None, sharpen=True)
+        capabilities.HAS_LIBPLACEBO = False
+        capabilities.HAS_SCALE_CUDA = False
+        a = encode._decode_filter_args(Path("in.mkv"), "yuv420p", None, sharpen=True)
         old_value = "0." + "5"  # split to avoid tripping the grep -c 'cas=0\.5' sentinel
         self.assertNotIn("cas=" + old_value, self._vf(a))
 
     def test_cas_strength_in_safe_range(self):
-        server.HAS_LIBPLACEBO = False
-        server.HAS_SCALE_CUDA = False
-        a = server._decode_filter_args(Path("in.mkv"), "yuv420p", None, sharpen=True)
+        capabilities.HAS_LIBPLACEBO = False
+        capabilities.HAS_SCALE_CUDA = False
+        a = encode._decode_filter_args(Path("in.mkv"), "yuv420p", None, sharpen=True)
         vf = self._vf(a)
         strength = float(vf.split("cas=")[1].split(",")[0])
         self.assertGreaterEqual(strength, 0.70)
@@ -479,32 +479,32 @@ class TestEffectiveTargetHeight(unittest.TestCase):
     _decode_filter_args to the cheaper passthrough+sharpen path."""
 
     def test_equal_heights_zeroed(self):
-        self.assertEqual(server._effective_target_height(1080, 1080), 0)
+        self.assertEqual(encode._effective_target_height(1080, 1080), 0)
 
     def test_upscale_untouched(self):
-        self.assertEqual(server._effective_target_height(1080, 2160), 2160)
+        self.assertEqual(encode._effective_target_height(1080, 2160), 2160)
 
     def test_downscale_untouched(self):
-        self.assertEqual(server._effective_target_height(2160, 1080), 1080)
+        self.assertEqual(encode._effective_target_height(2160, 1080), 1080)
 
     def test_no_target_stays_zero(self):
-        self.assertEqual(server._effective_target_height(1080, 0), 0)
+        self.assertEqual(encode._effective_target_height(1080, 0), 0)
 
     def test_unknown_source_height_leaves_target_alone(self):
         # source_height=0 means "unknown" -- never guess it's a same-size
         # resample when we can't actually compare.
-        self.assertEqual(server._effective_target_height(0, 1080), 1080)
+        self.assertEqual(encode._effective_target_height(0, 1080), 1080)
 
     def test_same_size_1080_routes_to_passthrough_with_sharpen(self):
         """1080p source + target 1080 + sharpen -> vf has cas but no
         libplacebo/scale/full scaler (issue #35's acceptance case), still a
         valid, encodable argv. CPU-only config: no scale_cuda at all either,
         so this is the strictest possible check."""
-        server.HAS_LIBPLACEBO = False
-        server.HAS_SCALE_CUDA = False
+        capabilities.HAS_LIBPLACEBO = False
+        capabilities.HAS_SCALE_CUDA = False
         try:
-            effective = server._effective_target_height(1080, 1080)
-            a = server._decode_filter_args(
+            effective = encode._effective_target_height(1080, 1080)
+            a = encode._decode_filter_args(
                 Path("in.mkv"), "yuv420p", "h264_cuvid",
                 target_height=effective, sharpen=True,
             )
@@ -516,18 +516,18 @@ class TestEffectiveTargetHeight(unittest.TestCase):
             self.assertIn("-i", a)
             self.assertIn("-vf", a)  # argv shape sanity
         finally:
-            server.HAS_LIBPLACEBO = False
-            server.HAS_SCALE_CUDA = False
+            capabilities.HAS_LIBPLACEBO = False
+            capabilities.HAS_SCALE_CUDA = False
 
     def test_same_size_1080_gpu_passthrough_has_no_wh_scale_dims(self):
         """With scale_cuda available, the same-size passthrough path still
         uses scale_cuda for the mandatory pixel-format conversion, but never
         for a w=/h= same-size resample -- that's the "cheaper" part of #35."""
-        server.HAS_LIBPLACEBO = False
-        server.HAS_SCALE_CUDA = True
+        capabilities.HAS_LIBPLACEBO = False
+        capabilities.HAS_SCALE_CUDA = True
         try:
-            effective = server._effective_target_height(1080, 1080)
-            a = server._decode_filter_args(
+            effective = encode._effective_target_height(1080, 1080)
+            a = encode._decode_filter_args(
                 Path("in.mkv"), "yuv420p", "h264_cuvid",
                 target_height=effective, sharpen=True,
             )
@@ -536,14 +536,14 @@ class TestEffectiveTargetHeight(unittest.TestCase):
             self.assertNotIn("w=", vf)
             self.assertNotIn("h=1080", vf)
         finally:
-            server.HAS_LIBPLACEBO = False
-            server.HAS_SCALE_CUDA = False
+            capabilities.HAS_LIBPLACEBO = False
+            capabilities.HAS_SCALE_CUDA = False
 
     def test_same_size_quality_floor_still_applies(self):
         """The sharpen-triggered quality floor (#29) is independent of the
         scaler no-op -- calc_encode_params still tightens cq/maxrate/preset
         when sharpen=True even though target_res == source height."""
-        params = server.calc_encode_params(
+        params = encode.calc_encode_params(
             height=1080, fps=30.0, video_bitrate_kbps=8000, codec="h264",
             pix_fmt="yuv420p", color_transfer="", target_res=1080, sharpen=True,
         )
@@ -556,7 +556,7 @@ class TestFfmpegArgs(unittest.TestCase):
               "pix_fmt": "yuv420p", "profile": "main", "bf": 3, "b_ref_mode": "middle"}
 
     def test_hq_has_bf_and_aq(self):
-        a = server.build_video_ffmpeg_args(Path("in.mkv"), Path("out.mp4"), self.PARAMS, "hq", "vp9")
+        a = encode.build_video_ffmpeg_args(Path("in.mkv"), Path("out.mp4"), self.PARAMS, "hq", "vp9")
         self.assertIn("-bf", a)
         self.assertIn("-spatial_aq", a)
         self.assertIn("-temporal_aq", a)
@@ -565,23 +565,23 @@ class TestFfmpegArgs(unittest.TestCase):
         self.assertIn("hevc_nvenc", a)
 
     def test_uhq_omits_bf_and_aq_and_bumps_p2(self):
-        a = server.build_video_ffmpeg_args(Path("in.mkv"), Path("out.mp4"), self.PARAMS, "uhq", "vp9")
+        a = encode.build_video_ffmpeg_args(Path("in.mkv"), Path("out.mp4"), self.PARAMS, "uhq", "vp9")
         self.assertNotIn("-bf", a)
         self.assertNotIn("-spatial_aq", a)
         self.assertEqual(a[a.index("-preset") + 1], "p4")   # uhq rejects p2 → p4
 
     def test_passthrough_target_height_zero_omits_scale_dims(self):
-        a = server.build_video_ffmpeg_args(Path("in.mkv"), Path("out.mp4"), self.PARAMS, "hq", "vp9")
+        a = encode.build_video_ffmpeg_args(Path("in.mkv"), Path("out.mp4"), self.PARAMS, "hq", "vp9")
         vf = a[a.index("-vf") + 1]
         self.assertNotIn("h=", vf)
         self.assertNotIn("w=", vf)
 
     def test_sharpen_off_via_build(self):
-        a = server.build_video_ffmpeg_args(Path("in.mkv"), Path("out.mp4"), self.PARAMS, "hq", "vp9")
+        a = encode.build_video_ffmpeg_args(Path("in.mkv"), Path("out.mp4"), self.PARAMS, "hq", "vp9")
         self.assertNotIn("cas=", a[a.index("-vf") + 1])
 
     def test_sharpen_on_via_build(self):
-        a = server.build_video_ffmpeg_args(Path("in.mkv"), Path("out.mp4"), self.PARAMS, "hq", "vp9", sharpen=True)
+        a = encode.build_video_ffmpeg_args(Path("in.mkv"), Path("out.mp4"), self.PARAMS, "hq", "vp9", sharpen=True)
         self.assertIn("cas=", a[a.index("-vf") + 1])
 
 
@@ -592,39 +592,39 @@ class TestSseBuilders(unittest.TestCase):
         return "data: " + json.dumps(obj) + "\n\n"
 
     def test_msg_events(self):
-        self.assertEqual(server.sse_log("hi"), self._wire({"type": "log", "msg": "hi"}))
-        self.assertEqual(server.sse_error("e"), self._wire({"type": "error", "msg": "e"}))
-        self.assertEqual(server.sse_cancelled(), self._wire({"type": "cancelled", "msg": "Cancelled by user."}))
-        self.assertEqual(server.sse_done(), self._wire({"type": "done", "msg": "All done!"}))
+        self.assertEqual(events.sse_log("hi"), self._wire({"type": "log", "msg": "hi"}))
+        self.assertEqual(events.sse_error("e"), self._wire({"type": "error", "msg": "e"}))
+        self.assertEqual(events.sse_cancelled(), self._wire({"type": "cancelled", "msg": "Cancelled by user."}))
+        self.assertEqual(events.sse_done(), self._wire({"type": "done", "msg": "All done!"}))
 
     def test_phase_contract(self):
-        self.assertEqual(server.sse_phase("Converting", "a.mkv"),
+        self.assertEqual(events.sse_phase("Converting", "a.mkv"),
                          self._wire({"type": "phase", "msg": "Converting: a.mkv"}))
-        self.assertEqual(server.sse_phase("Resolving..."),
+        self.assertEqual(events.sse_phase("Resolving..."),
                          self._wire({"type": "phase", "msg": "Resolving..."}))
 
     def test_structured(self):
-        self.assertEqual(server.sse_video_start(2, 5),
+        self.assertEqual(events.sse_video_start(2, 5),
                          self._wire({"type": "video_start", "current": 2, "total": 5}))
-        self.assertEqual(server.sse_source_size(1234),
+        self.assertEqual(events.sse_source_size(1234),
                          self._wire({"type": "source_size", "bytes": 1234}))
-        self.assertEqual(server.sse_dl_progress(50.0, "1GB", "2MiB/s", "01:00", 1, 3),
+        self.assertEqual(events.sse_dl_progress(50.0, "1GB", "2MiB/s", "01:00", 1, 3),
                          self._wire({"type": "dl_progress", "pct": 50.0, "size": "1GB",
                                      "speed": "2MiB/s", "eta": "01:00", "idx": 1, "total": 3}))
-        self.assertEqual(server.sse_progress(10.0, 5.0, "1x", "30 fps", "5 MB", 999),
+        self.assertEqual(events.sse_progress(10.0, 5.0, "1x", "30 fps", "5 MB", 999),
                          self._wire({"type": "progress", "pct": 10.0, "overall": 5.0,
                                      "speed": "1x", "eta": "30 fps", "size": "5 MB", "output_bytes": 999}))
 
     def test_item_outcomes(self):
-        self.assertEqual(server.sse_item_done(2, 3),
+        self.assertEqual(events.sse_item_done(2, 3),
                          self._wire({"type": "item_done", "idx": 2, "total": 3}))
-        self.assertEqual(server.sse_item_failed(2, 3, "x"),
+        self.assertEqual(events.sse_item_failed(2, 3, "x"),
                          self._wire({"type": "item_failed", "idx": 2, "total": 3, "msg": "x"}))
 
     def test_size_info_bloat(self):
         sb, ob = 1000 * 1024**2, 1200 * 1024**2
         bloat = (ob - sb) / sb * 100
-        self.assertEqual(server.sse_size_info(sb, ob),
+        self.assertEqual(events.sse_size_info(sb, ob),
                          self._wire({"type": "size_info",
                                      "source_mb": round(sb / 1024**2, 1),
                                      "output_mb": round(ob / 1024**2, 1),
@@ -633,7 +633,7 @@ class TestSseBuilders(unittest.TestCase):
     def test_encode_params_event(self):
         params = {"cq": 22, "maxrate": "20M", "preset": "p4",
                   "tune": "uhq", "pix_fmt": "yuv420p"}
-        self.assertEqual(server.sse_encode_params(params),
+        self.assertEqual(events.sse_encode_params(params),
                          self._wire({"type": "encode_params", "cq": 22,
                                      "maxrate": "20M", "preset": "p4",
                                      "tune": "uhq", "pix_fmt": "yuv420p"}))
@@ -645,16 +645,16 @@ class TestGetFormatsFailure(unittest.TestCase):
     def _run(self, script):
         # A stand-in yt-dlp: `python -c <script>` ignores the argv appended after it.
         import asyncio, sys
-        with mock.patch.object(server, "get_ytdlp_argv", return_value=[sys.executable, "-c", script]), \
-             mock.patch.object(server, "cookie_args", return_value=[]), \
-             mock.patch.object(server, "NODE_ARGS", []):
-            return asyncio.run(server._get_formats("https://www.youtube.com/watch?v=00000000000"))
+        with mock.patch.object(ytdlp, "get_ytdlp_argv", return_value=[sys.executable, "-c", script]), \
+             mock.patch.object(cookies, "cookie_args", return_value=[]), \
+             mock.patch.object(ytdlp, "NODE_ARGS", []):
+            return asyncio.run(ytdlp._get_formats("https://www.youtube.com/watch?v=00000000000"))
 
     def test_nonzero_exit_returns_empty_lists_plus_reason(self):
         script = ("import sys; "
                   "sys.stderr.write('WARNING: [youtube] noise\\n'"
                   "'ERROR: [youtube] 00000000000: Video unavailable\\n'); sys.exit(1)")
-        with self.assertLogs(server.logger, level="WARNING") as cm:
+        with self.assertLogs(config.logger, level="WARNING") as cm:
             out = self._run(script)
         self.assertEqual(out["video_formats"], [])
         self.assertEqual(out["audio_formats"], [])
@@ -695,8 +695,8 @@ class TestGetFormatsFailure(unittest.TestCase):
         self.assertEqual(audio[2]["language"], "es")
 
     def test_reason_is_trimmed(self):
-        reason = server._ytdlp_error_reason("ERROR: " + "x" * 5000, 1)
-        self.assertEqual(len(reason), server._YTDLP_REASON_MAX)
+        reason = ytdlp._ytdlp_error_reason("ERROR: " + "x" * 5000, 1)
+        self.assertEqual(len(reason), ytdlp._YTDLP_REASON_MAX)
 
 
 if __name__ == "__main__":

@@ -11,7 +11,7 @@ import asyncio
 import json
 import unittest
 
-from fetchforge import server
+from fetchforge import ytdlp, items as runner
 
 
 class BatchResolveTest(unittest.TestCase):
@@ -24,7 +24,7 @@ class BatchResolveTest(unittest.TestCase):
              "expected_size": 2000, "output_dir": "/out/b", "tune_mode": "hq",
              "title": "Second", "duration": 20.0},
         ]
-        urls, titles, durations, per_item = server._resolve_batch_items(json.dumps(items))
+        urls, titles, durations, per_item = ytdlp._resolve_batch_items(json.dumps(items))
         self.assertEqual(urls, ["https://youtu.be/AAA", "https://youtu.be/BBB"])
         self.assertEqual(titles["https://youtu.be/BBB"], "Second")
         self.assertEqual(durations["https://youtu.be/AAA"], 10.0)
@@ -36,11 +36,11 @@ class BatchResolveTest(unittest.TestCase):
                   "expected_size": 0, "output_dir": "", "tune_mode": "uhq",
                   "title": "x", "duration": 0}]
         with self.assertRaises(ValueError):
-            server._resolve_batch_items(json.dumps(items))
+            ytdlp._resolve_batch_items(json.dumps(items))
 
 
 # ── Pipeline simulation (skip-and-continue + per-item outcomes) ───────────────
-# Drives server.run_pipelined with fake bodies: a download failure emits
+# Drives runner.run_pipelined with fake bodies: a download failure emits
 # item_failed and CONTINUES (returns None, no abort), while a successful encode
 # emits item_done. Item 2's download fails here.
 def _terminal(events):
@@ -78,7 +78,7 @@ async def _run_batch(n_videos, *, dl_fail=frozenset()):
         return True
 
     async def driver():
-        async for msg in server.run_pipelined(items, fetch, process, cancel):
+        async for msg in runner.run_pipelined(items, fetch, process, cancel):
             events.append(msg)
 
     await asyncio.wait_for(driver(), timeout=5)  # a hang → TimeoutError → failure

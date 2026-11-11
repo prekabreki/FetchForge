@@ -17,7 +17,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from fetchforge import server
+from fetchforge import server, config, ytdlp, encode, capabilities, jobs, items as runner
 
 
 # Real stderr captured on Windows 2026-08-01, RTX 4080 / driver 610.62, against
@@ -79,53 +79,53 @@ class TestClassifyTuneProbe(unittest.TestCase):
     """The pure classifier — the whole point of the extraction."""
 
     def test_old_ffmpeg_stderr_blames_the_ffmpeg_build(self):
-        self.assertEqual(server._classify_tune_probe(FFMPEG_TOO_OLD_STDERR),
-                         server._TUNE_FFMPEG_TOO_OLD)
+        self.assertEqual(capabilities._classify_tune_probe(FFMPEG_TOO_OLD_STDERR),
+                         capabilities._TUNE_FFMPEG_TOO_OLD)
 
     def test_driver_rejection_stderr_blames_the_driver(self):
-        self.assertEqual(server._classify_tune_probe(DRIVER_REJECTED_STDERR),
-                         server._TUNE_DRIVER_REJECTED)
+        self.assertEqual(capabilities._classify_tune_probe(DRIVER_REJECTED_STDERR),
+                         capabilities._TUNE_DRIVER_REJECTED)
 
     def test_unrecognised_failure_is_not_reported_as_supported(self):
-        self.assertEqual(server._classify_tune_probe(UNRECOGNISED_FAILURE_STDERR),
-                         server._TUNE_PROBE_FAILED)
+        self.assertEqual(capabilities._classify_tune_probe(UNRECOGNISED_FAILURE_STDERR),
+                         capabilities._TUNE_PROBE_FAILED)
 
     def test_clean_run_is_supported(self):
-        self.assertEqual(server._classify_tune_probe(SUCCESS_STDERR),
-                         server._TUNE_SUPPORTED)
+        self.assertEqual(capabilities._classify_tune_probe(SUCCESS_STDERR),
+                         capabilities._TUNE_SUPPORTED)
 
     def test_error_setting_option_tune_alone_is_enough(self):
         """Some builds emit the "Error setting option" line without the parse line."""
         self.assertEqual(
-            server._classify_tune_probe("[hevc_nvenc @ x] Error setting option tune to value uhq."),
-            server._TUNE_FFMPEG_TOO_OLD)
+            capabilities._classify_tune_probe("[hevc_nvenc @ x] Error setting option tune to value uhq."),
+            capabilities._TUNE_FFMPEG_TOO_OLD)
 
     def test_invalid_param_alone_is_a_driver_rejection(self):
-        self.assertEqual(server._classify_tune_probe("[hevc_nvenc @ x] invalid param (8)"),
-                         server._TUNE_DRIVER_REJECTED)
+        self.assertEqual(capabilities._classify_tune_probe("[hevc_nvenc @ x] invalid param (8)"),
+                         capabilities._TUNE_DRIVER_REJECTED)
 
     def test_parse_failure_wins_over_driver_markers(self):
         """ffmpeg rejecting the option name happens first — the driver never saw it,
         so a stderr carrying both signatures is an ffmpeg-too-old diagnosis."""
         both = FFMPEG_TOO_OLD_STDERR + "\n[hevc_nvenc @ x] InitializeEncoder failed: invalid param (8)"
-        self.assertEqual(server._classify_tune_probe(both), server._TUNE_FFMPEG_TOO_OLD)
+        self.assertEqual(capabilities._classify_tune_probe(both), capabilities._TUNE_FFMPEG_TOO_OLD)
 
     def test_empty_stderr_is_supported(self):
-        self.assertEqual(server._classify_tune_probe(""), server._TUNE_SUPPORTED)
+        self.assertEqual(capabilities._classify_tune_probe(""), capabilities._TUNE_SUPPORTED)
 
 
 class TestProbeNvencTune(unittest.TestCase):
     """End-to-end probe with a faked ffmpeg: module state + the logged remedy."""
 
     def setUp(self):
-        self._saved_tune = server._nvenc_tune
-        self._saved_cause = server._nvenc_tune_cause
-        self._saved_nvenc = server.HAS_NVENC
+        self._saved_tune = capabilities._nvenc_tune
+        self._saved_cause = capabilities._nvenc_tune_cause
+        self._saved_nvenc = capabilities.HAS_NVENC
 
     def tearDown(self):
-        server._nvenc_tune = self._saved_tune
-        server._nvenc_tune_cause = self._saved_cause
-        server.HAS_NVENC = self._saved_nvenc
+        capabilities._nvenc_tune = self._saved_tune
+        capabilities._nvenc_tune_cause = self._saved_cause
+        capabilities.HAS_NVENC = self._saved_nvenc
 
     def _run_probe(self, stderr: str, returncode: int):
         """Run _probe_nvenc_tune against a fake ffmpeg; return the captured log text."""
@@ -133,13 +133,13 @@ class TestProbeNvencTune(unittest.TestCase):
             return _FakeProc(stderr, returncode)
 
         # Poison the globals first so we can prove the probe assigns them.
-        server._nvenc_tune = "poisoned"
-        server._nvenc_tune_cause = "poisoned"
-        with mock.patch.object(server, "HAS_NVENC", True), \
-             mock.patch.object(server, "get_ffmpeg", return_value="ffmpeg"), \
+        capabilities._nvenc_tune = "poisoned"
+        capabilities._nvenc_tune_cause = "poisoned"
+        with mock.patch.object(capabilities, "HAS_NVENC", True), \
+             mock.patch.object(ytdlp, "get_ffmpeg", return_value="ffmpeg"), \
              mock.patch("asyncio.create_subprocess_exec", side_effect=fake_exec), \
-             mock.patch.object(server, "logger") as log:
-            asyncio.run(server._probe_nvenc_tune())
+             mock.patch.object(capabilities, "logger") as log:
+            asyncio.run(capabilities._probe_nvenc_tune())
         return " ".join(str(c.args[0]) for c in log.info.call_args_list)
 
     def test_no_nvenc_skips_the_probe_and_names_the_real_blocker(self):
@@ -148,51 +148,51 @@ class TestProbeNvencTune(unittest.TestCase):
         async def boom(*args, **kwargs):
             raise AssertionError("probe must not spawn ffmpeg without NVENC")
 
-        server._nvenc_tune = "poisoned"
-        server._nvenc_tune_cause = "poisoned"
-        with mock.patch.object(server, "HAS_NVENC", False), \
+        capabilities._nvenc_tune = "poisoned"
+        capabilities._nvenc_tune_cause = "poisoned"
+        with mock.patch.object(capabilities, "HAS_NVENC", False), \
              mock.patch("asyncio.create_subprocess_exec", side_effect=boom), \
-             mock.patch.object(server, "logger") as log:
-            asyncio.run(server._probe_nvenc_tune())
-        self.assertEqual(server._nvenc_tune, "hq")
-        self.assertEqual(server._nvenc_tune_cause, server._TUNE_NVENC_MISSING)
+             mock.patch.object(capabilities, "logger") as log:
+            asyncio.run(capabilities._probe_nvenc_tune())
+        self.assertEqual(capabilities._nvenc_tune, "hq")
+        self.assertEqual(capabilities._nvenc_tune_cause, capabilities._TUNE_NVENC_MISSING)
         msg = " ".join(str(c.args[0]) for c in log.info.call_args_list)
         self.assertIn("not available", msg)
         self.assertIn("video conversion", msg)
 
     def test_old_ffmpeg_falls_back_to_hq_and_names_ffmpeg_71(self):
         msg = self._run_probe(FFMPEG_TOO_OLD_STDERR, 1)
-        self.assertEqual(server._nvenc_tune, "hq")
-        self.assertEqual(server._nvenc_tune_cause, server._TUNE_FFMPEG_TOO_OLD)
+        self.assertEqual(capabilities._nvenc_tune, "hq")
+        self.assertEqual(capabilities._nvenc_tune_cause, capabilities._TUNE_FFMPEG_TOO_OLD)
         self.assertIn("ffmpeg 7.1", msg)
         self.assertNotIn("not supported on this driver", msg)
 
     def test_driver_rejection_keeps_the_driver_wording(self):
         msg = self._run_probe(DRIVER_REJECTED_STDERR, 1)
-        self.assertEqual(server._nvenc_tune, "hq")
-        self.assertEqual(server._nvenc_tune_cause, server._TUNE_DRIVER_REJECTED)
+        self.assertEqual(capabilities._nvenc_tune, "hq")
+        self.assertEqual(capabilities._nvenc_tune_cause, capabilities._TUNE_DRIVER_REJECTED)
         self.assertIn("not supported on this driver", msg)
         self.assertNotIn("ffmpeg 7.1", msg)
 
     def test_unrecognised_failure_degrades_to_hq(self):
         """Danger zone: an unknown failure must never leave the tune at uhq."""
         msg = self._run_probe(UNRECOGNISED_FAILURE_STDERR, 1)
-        self.assertEqual(server._nvenc_tune, "hq")
-        self.assertNotEqual(server._nvenc_tune, "uhq")
-        self.assertEqual(server._nvenc_tune_cause, server._TUNE_PROBE_FAILED)
+        self.assertEqual(capabilities._nvenc_tune, "hq")
+        self.assertNotEqual(capabilities._nvenc_tune, "uhq")
+        self.assertEqual(capabilities._nvenc_tune_cause, capabilities._TUNE_PROBE_FAILED)
         self.assertIn("unrecognised", msg)
 
     def test_silent_nonzero_exit_still_degrades_to_hq(self):
         """No known marker anywhere in stderr, but ffmpeg exited non-zero — the
         returncode backstop must stop this being read as a working uhq."""
         self._run_probe("something went sideways\n", 1)
-        self.assertEqual(server._nvenc_tune, "hq")
-        self.assertEqual(server._nvenc_tune_cause, server._TUNE_PROBE_FAILED)
+        self.assertEqual(capabilities._nvenc_tune, "hq")
+        self.assertEqual(capabilities._nvenc_tune_cause, capabilities._TUNE_PROBE_FAILED)
 
     def test_success_path_still_sets_uhq(self):
         msg = self._run_probe(SUCCESS_STDERR, 0)
-        self.assertEqual(server._nvenc_tune, "uhq")
-        self.assertEqual(server._nvenc_tune_cause, server._TUNE_SUPPORTED)
+        self.assertEqual(capabilities._nvenc_tune, "uhq")
+        self.assertEqual(capabilities._nvenc_tune_cause, capabilities._TUNE_SUPPORTED)
         self.assertIn("'uhq' supported", msg)
 
 
@@ -201,9 +201,9 @@ class TestEncoderProbe(unittest.TestCase):
 
     def _encoders(self, stdout):
         done = mock.Mock(stdout=stdout, stderr="")
-        with mock.patch.object(server, "get_ffmpeg", return_value="ffmpeg"), \
+        with mock.patch.object(ytdlp, "get_ffmpeg", return_value="ffmpeg"), \
              mock.patch("subprocess.run", return_value=done):
-            return server._ffmpeg_has_encoder("hevc_nvenc")
+            return capabilities._ffmpeg_has_encoder("hevc_nvenc")
 
     def test_lists_hevc_nvenc(self):
         self.assertTrue(self._encoders(
@@ -214,46 +214,46 @@ class TestEncoderProbe(unittest.TestCase):
             " V....D libx264              H.264 / AVC / MPEG-4 AVC\n"))
 
     def test_probe_failure_is_false_not_an_exception(self):
-        with mock.patch.object(server, "get_ffmpeg", return_value="ffmpeg"), \
+        with mock.patch.object(ytdlp, "get_ffmpeg", return_value="ffmpeg"), \
              mock.patch("subprocess.run", side_effect=OSError("boom")):
-            self.assertFalse(server._ffmpeg_has_encoder("hevc_nvenc"))
+            self.assertFalse(capabilities._ffmpeg_has_encoder("hevc_nvenc"))
 
 
 class TestStartupCapabilityProbe(unittest.IsolatedAsyncioTestCase):
     """The one probe `lifespan` runs records all four outcomes."""
 
     async def test_records_nvenc_filters_and_the_tune_outcome(self):
-        saved = (server.HAS_NVENC, server.HAS_SCALE_CUDA, server.HAS_LIBPLACEBO)
+        saved = (capabilities.HAS_NVENC, capabilities.HAS_SCALE_CUDA, capabilities.HAS_LIBPLACEBO)
 
         def restore():
-            server.HAS_NVENC, server.HAS_SCALE_CUDA, server.HAS_LIBPLACEBO = saved
+            capabilities.HAS_NVENC, capabilities.HAS_SCALE_CUDA, capabilities.HAS_LIBPLACEBO = saved
 
         self.addCleanup(restore)
-        with mock.patch.object(server, "_ffmpeg_has_encoder", return_value=True) as enc, \
-             mock.patch.object(server, "_ffmpeg_filter_names",
+        with mock.patch.object(capabilities, "_ffmpeg_has_encoder", return_value=True) as enc, \
+             mock.patch.object(capabilities, "_ffmpeg_filter_names",
                                return_value={"scale_cuda"}) as filt, \
-             mock.patch.object(server, "_probe_nvenc_tune", new=mock.AsyncMock()) as tune:
-            await server._probe_ffmpeg_capabilities()
+             mock.patch.object(capabilities, "_probe_nvenc_tune", new=mock.AsyncMock()) as tune:
+            await capabilities._probe_ffmpeg_capabilities()
         enc.assert_called_once_with("hevc_nvenc")
         filt.assert_called_once_with()
         tune.assert_awaited_once()
-        self.assertTrue(server.HAS_NVENC)
-        self.assertTrue(server.HAS_SCALE_CUDA)
-        self.assertFalse(server.HAS_LIBPLACEBO)
+        self.assertTrue(capabilities.HAS_NVENC)
+        self.assertTrue(capabilities.HAS_SCALE_CUDA)
+        self.assertFalse(capabilities.HAS_LIBPLACEBO)
 
     async def test_missing_nvenc_still_records_the_other_probes(self):
-        saved = (server.HAS_NVENC, server.HAS_SCALE_CUDA, server.HAS_LIBPLACEBO)
+        saved = (capabilities.HAS_NVENC, capabilities.HAS_SCALE_CUDA, capabilities.HAS_LIBPLACEBO)
 
         def restore():
-            server.HAS_NVENC, server.HAS_SCALE_CUDA, server.HAS_LIBPLACEBO = saved
+            capabilities.HAS_NVENC, capabilities.HAS_SCALE_CUDA, capabilities.HAS_LIBPLACEBO = saved
 
         self.addCleanup(restore)
-        with mock.patch.object(server, "_ffmpeg_has_encoder", return_value=False), \
-             mock.patch.object(server, "_ffmpeg_filter_names", return_value={"scale_cuda", "libplacebo"}), \
-             mock.patch.object(server, "_probe_nvenc_tune", new=mock.AsyncMock()) as tune:
-            await server._probe_ffmpeg_capabilities()
+        with mock.patch.object(capabilities, "_ffmpeg_has_encoder", return_value=False), \
+             mock.patch.object(capabilities, "_ffmpeg_filter_names", return_value={"scale_cuda", "libplacebo"}), \
+             mock.patch.object(capabilities, "_probe_nvenc_tune", new=mock.AsyncMock()) as tune:
+            await capabilities._probe_ffmpeg_capabilities()
         tune.assert_awaited_once()
-        self.assertFalse(server.HAS_NVENC)
+        self.assertFalse(capabilities.HAS_NVENC)
 
 
 class TestImportSpawnsNoSubprocess(unittest.TestCase):
@@ -264,7 +264,7 @@ class TestImportSpawnsNoSubprocess(unittest.TestCase):
 
         src = Path(fetchforge.__file__).parent / "server.py"
         spec = importlib.util.spec_from_file_location(
-            "fetchforge_server_fresh_import", src)
+            "fetchforge._server_fresh_import", src)
         module = importlib.util.module_from_spec(spec)
         with mock.patch("subprocess.run") as run, \
              mock.patch("asyncio.create_subprocess_exec") as exec_:
@@ -277,24 +277,24 @@ class TestNoNvencRefusal(unittest.TestCase):
     """The pure gate: only video conversion needs NVENC."""
 
     def test_video_conversion_is_refused(self):
-        with mock.patch.object(server, "HAS_NVENC", False):
-            msg = server._nvenc_missing_error("video", True)
+        with mock.patch.object(capabilities, "HAS_NVENC", False):
+            msg = runner._nvenc_missing_error("video", True)
         self.assertIsNotNone(msg)
         self.assertIn("NVENC", msg)
         self.assertIn("Download-only", msg)
         self.assertIn("audio extraction still work", msg)
 
     def test_download_only_still_works(self):
-        with mock.patch.object(server, "HAS_NVENC", False):
-            self.assertIsNone(server._nvenc_missing_error("video", False))
+        with mock.patch.object(capabilities, "HAS_NVENC", False):
+            self.assertIsNone(runner._nvenc_missing_error("video", False))
 
     def test_audio_mode_still_works(self):
-        with mock.patch.object(server, "HAS_NVENC", False):
-            self.assertIsNone(server._nvenc_missing_error("audio", True))
+        with mock.patch.object(capabilities, "HAS_NVENC", False):
+            self.assertIsNone(runner._nvenc_missing_error("audio", True))
 
     def test_video_conversion_allowed_when_nvenc_present(self):
-        with mock.patch.object(server, "HAS_NVENC", True):
-            self.assertIsNone(server._nvenc_missing_error("video", True))
+        with mock.patch.object(capabilities, "HAS_NVENC", True):
+            self.assertIsNone(runner._nvenc_missing_error("video", True))
 
 
 async def _call(endpoint, **form):
@@ -322,18 +322,18 @@ class TestNoNvencRefusalEndpoints(unittest.IsolatedAsyncioTestCase):
         self.logs = self.tmp / "logs"
         self.logs.mkdir()
         for patch in [
-            mock.patch.object(server, "HAS_NVENC", False),
-            mock.patch.object(server, "_try_admit", lambda: True),
-            mock.patch.object(server, "_job_admitted", False),
-            mock.patch.object(server, "_active_jobs", 0),
-            mock.patch.object(server, "_keep_awake", lambda: None),
-            mock.patch.object(server, "_allow_sleep", lambda: None),
-            mock.patch.object(server, "_cancel_requested", asyncio.Event()),
-            mock.patch.object(server, "LOGS_DIR", self.logs),
-            mock.patch.object(server, "get_ytdlp_argv",
+            mock.patch.object(capabilities, "HAS_NVENC", False),
+            mock.patch.object(jobs, "_try_admit", lambda: True),
+            mock.patch.object(jobs, "_job_admitted", False),
+            mock.patch.object(jobs, "_active_jobs", 0),
+            mock.patch.object(jobs, "_keep_awake", lambda: None),
+            mock.patch.object(jobs, "_allow_sleep", lambda: None),
+            mock.patch.object(encode, "_cancel_requested", asyncio.Event()),
+            mock.patch.object(config, "LOGS_DIR", self.logs),
+            mock.patch.object(ytdlp, "get_ytdlp_argv",
                               side_effect=AssertionError("yt-dlp must not run")),
-            mock.patch.object(server, "current_process", None),
-            mock.patch.object(server, "current_dl_process", None),
+            mock.patch.object(jobs, "current_process", None),
+            mock.patch.object(jobs, "current_dl_process", None),
         ]:
             patch.start()
             self.addCleanup(patch.stop)

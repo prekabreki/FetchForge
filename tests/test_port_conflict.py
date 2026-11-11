@@ -6,7 +6,7 @@ import threading
 import unittest
 from unittest import mock
 
-from fetchforge import server
+from fetchforge import server, config
 
 
 def _free_port():
@@ -52,8 +52,8 @@ class TestPortConflict(unittest.TestCase):
             mock.patch.object(server, "PORT", server.PORT),
             mock.patch.object(server, "APP_URL", server.APP_URL),
             mock.patch.object(server, "_candidate_ports", lambda: [self.p1, self.p2]),
-            mock.patch.object(server, "_ensure_runtime_dirs"),
-            mock.patch.object(server, "_setup_logging"),
+            mock.patch.object(config, "_ensure_runtime_dirs"),
+            mock.patch.object(config, "_setup_logging"),
             mock.patch("webbrowser.open"),
             mock.patch("threading.Timer"),
             mock.patch.object(server.uvicorn, "Server"),

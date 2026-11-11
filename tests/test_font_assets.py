@@ -17,11 +17,11 @@ from pathlib import Path
 
 from fastapi.responses import FileResponse
 
-from fetchforge import server
+from fetchforge import server, config
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PYPROJECT = REPO_ROOT / "pyproject.toml"
-INDEX_HTML = server.PKG_DIR / "index.html"
+INDEX_HTML = config.PKG_DIR / "index.html"
 
 WOFF2_MAGIC = b"wOF2"
 
@@ -67,8 +67,8 @@ class TestFontFaceWiring(unittest.TestCase):
         for src in srcs:
             name = src.rsplit("/", 1)[-1]
             with self.subTest(src=src):
-                self.assertIn(name, server.FONT_FILES, "not served by /fonts/{name}")
-                self.assertTrue((server.FONTS_DIR / name).is_file(), "not on disk")
+                self.assertIn(name, config.FONT_FILES, "not served by /fonts/{name}")
+                self.assertTrue((config.FONTS_DIR / name).is_file(), "not on disk")
 
     def test_every_face_keeps_font_display_swap(self):
         # Dropping this reintroduces FOIT, which is what the CDN's &display=swap
@@ -101,25 +101,25 @@ class TestFontFaceWiring(unittest.TestCase):
             with self.subTest(href=href):
                 # A preload for a URL the page never requests logs a console warning.
                 self.assertIn("url('%s')" % href, self.head)
-                self.assertIn(href.rsplit("/", 1)[-1], server.FONT_FILES)
+                self.assertIn(href.rsplit("/", 1)[-1], config.FONT_FILES)
 
 
 class TestShippedAssets(unittest.TestCase):
     def test_font_allowlist_is_non_empty_and_woff2_only(self):
-        self.assertTrue(server.FONT_FILES)
-        for name in server.FONT_FILES:
+        self.assertTrue(config.FONT_FILES)
+        for name in config.FONT_FILES:
             self.assertTrue(name.endswith(".woff2"))
 
     def test_files_are_real_woff2(self):
-        for name in server.FONT_FILES:
+        for name in config.FONT_FILES:
             with self.subTest(name=name):
-                with (server.FONTS_DIR / name).open("rb") as fh:
+                with (config.FONTS_DIR / name).open("rb") as fh:
                     self.assertEqual(fh.read(4), WOFF2_MAGIC)
 
     def test_ofl_licence_ships_for_each_family(self):
         # Public repo, OFL fonts: the licence text must travel with the binaries.
         for licence in ("OFL-Outfit.txt", "OFL-JetBrainsMono.txt"):
-            path = server.FONTS_DIR / licence
+            path = config.FONTS_DIR / licence
             with self.subTest(licence=licence):
                 self.assertTrue(path.is_file(), "%s is missing" % licence)
                 text = path.read_text(encoding="utf-8")
@@ -127,7 +127,7 @@ class TestShippedAssets(unittest.TestCase):
                 self.assertIn("COPYRIGHT", text.upper())
 
     def test_provenance_note_ships(self):
-        self.assertTrue((server.FONTS_DIR / "SOURCES.txt").is_file())
+        self.assertTrue((config.FONTS_DIR / "SOURCES.txt").is_file())
 
 
 class TestPackaging(unittest.TestCase):
@@ -137,7 +137,7 @@ class TestPackaging(unittest.TestCase):
         with PYPROJECT.open("rb") as fh:
             cfg = tomllib.load(fh)
         globs = cfg["tool"]["setuptools"]["package-data"]["fetchforge"]
-        for path in sorted(server.FONTS_DIR.iterdir()):
+        for path in sorted(config.FONTS_DIR.iterdir()):
             rel = "fonts/" + path.name
             with self.subTest(rel=rel):
                 self.assertTrue(
@@ -151,15 +151,15 @@ class TestFontRoute(unittest.TestCase):
         return asyncio.run(server.font_asset(name))
 
     def test_serves_each_allowlisted_font(self):
-        for name in sorted(server.FONT_FILES):
+        for name in sorted(config.FONT_FILES):
             with self.subTest(name=name):
                 resp = self._get(name)
                 self.assertIsInstance(resp, FileResponse)
                 self.assertEqual(resp.media_type, "font/woff2")
-                self.assertEqual(Path(resp.path), server.FONTS_DIR / name)
+                self.assertEqual(Path(resp.path), config.FONTS_DIR / name)
 
     def test_sends_a_cache_header(self):
-        resp = self._get(next(iter(server.FONT_FILES)))
+        resp = self._get(next(iter(config.FONT_FILES)))
         self.assertIn("max-age", resp.headers.get("cache-control", ""))
 
     def test_rejects_anything_outside_the_allowlist(self):

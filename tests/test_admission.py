@@ -22,7 +22,7 @@ from unittest import mock
 
 import anyio
 
-from fetchforge import server
+from fetchforge import server, config, ytdlp, encode, cookies, jobs
 
 
 class _StreamReader:
@@ -150,21 +150,21 @@ class AdmissionTest(unittest.IsolatedAsyncioTestCase):
 
         for p in [
             mock.patch.object(server.asyncio, "create_subprocess_exec", fake_subprocess),
-            mock.patch.object(server, "probe_video", fake_probe),
-            mock.patch.object(server, "get_ffmpeg", lambda: "/usr/bin/ffmpeg"),
-            mock.patch.object(server, "get_ffprobe", lambda: "/usr/bin/ffprobe"),
-            mock.patch.object(server, "NODE_ARGS", []),
-            mock.patch.object(server, "cookie_args", lambda: []),
-            mock.patch.object(server, "LOGS_DIR", self.logs),
-            mock.patch.object(server, "CACHE_DIR", self.cache),
-            mock.patch.object(server, "CONVERTED_DIR", self.out),
-            mock.patch.object(server, "_keep_awake", lambda: None),
-            mock.patch.object(server, "_allow_sleep", lambda: None),
-            mock.patch.object(server, "_cancel_requested", asyncio.Event()),
-            mock.patch.object(server, "_job_admitted", False),
-            mock.patch.object(server, "_active_jobs", 0),
-            mock.patch.object(server, "current_process", None),
-            mock.patch.object(server, "current_dl_process", None),
+            mock.patch.object(ytdlp, "probe_video", fake_probe),
+            mock.patch.object(ytdlp, "get_ffmpeg", lambda: "/usr/bin/ffmpeg"),
+            mock.patch.object(ytdlp, "get_ffprobe", lambda: "/usr/bin/ffprobe"),
+            mock.patch.object(ytdlp, "NODE_ARGS", []),
+            mock.patch.object(cookies, "cookie_args", lambda: []),
+            mock.patch.object(config, "LOGS_DIR", self.logs),
+            mock.patch.object(config, "CACHE_DIR", self.cache),
+            mock.patch.object(config, "CONVERTED_DIR", self.out),
+            mock.patch.object(jobs, "_keep_awake", lambda: None),
+            mock.patch.object(jobs, "_allow_sleep", lambda: None),
+            mock.patch.object(encode, "_cancel_requested", asyncio.Event()),
+            mock.patch.object(jobs, "_job_admitted", False),
+            mock.patch.object(jobs, "_active_jobs", 0),
+            mock.patch.object(jobs, "current_process", None),
+            mock.patch.object(jobs, "current_dl_process", None),
         ]:
             p.start()
             self.addCleanup(p.stop)
@@ -196,15 +196,15 @@ class AdmissionTest(unittest.IsolatedAsyncioTestCase):
     # ── overlap rejection ───────────────────────────────────────────────────
     async def test_second_download_rejected_with_409(self):
         first = await _call(server.download, **self._download_form())
-        self.assertTrue(server._job_admitted)
+        self.assertTrue(jobs._job_admitted)
 
         second = await _call(server.download, **self._download_form())
         self.assertEqual(second.status_code, 409)
-        self.assertEqual(json.loads(second.body), {"error": server._BUSY_MESSAGE})
-        self.assertTrue(server._job_admitted, "the loser must not release the winner's admission")
+        self.assertEqual(json.loads(second.body), {"error": jobs._BUSY_MESSAGE})
+        self.assertTrue(jobs._job_admitted, "the loser must not release the winner's admission")
 
         await first.body_iterator.aclose()
-        self.assertFalse(server._job_admitted)
+        self.assertFalse(jobs._job_admitted)
 
     async def test_second_convert_local_rejected_with_409(self):
         first = await _call(server.convert_local, **self._local_form())
@@ -228,17 +228,17 @@ class AdmissionTest(unittest.IsolatedAsyncioTestCase):
         first = await _call(server.download, **self._download_form())
 
         # The accepted job's shared state, which the loser must not touch.
-        server._cancel_requested.set()
+        encode._cancel_requested.set()
         handle = _FakeProc("guard")
-        server.current_process = handle
-        server.current_dl_process = handle
+        jobs.current_process = handle
+        jobs.current_dl_process = handle
         self.procs.clear()
 
         second = await _call(server.download, **self._download_form())
         self.assertEqual(second.status_code, 409)
-        self.assertTrue(server._cancel_requested.is_set(), "loser cleared the sticky cancel flag")
-        self.assertIs(server.current_process, handle, "loser replaced current_process")
-        self.assertIs(server.current_dl_process, handle, "loser replaced current_dl_process")
+        self.assertTrue(encode._cancel_requested.is_set(), "loser cleared the sticky cancel flag")
+        self.assertIs(jobs.current_process, handle, "loser replaced current_process")
+        self.assertIs(jobs.current_dl_process, handle, "loser replaced current_dl_process")
         self.assertFalse(handle.terminated, "loser terminated a shared handle")
         self.assertEqual(self.procs, [], "loser spawned a subprocess")
         self.assertEqual(list(self.out.iterdir()), [], "loser wrote output")
@@ -251,7 +251,7 @@ class AdmissionTest(unittest.IsolatedAsyncioTestCase):
         first = await _call(server.convert_local, files=json.dumps([str(self.tmp / "missing.mkv")]),
                             output_dir=str(self.out))
         await _drain(first)          # no valid files → error event → stream ends
-        self.assertFalse(server._job_admitted)
+        self.assertFalse(jobs._job_admitted)
 
         second = await _call(server.download, **self._download_form())
         self.assert_admitted(second)
@@ -260,7 +260,7 @@ class AdmissionTest(unittest.IsolatedAsyncioTestCase):
     async def test_new_job_admitted_after_disconnect(self):
         first = await _call(server.download, **self._download_form())
         await _consume_with_disconnect(first, disconnect_after=1)
-        self.assertFalse(server._job_admitted)
+        self.assertFalse(jobs._job_admitted)
 
         second = await _call(server.convert_local, **self._local_form())
         self.assert_admitted(second)
@@ -271,10 +271,10 @@ class AdmissionTest(unittest.IsolatedAsyncioTestCase):
         # the stream is closed (as Starlette does when the client goes away before
         # reading anything). The stream is closed without a single chunk consumed.
         first = await _call(server.download, **self._download_form())
-        self.assertTrue(server._job_admitted)
+        self.assertTrue(jobs._job_admitted)
 
         await first.body_iterator.aclose()
-        self.assertFalse(server._job_admitted)
+        self.assertFalse(jobs._job_admitted)
 
         second = await _call(server.download, **self._download_form())
         self.assert_admitted(second)

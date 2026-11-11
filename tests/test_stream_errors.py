@@ -16,7 +16,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from fetchforge import server
+from fetchforge import server, config, ytdlp, encode, cookies, jobs
 
 _FAKE_YTDLP = "import sys\nsys.exit(1)\n"
 
@@ -58,19 +58,19 @@ class StreamErrorTest(unittest.IsolatedAsyncioTestCase):
         self.fake.write_text(_FAKE_YTDLP)
 
         for p in [
-            mock.patch.object(server, "get_ytdlp_argv", lambda: [sys.executable, str(self.fake)]),
-            mock.patch.object(server, "NODE_ARGS", []),
-            mock.patch.object(server, "cookie_args", lambda: []),
-            mock.patch.object(server, "LOGS_DIR", self.logs),
-            mock.patch.object(server, "CACHE_DIR", self.cache),
-            mock.patch.object(server, "CONVERTED_DIR", self.out),
-            mock.patch.object(server, "_keep_awake", lambda: None),
-            mock.patch.object(server, "_allow_sleep", lambda: None),
-            mock.patch.object(server, "_cancel_requested", asyncio.Event()),
-            mock.patch.object(server, "_job_admitted", False),
-            mock.patch.object(server, "_active_jobs", 0),
-            mock.patch.object(server, "current_process", None),
-            mock.patch.object(server, "current_dl_process", None),
+            mock.patch.object(ytdlp, "get_ytdlp_argv", lambda: [sys.executable, str(self.fake)]),
+            mock.patch.object(ytdlp, "NODE_ARGS", []),
+            mock.patch.object(cookies, "cookie_args", lambda: []),
+            mock.patch.object(config, "LOGS_DIR", self.logs),
+            mock.patch.object(config, "CACHE_DIR", self.cache),
+            mock.patch.object(config, "CONVERTED_DIR", self.out),
+            mock.patch.object(jobs, "_keep_awake", lambda: None),
+            mock.patch.object(jobs, "_allow_sleep", lambda: None),
+            mock.patch.object(encode, "_cancel_requested", asyncio.Event()),
+            mock.patch.object(jobs, "_job_admitted", False),
+            mock.patch.object(jobs, "_active_jobs", 0),
+            mock.patch.object(jobs, "current_process", None),
+            mock.patch.object(jobs, "current_dl_process", None),
         ]:
             p.start()
             self.addCleanup(p.stop)
@@ -98,11 +98,11 @@ class StreamErrorTest(unittest.IsolatedAsyncioTestCase):
 
     async def _assert_recovers(self):
         """Admission was released, so the next job is admitted."""
-        self.assertFalse(server._job_admitted)
+        self.assertFalse(jobs._job_admitted)
         following = await _call(server.convert_local, **self._local_form())
         self.assertNotEqual(following.status_code, 409)
         await following.body_iterator.aclose()
-        self.assertFalse(server._job_admitted)
+        self.assertFalse(jobs._job_admitted)
 
     def _job_logs(self):
         return sorted(self.logs.glob("*.txt"))

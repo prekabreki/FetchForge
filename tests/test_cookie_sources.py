@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from fetchforge import server
+from fetchforge import cookies
 
 
 def _write_local_state(root: Path, payload) -> Path:
@@ -33,7 +33,7 @@ class _TempRoot(unittest.TestCase):
         self.root.mkdir(parents=True)
         # Detection is Windows-only by definition; pin the platform so the suite
         # gives the same answer on the Linux CI box and the Windows dev box.
-        p = mock.patch.object(server.platform, "system", return_value="Windows")
+        p = mock.patch.object(cookies.platform, "system", return_value="Windows")
         p.start()
         self.addCleanup(p.stop)
 
@@ -45,39 +45,39 @@ class TestAppBoundEncryptionDetection(_TempRoot):
             "encrypted_key": "RFBBUElsZWdhY3k=",
             "app_bound_encrypted_key": "QVBQQm91bmRLZXlCbG9i",
         }})
-        self.assertTrue(server._chromium_uses_app_bound_encryption(self.root))
+        self.assertTrue(cookies._chromium_uses_app_bound_encryption(self.root))
 
     def test_legacy_key_only_is_not_detected(self):
         # Pre-127 Chromium (and the Linux/macOS layout): DPAPI/keyring only.
         _write_local_state(self.root, {"os_crypt": {"encrypted_key": "RFBBUElsZWdhY3k="}})
-        self.assertFalse(server._chromium_uses_app_bound_encryption(self.root))
+        self.assertFalse(cookies._chromium_uses_app_bound_encryption(self.root))
 
     def test_empty_app_bound_key_is_not_detected(self):
         _write_local_state(self.root, {"os_crypt": {"app_bound_encrypted_key": ""}})
-        self.assertFalse(server._chromium_uses_app_bound_encryption(self.root))
+        self.assertFalse(cookies._chromium_uses_app_bound_encryption(self.root))
 
     def test_missing_local_state_returns_false(self):
-        self.assertFalse(server._chromium_uses_app_bound_encryption(self.root))
+        self.assertFalse(cookies._chromium_uses_app_bound_encryption(self.root))
 
     def test_empty_local_state_returns_false(self):
         _write_local_state(self.root, "")
-        self.assertFalse(server._chromium_uses_app_bound_encryption(self.root))
+        self.assertFalse(cookies._chromium_uses_app_bound_encryption(self.root))
 
     def test_invalid_json_returns_false(self):
         _write_local_state(self.root, "{not json at all")
-        self.assertFalse(server._chromium_uses_app_bound_encryption(self.root))
+        self.assertFalse(cookies._chromium_uses_app_bound_encryption(self.root))
 
     def test_non_object_json_returns_false(self):
         _write_local_state(self.root, "[1, 2, 3]")
-        self.assertFalse(server._chromium_uses_app_bound_encryption(self.root))
+        self.assertFalse(cookies._chromium_uses_app_bound_encryption(self.root))
 
     def test_non_object_os_crypt_returns_false(self):
         _write_local_state(self.root, {"os_crypt": "nope"})
-        self.assertFalse(server._chromium_uses_app_bound_encryption(self.root))
+        self.assertFalse(cookies._chromium_uses_app_bound_encryption(self.root))
 
     def test_unreadable_root_returns_false(self):
         # A root that is not even a directory must not raise out of the scan.
-        self.assertFalse(server._chromium_uses_app_bound_encryption(
+        self.assertFalse(cookies._chromium_uses_app_bound_encryption(
             self.root / "Local State" / "deeper"))
 
     def test_not_detected_off_windows(self):
@@ -85,26 +85,26 @@ class TestAppBoundEncryptionDetection(_TempRoot):
         # keyring failure must never be told their setup is impossible.
         _write_local_state(self.root, {"os_crypt": {"app_bound_encrypted_key": "x"}})
         for sysname in ("Linux", "Darwin"):
-            with mock.patch.object(server.platform, "system", return_value=sysname):
-                self.assertFalse(server._chromium_uses_app_bound_encryption(self.root))
+            with mock.patch.object(cookies.platform, "system", return_value=sysname):
+                self.assertFalse(cookies._chromium_uses_app_bound_encryption(self.root))
 
 
 class TestDecryptFailureClassification(unittest.TestCase):
 
     def test_dpapi_message_is_a_decrypt_failure(self):
-        self.assertTrue(server._looks_like_decrypt_failure(
+        self.assertTrue(cookies._looks_like_decrypt_failure(
             "Failed to decrypt with DPAPI. See  "
             "https://github.com/yt-dlp/yt-dlp/issues/10927  for more info"))
 
     def test_locked_database_is_not_a_decrypt_failure(self):
         # yt-dlp issue 7271 — a genuinely different, possibly transient failure.
-        self.assertFalse(server._looks_like_decrypt_failure(
+        self.assertFalse(cookies._looks_like_decrypt_failure(
             "Could not copy Chrome cookie database. See  "
             "https://github.com/yt-dlp/yt-dlp/issues/7271  for more info"))
 
     def test_none_and_empty_are_not_decrypt_failures(self):
-        self.assertFalse(server._looks_like_decrypt_failure(None))
-        self.assertFalse(server._looks_like_decrypt_failure(""))
+        self.assertFalse(cookies._looks_like_decrypt_failure(None))
+        self.assertFalse(cookies._looks_like_decrypt_failure(""))
 
 
 class TestFailureReason(_TempRoot):
@@ -112,20 +112,20 @@ class TestFailureReason(_TempRoot):
     def test_decrypt_failure_on_abe_profile_is_flagged(self):
         _write_local_state(self.root, {"os_crypt": {"app_bound_encrypted_key": "x"}})
         self.assertEqual(
-            server._failure_reason(self.root, "Failed to decrypt with DPAPI."),
-            server.APP_BOUND_ENCRYPTION)
+            cookies._failure_reason(self.root, "Failed to decrypt with DPAPI."),
+            cookies.APP_BOUND_ENCRYPTION)
 
     def test_locked_database_on_abe_profile_keeps_its_own_reason(self):
         # #46 danger zone: the ABE summary must not swallow a different failure.
         _write_local_state(self.root, {"os_crypt": {"app_bound_encrypted_key": "x"}})
         self.assertEqual(
-            server._failure_reason(self.root, "Could not copy Chrome cookie database."),
+            cookies._failure_reason(self.root, "Could not copy Chrome cookie database."),
             "")
 
     def test_decrypt_failure_without_abe_key_is_not_flagged(self):
         _write_local_state(self.root, {"os_crypt": {"encrypted_key": "x"}})
         self.assertEqual(
-            server._failure_reason(self.root, "Failed to decrypt with DPAPI."), "")
+            cookies._failure_reason(self.root, "Failed to decrypt with DPAPI."), "")
 
 
 class TestScanAnnotatesCandidates(unittest.TestCase):
@@ -136,11 +136,11 @@ class TestScanAnnotatesCandidates(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.base = Path(self._tmp.name)
-        p = mock.patch.object(server.platform, "system", return_value="Windows")
+        p = mock.patch.object(cookies.platform, "system", return_value="Windows")
         p.start()
         self.addCleanup(p.stop)
         # No Firefox root in these scans unless a test opts in.
-        ff = mock.patch.object(server, "_firefox_root",
+        ff = mock.patch.object(cookies, "_firefox_root",
                                return_value=self.base / "no-such-firefox")
         ff.start()
         self.addCleanup(ff.stop)
@@ -161,13 +161,13 @@ class TestScanAnnotatesCandidates(unittest.TestCase):
         def boom(browser, profile):
             raise RuntimeError(errors[browser])
 
-        with mock.patch.object(server, "_browser_roots",
+        with mock.patch.object(cookies, "_browser_roots",
                                return_value={"brave": abe_root, "chrome": plain_root}), \
-             mock.patch.object(server, "_extract_one", side_effect=boom):
-            entries = [e for e, _ in server._scan_all_browser_cookies()]
+             mock.patch.object(cookies, "_extract_one", side_effect=boom):
+            entries = [e for e, _ in cookies._scan_all_browser_cookies()]
 
         by_browser = {e["browser"]: e for e in entries}
-        self.assertEqual(by_browser["brave"]["reason"], server.APP_BOUND_ENCRYPTION)
+        self.assertEqual(by_browser["brave"]["reason"], cookies.APP_BOUND_ENCRYPTION)
         self.assertNotIn("reason", by_browser["chrome"])
         # #43: every candidate keeps its own error string for the UI to show.
         self.assertIn("DPAPI", by_browser["brave"]["error"])
@@ -180,9 +180,9 @@ class TestScanAnnotatesCandidates(unittest.TestCase):
             pass
 
         jar = _Jar()
-        with mock.patch.object(server, "_browser_roots", return_value={"brave": root}), \
-             mock.patch.object(server, "_extract_one", return_value=jar):
-            entries = [e for e, _ in server._scan_all_browser_cookies()]
+        with mock.patch.object(cookies, "_browser_roots", return_value={"brave": root}), \
+             mock.patch.object(cookies, "_extract_one", return_value=jar):
+            entries = [e for e, _ in cookies._scan_all_browser_cookies()]
 
         self.assertEqual(len(entries), 1)
         self.assertNotIn("reason", entries[0])
@@ -190,10 +190,10 @@ class TestScanAnnotatesCandidates(unittest.TestCase):
 
     def test_malformed_local_state_does_not_break_the_scan(self):
         root = self._root("brave", "{{{ not json")
-        with mock.patch.object(server, "_browser_roots", return_value={"brave": root}), \
-             mock.patch.object(server, "_extract_one",
+        with mock.patch.object(cookies, "_browser_roots", return_value={"brave": root}), \
+             mock.patch.object(cookies, "_extract_one",
                                side_effect=RuntimeError("Failed to decrypt with DPAPI.")):
-            entries = [e for e, _ in server._scan_all_browser_cookies()]
+            entries = [e for e, _ in cookies._scan_all_browser_cookies()]
 
         self.assertEqual(len(entries), 1)
         self.assertNotIn("reason", entries[0])
@@ -202,11 +202,11 @@ class TestScanAnnotatesCandidates(unittest.TestCase):
     def test_firefox_is_never_flagged(self):
         ff_root = self.base / "firefox"
         ff_root.mkdir()
-        with mock.patch.object(server, "_browser_roots", return_value={}), \
-             mock.patch.object(server, "_firefox_root", return_value=ff_root), \
-             mock.patch.object(server, "_extract_one",
+        with mock.patch.object(cookies, "_browser_roots", return_value={}), \
+             mock.patch.object(cookies, "_firefox_root", return_value=ff_root), \
+             mock.patch.object(cookies, "_extract_one",
                                side_effect=RuntimeError("Failed to decrypt with DPAPI.")):
-            entries = [e for e, _ in server._scan_all_browser_cookies()]
+            entries = [e for e, _ in cookies._scan_all_browser_cookies()]
 
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["browser"], "firefox")
@@ -214,11 +214,11 @@ class TestScanAnnotatesCandidates(unittest.TestCase):
 
     def test_no_candidate_flagged_on_linux(self):
         root = self._root("brave", {"os_crypt": {"app_bound_encrypted_key": "x"}})
-        with mock.patch.object(server.platform, "system", return_value="Linux"), \
-             mock.patch.object(server, "_browser_roots", return_value={"brave": root}), \
-             mock.patch.object(server, "_extract_one",
+        with mock.patch.object(cookies.platform, "system", return_value="Linux"), \
+             mock.patch.object(cookies, "_browser_roots", return_value={"brave": root}), \
+             mock.patch.object(cookies, "_extract_one",
                                side_effect=RuntimeError("Failed to decrypt with DPAPI.")):
-            entries = [e for e, _ in server._scan_all_browser_cookies()]
+            entries = [e for e, _ in cookies._scan_all_browser_cookies()]
 
         self.assertEqual(len(entries), 1)
         self.assertNotIn("reason", entries[0])

@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from fetchforge import server
+from fetchforge import ytdlp, encode, capabilities, jobs
 
 _HAS_FFMPEG = shutil.which("ffmpeg") is not None
 
@@ -29,10 +29,10 @@ class TestRunEncode(unittest.IsolatedAsyncioTestCase):
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def setUp(self):
-        server._cancel_requested.clear()
+        encode._cancel_requested.clear()
 
     def tearDown(self):
-        server._cancel_requested.clear()
+        encode._cancel_requested.clear()
 
     def _cpu_args(self, out):
         return ["ffmpeg", "-y", "-loglevel", "info", "-i", str(self.clip),
@@ -42,7 +42,7 @@ class TestRunEncode(unittest.IsolatedAsyncioTestCase):
     async def test_success_emits_progress_and_log(self):
         out = self.tmp / "out.mp4"
         res, got_progress, got_log = {}, False, False
-        async for s in server.run_encode(self._cpu_args(out), duration_secs=5.0,
+        async for s in encode.run_encode(self._cpu_args(out), duration_secs=5.0,
                                          idx=1, total=1, result=res):
             if '"type": "progress"' in s:
                 got_progress = True
@@ -52,7 +52,7 @@ class TestRunEncode(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(out.exists() and out.stat().st_size > 0)
         self.assertTrue(got_progress, "no progress events")
         self.assertTrue(got_log, "no stderr/log events")
-        self.assertIsNone(server.current_process)
+        self.assertIsNone(jobs.current_process)
 
     async def test_cancel_terminates_with_nonzero_rc(self):
         out = self.tmp / "out_cancel.mp4"
@@ -63,13 +63,13 @@ class TestRunEncode(unittest.IsolatedAsyncioTestCase):
 
         async def canceller():
             await asyncio.sleep(0.5)
-            server._cancel_requested.set()
+            encode._cancel_requested.set()
 
         asyncio.create_task(canceller())
-        async for _ in server.run_encode(args, duration_secs=30.0, idx=1, total=1, result=res):
+        async for _ in encode.run_encode(args, duration_secs=30.0, idx=1, total=1, result=res):
             pass
         self.assertNotEqual(res["returncode"], 0)
-        self.assertIsNone(server.current_process)
+        self.assertIsNone(jobs.current_process)
 
 
 @unittest.skipUnless(_HAS_FFMPEG, "ffmpeg not on PATH")
@@ -90,16 +90,16 @@ class TestDownloadIsComplete(unittest.IsolatedAsyncioTestCase):
 
     async def test_known_size(self):
         sz = self.clip.stat().st_size
-        self.assertTrue(await server._download_is_complete(self.clip, int(sz * 0.9)))
-        self.assertFalse(await server._download_is_complete(self.clip, sz * 2))
+        self.assertTrue(await ytdlp._download_is_complete(self.clip, int(sz * 0.9)))
+        self.assertFalse(await ytdlp._download_is_complete(self.clip, sz * 2))
 
     async def test_duration_when_size_unknown(self):
-        self.assertTrue(await server._download_is_complete(self.clip, 0, 5.0))    # matches ~5s
-        self.assertFalse(await server._download_is_complete(self.clip, 0, 60.0))  # truncated
-        self.assertFalse(await server._download_is_complete(self.clip, 0, 0))     # unverifiable
+        self.assertTrue(await ytdlp._download_is_complete(self.clip, 0, 5.0))    # matches ~5s
+        self.assertFalse(await ytdlp._download_is_complete(self.clip, 0, 60.0))  # truncated
+        self.assertFalse(await ytdlp._download_is_complete(self.clip, 0, 0))     # unverifiable
 
     async def test_missing_file(self):
-        self.assertFalse(await server._download_is_complete(self.tmp / "nope.mkv", 0, 5.0))
+        self.assertFalse(await ytdlp._download_is_complete(self.tmp / "nope.mkv", 0, 5.0))
 
 
 class TestEncodePlan(unittest.TestCase):
@@ -119,21 +119,21 @@ class TestEncodePlan(unittest.TestCase):
         input_file, output_file = Path("in.mkv"), Path("out.mp4")
         seek = ["-ss", "5.000", "-t", "25"]
 
-        params, argv, logs = server._encode_plan(
+        params, argv, logs = encode._encode_plan(
             self.SRC, input_file, output_file, self.OPTS, input_opts=seek)
 
-        expected_params = server.calc_encode_params(
+        expected_params = encode.calc_encode_params(
             height=2160, fps=60.0, video_bitrate_kbps=100000, codec="vp9",
             pix_fmt="yuv420p", color_transfer="",
             cq_override=0, maxrate_override="25M", nvenc_tune="hq",
             target_res=0, sharpen=False, preset_override="", tune_override="",
-            pix_fmt_override="", probe_tune=server._nvenc_tune,
+            pix_fmt_override="", probe_tune=capabilities._nvenc_tune,
         )
         self.assertEqual(params, expected_params)
 
-        expected_argv = server.build_video_ffmpeg_args(
+        expected_argv = encode.build_video_ffmpeg_args(
             input_file, output_file, expected_params, expected_params["tune"],
-            "vp9", target_height=server._effective_target_height(2160, 0),
+            "vp9", target_height=encode._effective_target_height(2160, 0),
             sharpen=False, input_opts=seek,
         )
         self.assertEqual(argv, expected_argv)
@@ -146,7 +146,7 @@ class TestEncodePlan(unittest.TestCase):
         ])
 
     def test_local_conversion_passes_no_input_opts(self):
-        argv = server._encode_plan(
+        argv = encode._encode_plan(
             self.SRC, Path("in.mkv"), Path("out.mp4"), self.OPTS)[1]
         self.assertNotIn("-ss", argv)
         self.assertNotIn("-t", argv)

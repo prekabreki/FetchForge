@@ -4,7 +4,7 @@ Local Python/FastAPI web app, packaged as the `fetchforge` pip package. Download
 
 ## Stack
 
-- **Backend:** `fetchforge/server.py` — FastAPI + uvicorn, all async
+- **Backend:** `fetchforge/server.py` — FastAPI app, middleware, routes and server lifecycle, all async. The download/encode plumbing lives in focused modules under `fetchforge/`: `jobs.py` (Job, admission, heartbeat, wake lock), `ytdlp.py` (tool resolution, argv, format selectors, output detection, completeness), `encode.py` (override validation, `calc_encode_params`, filter args, argv builders, `run_encode`), `items.py` (`fetch_item` / `process_item` / pipeline coordinator), `capabilities.py` (startup probes + report), `cookies.py` (Netscape validation + browser extraction), `sections.py` (time-range capture), `events.py` (SSE builders), `history.py` (history.json), `config.py` (paths, logging, power-off).
 - **Frontend:** `fetchforge/index.html` — single-file, no build step, vanilla JS + SSE, served from `PKG_DIR`
 - **CLI entry point:** `fetchforge/cli.py` (`main()`, wired as the `fetchforge` console script) runs `provision.ensure_ffmpeg()` preflight, then imports and calls `server.run_server()`. `fetchforge/__main__.py` calls the same `cli.main()` for `python -m fetchforge`.
 - **Provisioning:** `fetchforge/provision.py` — on Windows, auto-downloads an NVENC-capable ffmpeg build into `%LOCALAPPDATA%\FetchForge\ffmpeg` on first run if none is found; on Linux, guides the user to install ffmpeg via the package manager (no auto-download — driver/distro-coupled); macOS has no NVENC and raises `ProvisionError` with guidance (download + audio-extract still work without ffmpeg's NVENC encoder).
@@ -23,7 +23,17 @@ FetchForge/                   # repo root
     __main__.py                 # python -m fetchforge → cli.main()
     cli.py                      # fetchforge console entry point (ffmpeg preflight + run)
     provision.py                 # NVENC-ffmpeg detection / Windows auto-download
-    server.py                    # entire backend
+    server.py                    # FastAPI app, middleware, routes, server lifecycle
+    config.py                    # PKG_DIR/STATE_DIR paths, runtime dirs, logging, power-off
+    events.py                    # SSE event builders (_sse / _ev_* / sse_*)
+    jobs.py                      # Job, single-job admission, heartbeat watchdog, wake lock
+    ytdlp.py                     # yt-dlp tool resolution, argv, format selectors, completeness
+    encode.py                    # override validation, calc_encode_params, ffmpeg argv, run_encode
+    items.py                     # fetch_item / process_item / sequential + pipeline runners
+    capabilities.py              # startup ffmpeg probes + /capabilities report
+    cookies.py                   # Netscape validation, stale-cookie detection, browser extraction
+    sections.py                  # time-range (section) capture helpers
+    history.py                   # history.json persistence
     index.html                   # entire frontend
     fonts/                       # self-hosted webfonts (no CDN) + their OFL licences
       *.woff2                      # Outfit + JetBrains Mono, latin & latin-ext
@@ -126,7 +136,7 @@ Decides whether a download that exited non-zero is actually complete. With a kno
 
 ## SSE event types
 
-All events: `data: {JSON}\n\n`. **Every event is built by an `sse_*` helper** at the top of `fetchforge/server.py` (`sse_log`, `sse_error`, `sse_phase`, `sse_progress`, `sse_done`, `sse_cancelled`, …) over a single `_sse()` that owns the wire format — never hand-roll a `data:` string. `sse_phase(header, filename="")` enforces the `header: filename` split contract.
+All events: `data: {JSON}\n\n`. **Every event is built by an `sse_*` helper** in `fetchforge/events.py` (`sse_log`, `sse_error`, `sse_phase`, `sse_progress`, `sse_done`, `sse_cancelled`, …) over a single `_sse()` that owns the wire format — never hand-roll a `data:` string. `sse_phase(header, filename="")` enforces the `header: filename` split contract.
 
 | Type | Fields | Purpose |
 |------|--------|---------|
@@ -263,7 +273,7 @@ In audio mode:
   - `tests/frontend/harness.mjs` loads the **real** `fetchforge/index.html` under jsdom with `runScripts:'dangerously'`, so tests drive the app's own functions against the app's own DOM. Per `.memories/local-testing-gotchas.md`: canvas `getContext` is stubbed with a self-returning callable Proxy (`SparkChart` builds two at load), `TextDecoder`/`TextEncoder` are injected, and `fetch` is a stub whose unrouted requests never resolve. **Do not extract-and-`eval` the `<script>`** — `dlQueue`/`_queueProgress`/`currentTuneMode` are script-scope `let`s and an eval'd copy silently diverges from the app's.
   - Rule for writing tests here: reach the app only through real events, real DOM values, or stubbed responses (`fetchStub.json` / `fetchStub.sse` + `nextStream`), and observe results in the DOM or in the decoded request body. Never poke page globals — a harness that does looks green while testing its own state. Select elements by id / class / `data-*`, never by glyph or label text; the icon set changes independently.
   - `npm --prefix tests/frontend run test:mutations` — self-check that the suite is load-bearing. It writes deliberately-broken copies of `index.html` to `tests/frontend/.tmp/` (never touching the real file) and requires the named tests to fail against each. Add a mutation whenever you add a guard worth keeping. If an anchor stops matching, the check fails loudly rather than passing on nothing.
-- `python3 -m py_compile fetchforge/server.py` — fast syntax check after edits.
+- `python3 -m py_compile fetchforge/*.py` — fast syntax check after edits.
 - `.venv/bin/python -c "from fetchforge import server; ..."` — import to unit-test pure funcs/helpers. **Use `.venv/bin/python`, not system python3** — yt-dlp is pip-installed in the venv (so `yt_dlp` is importable, and `_resolve_tool` finds it). Since tool resolution is now lazy, importing `server` no longer eagerly probes ffmpeg — only calling `get_ffmpeg()` (or startup's `HAS_SCALE_CUDA` probe / `run_server()`) does; ffmpeg still needs to be on PATH before exercising those.
 - `build_video_ffmpeg_args` / `run_encode` are testable with a **CPU** ffmpeg encode (no NVENC/GPU): make a clip with `ffmpeg -f lavfi -i testsrc=d=5 clip.mkv`, encode with `libx264 ... -progress pipe:1`, pass those args to `run_encode`.
 - The pipeline workers are **deadlock-prone**: validate any change to the dl/enc queue coordination with a small async simulation of the primitives (`file_q` maxsize=1, `abort`/`enc_gone`/`_cancel_requested`, sentinels) before shipping.
@@ -286,7 +296,7 @@ yield "data: {}\n\n".format(json.dumps({"msg": params["cq"]}))
 
 ## Versioning
 
-`fetchforge.__version__` in `fetchforge/__init__.py` (currently `"2.3.0"`), imported into `fetchforge/server.py` as `APP_VERSION` (`from fetchforge import __version__ as APP_VERSION`) and surfaced by `pyproject.toml`'s `dynamic = ["version"]` (`attr = "fetchforge.__version__"`) so the pip package version and the running app agree. Bump on every deploy. Displayed in the header as `v 2.3.0` with a green dot fetched from `GET /version` — confirms both HTML and server are fresh after a restart.
+`fetchforge.__version__` in `fetchforge/__init__.py` (currently `"2.3.0"`), imported into `fetchforge/config.py` as `APP_VERSION` and re-exported by `fetchforge/server.py` and surfaced by `pyproject.toml`'s `dynamic = ["version"]` (`attr = "fetchforge.__version__"`) so the pip package version and the running app agree. Bump on every deploy. Displayed in the header as `v 2.3.0` with a green dot fetched from `GET /version` — confirms both HTML and server are fresh after a restart.
 
 <!-- init-workspace:start -->
 ## Task tracking & work environment
@@ -392,7 +402,9 @@ pre-commit hook keeps `.memories/README.md` indexed).
 
 FetchForge is packaged as the `fetchforge` pip package (`pyproject.toml`) — there is no
 root-level `server.py` or `index.html` to edit. Application code and `index.html` live under
-`fetchforge/`: backend `fetchforge/server.py`, CLI entry point `fetchforge/cli.py` (the
+`fetchforge/`: backend `fetchforge/server.py` (app/middleware/routes) plus its focused
+modules (`jobs.py`, `ytdlp.py`, `encode.py`, `items.py`, `capabilities.py`, `cookies.py`,
+`sections.py`, `events.py`, `history.py`, `config.py`), CLI entry point `fetchforge/cli.py` (the
 `fetchforge` console script; also runnable as `python -m fetchforge` via
 `fetchforge/__main__.py`), and first-run ffmpeg provisioning in `fetchforge/provision.py`.
 Runtime state (`downloads/`, `logs/`, `cookies.txt`, `history.json`) is written to whatever

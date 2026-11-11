@@ -17,7 +17,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from fetchforge import server
+from fetchforge import server, encode, jobs
 
 _HAS_FFMPEG = shutil.which("ffmpeg") is not None
 
@@ -136,11 +136,11 @@ def _base(**kw):
     args = dict(height=1080, fps=30.0, video_bitrate_kbps=8000, codec="vp9",
                 pix_fmt="yuv420p", color_transfer="")
     args.update(kw)
-    return server.calc_encode_params(**args)
+    return encode.calc_encode_params(**args)
 
 
 def _argv(params, tune="hq"):
-    return server.build_video_ffmpeg_args(Path("in.mkv"), Path("out.mp4"), params, tune, "vp9")
+    return encode.build_video_ffmpeg_args(Path("in.mkv"), Path("out.mp4"), params, tune, "vp9")
 
 
 class TestAutoPathUnchanged(unittest.TestCase):
@@ -151,7 +151,7 @@ class TestAutoPathUnchanged(unittest.TestCase):
         checked = 0
         for kw in _auto_grid():
             ref = _frozen_calc_encode_params(**kw)
-            got = server.calc_encode_params(**kw)
+            got = encode.calc_encode_params(**kw)
             self.assertEqual({k: v for k, v in got.items() if k in _FROZEN_KEYS}, ref, kw)
             checked += 1
         self.assertGreater(checked, 2000, "grid collapsed — the guard would be vacuous")
@@ -269,7 +269,7 @@ class TestClampOrder(unittest.TestCase):
                           codec="h264", nvenc_tune=tune, sharpen=sharpen,
                           target_res=target, maxrate_override=mr)
                 out_h = target or height
-                ceil = server._res_ceiling_mbps(out_h, fps)
+                ceil = encode._res_ceiling_mbps(out_h, fps)
                 self.assertLessEqual(self._mbps(p), ceil,
                                      (height, fps, sharpen, tune, mr, target))
 
@@ -425,13 +425,13 @@ class TestTuneOverride(unittest.TestCase):
         """build_video_ffmpeg_args prefers params["tune"] so an override can't be
         lost between calc_encode_params and the argv."""
         p = _base(height=1080, nvenc_tune="hq", tune_override="uhq")
-        argv = server.build_video_ffmpeg_args(Path("i.mkv"), Path("o.mp4"), p, "hq", "vp9")
+        argv = encode.build_video_ffmpeg_args(Path("i.mkv"), Path("o.mp4"), p, "hq", "vp9")
         self.assertEqual(argv[argv.index("-tune") + 1], "uhq")
 
     def test_legacy_params_without_tune_still_honour_the_argument(self):
         legacy = {"cq": 24, "preset": "p2", "maxrate": "7M", "bufsize": "14M",
                   "pix_fmt": "yuv420p", "profile": "main", "bf": 3, "b_ref_mode": "middle"}
-        argv = server.build_video_ffmpeg_args(Path("i.mkv"), Path("o.mp4"), legacy, "hq", "vp9")
+        argv = encode.build_video_ffmpeg_args(Path("i.mkv"), Path("o.mp4"), legacy, "hq", "vp9")
         self.assertEqual(argv[argv.index("-tune") + 1], "hq")
 
 
@@ -547,7 +547,7 @@ class TestValidateEncodeOverrides(unittest.TestCase):
     def _v(self, **kw):
         args = dict(height=1080, fps=30.0)
         args.update(kw)
-        return server.validate_encode_overrides(**args)
+        return encode.validate_encode_overrides(**args)
 
     def test_defaults_are_all_auto(self):
         v = self._v()
@@ -568,14 +568,14 @@ class TestValidateEncodeOverrides(unittest.TestCase):
                          "auto tune is the caller's business; only overrides are downgraded")
 
     def test_res_ceiling_table(self):
-        self.assertEqual(server._res_ceiling_mbps(2160, 30.0), 20)
-        self.assertEqual(server._res_ceiling_mbps(2160, 60.0), 20)   # never bumped at 4K
-        self.assertEqual(server._res_ceiling_mbps(1440, 30.0), 12)
-        self.assertEqual(server._res_ceiling_mbps(1440, 60.0), 17)
-        self.assertEqual(server._res_ceiling_mbps(1080, 30.0), 7)
-        self.assertEqual(server._res_ceiling_mbps(1080, 60.0), 10)
-        self.assertEqual(server._res_ceiling_mbps(720, 30.0), 4)
-        self.assertEqual(server._res_ceiling_mbps(480, 30.0), 4)
+        self.assertEqual(encode._res_ceiling_mbps(2160, 30.0), 20)
+        self.assertEqual(encode._res_ceiling_mbps(2160, 60.0), 20)   # never bumped at 4K
+        self.assertEqual(encode._res_ceiling_mbps(1440, 30.0), 12)
+        self.assertEqual(encode._res_ceiling_mbps(1440, 60.0), 17)
+        self.assertEqual(encode._res_ceiling_mbps(1080, 30.0), 7)
+        self.assertEqual(encode._res_ceiling_mbps(1080, 60.0), 10)
+        self.assertEqual(encode._res_ceiling_mbps(720, 30.0), 4)
+        self.assertEqual(encode._res_ceiling_mbps(480, 30.0), 4)
 
     def test_helper_never_raises_on_any_input(self):
         for v in (None, "", "  ", "abc", -1, 999, 1.5, True, [], {}, object()):
@@ -628,7 +628,7 @@ class TestValidatedParamsAgainstRealFfmpeg(unittest.IsolatedAsyncioTestCase):
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def setUp(self):
-        server._cancel_requested.clear()
+        encode._cancel_requested.clear()
 
     def _cpu_args(self, params, out):
         """The NVENC argv's rate-control shape, on libx264 so it runs anywhere."""
@@ -642,7 +642,7 @@ class TestValidatedParamsAgainstRealFfmpeg(unittest.IsolatedAsyncioTestCase):
 
     async def _run(self, args):
         res: dict = {}
-        async for _ in server.run_encode(args, duration_secs=5.0, idx=1, total=1, result=res):
+        async for _ in encode.run_encode(args, duration_secs=5.0, idx=1, total=1, result=res):
             pass
         return res
 
@@ -662,7 +662,7 @@ class TestValidatedParamsAgainstRealFfmpeg(unittest.IsolatedAsyncioTestCase):
                "-progress", "pipe:1", "-nostats", str(self.tmp / "bad.mp4")]
         res = await self._run(bad)
         self.assertNotEqual(res["returncode"], 0)
-        self.assertIsNone(server.current_process)
+        self.assertIsNone(jobs.current_process)
 
 
 if __name__ == "__main__":
