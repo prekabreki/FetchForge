@@ -287,7 +287,7 @@ Obsolete under `requires-python = ">=3.12"`: Python 3.12+ allows backslashes ins
 
 ## Versioning
 
-`fetchforge.__version__` in `fetchforge/__init__.py` (currently `"2.3.0"`), imported into `fetchforge/config.py` as `APP_VERSION` and re-exported by `fetchforge/server.py` and surfaced by `pyproject.toml`'s `dynamic = ["version"]` (`attr = "fetchforge.__version__"`) so the pip package version and the running app agree. Bump on every deploy. Displayed in the header as `v 2.3.0` with a green dot fetched from `GET /version` — confirms both HTML and server are fresh after a restart.
+`fetchforge.__version__` in `fetchforge/__init__.py` (currently `"2.3.1"`), imported into `fetchforge/config.py` as `APP_VERSION` and re-exported by `fetchforge/server.py` and surfaced by `pyproject.toml`'s `dynamic = ["version"]` (`attr = "fetchforge.__version__"`) so the pip package version and the running app agree. Bump on every deploy. Displayed in the header as `v 2.3.1` with a green dot fetched from `GET /version` — confirms both HTML and server are fresh after a restart.
 
 <!-- init-workspace:start -->
 ## Task tracking & work environment
