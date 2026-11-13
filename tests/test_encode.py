@@ -152,5 +152,20 @@ class TestEncodePlan(unittest.TestCase):
         self.assertNotIn("-t", argv)
 
 
+class TestHvc1Tag(unittest.TestCase):
+    """Apple players refuse hev1-tagged HEVC in MP4; ffmpeg defaults to hev1 (#129)."""
+    PARAMS = {"cq": 24, "preset": "p2", "maxrate": "7M", "bufsize": "14M",
+              "pix_fmt": "yuv420p", "profile": "main", "bf": 3, "b_ref_mode": "middle"}
+
+    def test_video_argv_tags_hvc1(self):
+        for tune in ("hq", "uhq"):
+            with self.subTest(tune=tune):
+                a = encode.build_video_ffmpeg_args(
+                    Path("in.mkv"), Path("out.mp4"), self.PARAMS, tune, "vp9")
+                i = a.index("-tag:v")
+                self.assertEqual(a[i + 1], "hvc1")
+                self.assertGreater(i, a.index("hevc_nvenc"))
+
+
 if __name__ == "__main__":
     unittest.main()

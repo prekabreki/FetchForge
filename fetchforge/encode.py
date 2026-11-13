@@ -503,6 +503,8 @@ def build_video_ffmpeg_args(input_file: Path, output_file: Path, params: dict,
         "-loglevel", "info",
         *_decode_filter_args(input_file, params["pix_fmt"], cuvid, target_height, sharpen),
         "-c:v", "hevc_nvenc",
+        # mp4 muxer defaults HEVC to hev1, which Apple players refuse (#129).
+        "-tag:v", "hvc1",
         "-preset", effective_preset,
         "-profile:v", params["profile"],
         "-tune", effective_tune,
