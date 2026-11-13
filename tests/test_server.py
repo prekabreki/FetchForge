@@ -558,8 +558,8 @@ class TestFfmpegArgs(unittest.TestCase):
     def test_hq_has_bf_and_aq(self):
         a = encode.build_video_ffmpeg_args(Path("in.mkv"), Path("out.mp4"), self.PARAMS, "hq", "vp9")
         self.assertIn("-bf", a)
-        self.assertIn("-spatial_aq", a)
-        self.assertIn("-temporal_aq", a)
+        self.assertIn("-spatial-aq", a)
+        self.assertIn("-temporal-aq", a)
         self.assertEqual(a[a.index("-preset") + 1], "p2")   # hq keeps p2
         self.assertEqual(a[-1], "out.mp4")
         self.assertIn("hevc_nvenc", a)
@@ -567,7 +567,7 @@ class TestFfmpegArgs(unittest.TestCase):
     def test_uhq_omits_bf_and_aq_and_bumps_p2(self):
         a = encode.build_video_ffmpeg_args(Path("in.mkv"), Path("out.mp4"), self.PARAMS, "uhq", "vp9")
         self.assertNotIn("-bf", a)
-        self.assertNotIn("-spatial_aq", a)
+        self.assertNotIn("-spatial-aq", a)
         self.assertEqual(a[a.index("-preset") + 1], "p4")   # uhq rejects p2 → p4
 
     def test_passthrough_target_height_zero_omits_scale_dims(self):

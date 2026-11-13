@@ -373,10 +373,10 @@ class TestGarbageFallsBackToAuto(unittest.TestCase):
 
 class TestTuneOverride(unittest.TestCase):
     """Matrix row `tune`: "" = auto, hq, uhq. uhq must receive no -bf,
-    -b_ref_mode, -spatial_aq or -temporal_aq, and must degrade to hq when the
+    -b_ref_mode, -spatial-aq or -temporal-aq, and must degrade to hq when the
     startup probe says uhq is unavailable."""
 
-    UHQ_FORBIDDEN = ("-bf", "-b_ref_mode", "-spatial_aq", "-temporal_aq", "-aq-strength")
+    UHQ_FORBIDDEN = ("-bf", "-b_ref_mode", "-spatial-aq", "-temporal-aq", "-aq-strength")
 
     def test_uhq_override_emits_no_bframe_or_aq_flags(self):
         p = _base(height=2160, fps=60.0, nvenc_tune="hq", tune_override="uhq")
