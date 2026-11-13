@@ -516,7 +516,7 @@ def build_video_ffmpeg_args(input_file: Path, output_file: Path, params: dict,
         *(["-bf", str(params["bf"]), "-b_ref_mode", params["b_ref_mode"]] if effective_tune == "hq" else []),
         "-rc-lookahead", "16",
         # uhq enables AQ internally; explicit flags cause invalid param on SDK 12+.
-        *(["-spatial_aq", "1", "-aq-strength", "8", "-temporal_aq", "1"] if effective_tune != "uhq" else []),
+        *(["-spatial-aq", "1", "-aq-strength", "8", "-temporal-aq", "1"] if effective_tune != "uhq" else []),
         "-c:a", "aac",
         "-b:a", "192k",
         "-progress", "pipe:1",

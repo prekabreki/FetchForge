@@ -159,9 +159,9 @@ All events: `data: {JSON}\n\n`. **Every event is built by an `sse_*` helper** in
 
 ### Tune modes
 
-**`uhq` (Smart Auto ★):** Maximum quality archival. uhq manages B-frames and AQ internally — do NOT pass `-bf`, `-b_ref_mode`, `-spatial_aq`, `-temporal_aq` with uhq on SDK 12+ (causes `InitializeEncoder failed: invalid param (8)`). `_probe_nvenc_tune()` tests uhq at startup; falls back to `hq` automatically on old drivers. ~1.5× encode speed at 4K 60fps.
+**`uhq` (Smart Auto ★):** Maximum quality archival. uhq manages B-frames and AQ internally — do NOT pass `-bf`, `-b_ref_mode`, `-spatial-aq`, `-temporal-aq` with uhq on SDK 12+ (causes `InitializeEncoder failed: invalid param (8)`). `_probe_nvenc_tune()` tests uhq at startup; falls back to `hq` automatically on old drivers. ~1.5× encode speed at 4K 60fps.
 
-**`hq` (High Quality ⚡):** Fast mode for NLE editing. Explicit `-spatial_aq 1 -aq-strength 8 -temporal_aq 1` + `-bf 3 -b_ref_mode middle`. Source bitrate ceiling applied — output maxrate capped at source bitrate so files stay ≤ source size. ~4–6× encode speed.
+**`hq` (High Quality ⚡):** Fast mode for NLE editing. Explicit `-spatial-aq 1 -aq-strength 8 -temporal-aq 1` + `-bf 3 -b_ref_mode middle`. Source bitrate ceiling applied — output maxrate capped at source bitrate so files stay ≤ source size. ~4–6× encode speed.
 
 `effective_tune = "hq" if tune_mode == "hq" else _nvenc_tune`
 
