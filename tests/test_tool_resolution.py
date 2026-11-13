@@ -65,8 +65,11 @@ class TestYtdlpArgvResolution(unittest.TestCase):
             pathbin = Path(td) / "pathbin"
             (prefix / "bin").mkdir(parents=True)
             pathbin.mkdir(parents=True)
-            venv_ytdlp = prefix / "bin" / "yt-dlp"
-            path_ytdlp = pathbin / "yt-dlp"
+            # Windows' shutil.which only matches PATHEXT names, so the files
+            # need .exe there; the resolver accepts both spellings.
+            ext = ".exe" if os.name == "nt" else ""
+            venv_ytdlp = prefix / "bin" / f"yt-dlp{ext}"
+            path_ytdlp = pathbin / f"yt-dlp{ext}"
             venv_ytdlp.write_text("#!/bin/sh\n")
             path_ytdlp.write_text("#!/bin/sh\n")
             venv_ytdlp.chmod(0o755)
@@ -75,7 +78,9 @@ class TestYtdlpArgvResolution(unittest.TestCase):
                  mock.patch.object(ytdlp, "IS_WINDOWS", False), \
                  mock.patch.object(ytdlp, "sys") as fake_sys:
                 fake_sys.prefix = str(prefix)
-                self.assertEqual(shutil.which("yt-dlp"), str(path_ytdlp))
+                # normcase: Windows which() appends PATHEXT's ".EXE" casing.
+                self.assertEqual(os.path.normcase(shutil.which("yt-dlp")),
+                                 os.path.normcase(str(path_ytdlp)))
                 self.assertEqual(ytdlp.get_ytdlp_argv(), [str(venv_ytdlp)])
 
     def test_raises_only_when_module_is_absent_too(self):
