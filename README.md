@@ -89,6 +89,13 @@ cwd — the normal pip install path never needs them.
 
 Working from a clone instead: run `./launch.sh` (or `launch.bat` on Windows) — it sets up a `.venv`, installs the package in editable mode, and starts the server the same way.
 
+### Playing the output
+
+Converted videos are H.265/HEVC in MP4, which Windows' built-in players refuse to play unless you've bought Microsoft's HEVC Video Extensions from the Store.
+VLC and mpv play them with nothing extra installed.
+Apple players (QuickTime, Safari, iOS) accept them too, since the files are tagged `hvc1`.
+Audio-extract output (WAV/MP3) plays anywhere.
+
 ## Cookies
 
 Public videos need no cookies. Cookies are only necessary for age-restricted,
