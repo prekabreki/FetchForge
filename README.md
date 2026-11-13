@@ -39,8 +39,10 @@ cd fetchforge
 ./launch.sh        # Windows: launch.bat
 ```
 
-> On Windows, `launch.bat` creates the `.venv` with whatever `python` resolves to
-> on `PATH` (or `%PYTHON%` if you set it). If that interpreter is the Microsoft
+> On Windows, `launch.bat` creates the `.venv` with `%PYTHON%` if you set it,
+> otherwise with `python` from `PATH`, falling back to the `py -3` launcher when
+> that one is older than 3.12 (apps that bundle their own Python tend to put it
+> first on `PATH`). If the interpreter it picks is the Microsoft
 > Store build of Python, the venv inherits its `%LOCALAPPDATA%` filesystem
 > virtualization — relevant because the NVENC-ffmpeg auto-provision cache also
 > lives under `%LOCALAPPDATA%\FetchForge\ffmpeg`. Prefer a python.org install

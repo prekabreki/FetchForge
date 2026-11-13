@@ -1,2 +1,6 @@
 # Managed by init-workspace: the git hook must stay LF or its #!/bin/sh shebang breaks on checkout.
 .githooks/pre-commit text eol=lf
+
+# cmd.exe can miss goto/call labels in an LF-only batch file, so keep the Windows launchers CRLF on every checkout.
+*.bat text eol=crlf
+*.vbs text eol=crlf
