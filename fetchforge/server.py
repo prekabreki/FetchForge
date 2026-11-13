@@ -270,13 +270,7 @@ async def clear_history():
 
 @app.get("/ytdlp-version")
 async def ytdlp_version():
-    proc = await asyncio.create_subprocess_exec(
-        *ytdlp.get_ytdlp_argv(), "--version",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, _ = await proc.communicate()
-    return {"version": stdout.decode().strip()}
+    return {"version": await ytdlp.read_ytdlp_version(ytdlp.get_ytdlp_argv())}
 
 
 @app.post("/update-ytdlp")
@@ -294,7 +288,9 @@ async def update_ytdlp():
     elif ytdlp._ytdlp_in_this_env(ytdlp_argv):
         cmd = ytdlp._ytdlp_upgrade_cmd()
         if cmd is None:
-            return {"output": (
+            return {"ok": False,
+                    "summary": "yt-dlp not updated: neither pip nor uv is available in this environment",
+                    "output": (
                 "yt-dlp is installed in this interpreter's environment, but "
                 "neither pip nor uv is available to upgrade it.\n"
                 "Install one of them, then run one of:\n"
@@ -302,24 +298,33 @@ async def update_ytdlp():
                 '  uv pip install --python {} -U "yt-dlp[default]"'
             ).format(sys.executable, sys.executable)}
     else:
-        return {"output": (
+        return {"ok": False,
+                "summary": "yt-dlp not updated: it is a system binary, update it with your package manager",
+                "output": (
             "yt-dlp here is a system/package-managed binary at {}.\n"
             "FetchForge can't update it in place — update it with your OS package "
             "manager (e.g. `sudo dnf upgrade yt-dlp` or `sudo apt upgrade yt-dlp`), "
             "or run FetchForge from a virtualenv where yt-dlp is a pip dependency."
         ).format(ytdlp_argv[0])}
+    before = await ytdlp.read_ytdlp_version(ytdlp_argv)
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
     )
     stdout, _ = await proc.communicate()
+    output = stdout.decode(errors="replace").strip()
+    config.logger.info("yt-dlp update (exit %s):\n%s", proc.returncode, output)
     # get_ytdlp_argv() is cached; a successful upgrade can change which yt-dlp
     # the resolver would pick (e.g. a console script appears), so drop the cache
     # and let the next call re-resolve.
+    after = ""
     if proc.returncode == 0:
         ytdlp.get_ytdlp_argv.cache_clear()
-    return {"output": stdout.decode(errors="replace").strip()}
+        after = await ytdlp.read_ytdlp_version(ytdlp.get_ytdlp_argv())
+    return {"ok": proc.returncode == 0,
+            "summary": ytdlp.summarize_ytdlp_update(before, after, proc.returncode, output),
+            "output": output}
 
 
 @app.get("/video-info")

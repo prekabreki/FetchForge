@@ -94,6 +94,18 @@ const MUTATIONS = [
     expect: ['a title-only resolve with a format error shows the reason'],
   },
   {
+    id: 'i130/ytdlp-update-one-line',
+    guard: 'logging the server summary (not the raw output) in updateYtdlp()',
+    breaks: 'every page load opens the Progress log with a wall of pip "Requirement already satisfied" lines',
+    find: "if (d.summary) log(d.summary, d.ok === false ? 'error' : '');",
+    replace: "if (d.output) log('yt-dlp: ' + d.output);",
+    file: 'ytdlp-update-log.test.mjs',
+    expect: [
+      'an up-to-date page-load update logs exactly one summary line',
+      'a failed page-load update still shows its reason, as an error',
+    ],
+  },
+  {
     id: '76/range-order',
     guard: 'the To-after-From check in readSectionFields()',
     breaks: 'a reversed range is queued and only rejected by the server mid-run',

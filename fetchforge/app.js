@@ -1083,7 +1083,8 @@ async function updateYtdlp() {
   try {
     const r = await fetch(`${API}/update-ytdlp`, { method: 'POST' });
     const d = await r.json();
-    if (d.output) log('yt-dlp: ' + d.output);
+    // One line only (#130); the raw pip output is in server.log.
+    if (d.summary) log(d.summary, d.ok === false ? 'error' : '');
     fetchVersion();
   } catch {}
 }
