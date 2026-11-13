@@ -131,6 +131,34 @@ def _ytdlp_upgrade_cmd() -> list | None:
     return None
 
 
+async def read_ytdlp_version(argv: list) -> str:
+    """`yt-dlp --version` for *argv*, or "" if it cannot be run."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv, "--version",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await proc.communicate()
+    except OSError:
+        return ""
+    return stdout.decode(errors="replace").strip()
+
+
+def summarize_ytdlp_update(before: str, after: str, returncode: int, output: str) -> str:
+    """One log line for an update run (#130). The raw updater output (a dozen
+    pip "Requirement already satisfied" lines) belongs in server.log, not here."""
+    if returncode != 0:
+        lines = [ln.strip() for ln in output.splitlines() if ln.strip()]
+        reason = next((ln for ln in lines if "error" in ln.lower()),
+                      lines[-1] if lines else f"exit code {returncode}")
+        return f"yt-dlp update failed: {reason[:200]}"
+    if before and after and before != after:
+        return f"yt-dlp updated {before} -> {after}"
+    version = after or before
+    return f"yt-dlp up to date ({version})" if version else "yt-dlp up to date"
+
+
 def _resolve_node_args() -> list:
     """yt-dlp's JS runtime for solving challenges. Resolve node from PATH;
     fall back to the canonical Windows install location it always used."""

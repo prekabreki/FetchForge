@@ -105,9 +105,11 @@ class TestUpdateYtdlpBranches(unittest.TestCase):
         proc.communicate = mock.AsyncMock(return_value=(output, None))
         return proc
 
-    def _run(self, proc, find_spec_return, which_return=None):
+    def _run(self, proc, find_spec_return, which_return=None, versions=("2026.10.23", "2026.10.23")):
         spawn = mock.AsyncMock(return_value=proc)
         with mock.patch.object(ytdlp, "get_ytdlp_argv", return_value=["/venv/bin/yt-dlp"]), \
+             mock.patch.object(ytdlp, "read_ytdlp_version",
+                               new=mock.AsyncMock(side_effect=list(versions))), \
              mock.patch.object(ytdlp, "_ytdlp_in_this_env", return_value=True), \
              mock.patch.object(ytdlp, "IS_WINDOWS", False), \
              mock.patch("importlib.util.find_spec", return_value=find_spec_return), \
@@ -145,6 +147,7 @@ class TestUpdateYtdlpBranches(unittest.TestCase):
              mock.patch.object(ytdlp, "_ytdlp_in_this_env", return_value=True), \
              mock.patch.object(ytdlp, "IS_WINDOWS", False), \
              mock.patch("importlib.util.find_spec", return_value=object()), \
+             mock.patch.object(ytdlp, "read_ytdlp_version", new=mock.AsyncMock(return_value="")), \
              mock.patch("asyncio.create_subprocess_exec",
                         new=mock.AsyncMock(return_value=self._fake_proc())):
             asyncio.run(server.update_ytdlp())
@@ -156,10 +159,54 @@ class TestUpdateYtdlpBranches(unittest.TestCase):
              mock.patch.object(ytdlp, "_ytdlp_in_this_env", return_value=True), \
              mock.patch.object(ytdlp, "IS_WINDOWS", False), \
              mock.patch("importlib.util.find_spec", return_value=object()), \
+             mock.patch.object(ytdlp, "read_ytdlp_version", new=mock.AsyncMock(return_value="")), \
              mock.patch("asyncio.create_subprocess_exec",
                         new=mock.AsyncMock(return_value=self._fake_proc(returncode=1))):
             asyncio.run(server.update_ytdlp())
         fake_get.cache_clear.assert_not_called()
+
+    # #130: the page logs `summary`, one line; pip's dump stays in `output`.
+    PIP_NOISE = (b"Requirement already satisfied: yt-dlp[default] in c:\\venv\\lib (2026.10.23)\r\n"
+                 b"Requirement already satisfied: brotli in c:\\venv\\lib (1.1.0)\r\n"
+                 b"\r\n[notice] A new release of pip is available: 25.2 -> 25.3\r\n")
+
+    def test_summary_up_to_date_is_one_line(self):
+        out, _ = self._run(self._fake_proc(output=self.PIP_NOISE), find_spec_return=object())
+        self.assertEqual(out["summary"], "yt-dlp up to date (2026.10.23)")
+        self.assertTrue(out["ok"])
+        self.assertIn("Requirement already satisfied", out["output"])
+
+    def test_summary_names_both_versions_on_upgrade(self):
+        out, _ = self._run(self._fake_proc(output=b"Successfully installed yt-dlp-2026.10.26"),
+                           find_spec_return=object(), versions=("2026.10.23", "2026.10.26"))
+        self.assertEqual(out["summary"], "yt-dlp updated 2026.10.23 -> 2026.10.26")
+
+    def test_summary_on_failure_carries_the_error_line(self):
+        noise = b"Collecting yt-dlp\nERROR: Could not find a version that satisfies yt-dlp\nmore\n"
+        out, _ = self._run(self._fake_proc(returncode=1, output=noise),
+                           find_spec_return=object(), versions=("2026.10.23",))
+        self.assertEqual(out["summary"],
+                         "yt-dlp update failed: ERROR: Could not find a version that satisfies yt-dlp")
+        self.assertFalse(out["ok"])
+
+    def test_cannot_update_still_gets_a_summary(self):
+        out, _ = self._run(self._fake_proc(), find_spec_return=None, which_return=None)
+        self.assertFalse(out["ok"])
+        self.assertTrue(out["summary"].startswith("yt-dlp not updated:"))
+        self.assertNotIn("\n", out["summary"])
+
+
+class TestSummarizeYtdlpUpdate(unittest.TestCase):
+    def test_failure_without_error_word_uses_last_line(self):
+        self.assertEqual(ytdlp.summarize_ytdlp_update("a", "", 2, "one\ntwo\n"),
+                         "yt-dlp update failed: two")
+
+    def test_failure_with_no_output_names_exit_code(self):
+        self.assertEqual(ytdlp.summarize_ytdlp_update("a", "", 3, ""),
+                         "yt-dlp update failed: exit code 3")
+
+    def test_unknown_versions_still_one_line(self):
+        self.assertEqual(ytdlp.summarize_ytdlp_update("", "", 0, "x\ny"), "yt-dlp up to date")
 
 
 class TestLazyToolResolution(unittest.TestCase):
