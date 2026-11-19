@@ -226,7 +226,7 @@ async def fetch_item(item, emit, stopping, *, total, pipelined=False, job=None):
     if (job.cancel.is_set() if job is not None else encode._cancel_requested.is_set()) or stopping():
         return None   # user cancelled / pipeline aborted — not a download failure
 
-    allowed_suffixes = ytdlp._AUDIO_EXTS if is_audio else {".mkv"}
+    allowed_suffixes = ytdlp._AUDIO_MODE_EXTS if is_audio else {".mkv"}
     files = []
     if output_paths:
         files = sorted(
@@ -265,10 +265,12 @@ async def fetch_item(item, emit, stopping, *, total, pipelined=False, job=None):
             return None
 
     if not files:
+        looked_for = ("No audio or video file ({}) found".format(
+            ", ".join(sorted(allowed_suffixes))) if is_audio else "No .mkv found")
         await emit(events._ev_item_failed(idx, total, "no output"))
         if total == 1:
-            await emit(events._ev_error("{}No .mkv found after download.".format(label)))
-        await emit(events._ev_log("{}No .mkv found after download \u2014 skipping, continuing with the rest.".format(dl_label)))
+            await emit(events._ev_error("{}{} after download.".format(label, looked_for)))
+        await emit(events._ev_log("{}{} after download \u2014 skipping, continuing with the rest.".format(dl_label, looked_for)))
         return None
 
     await emit(events._ev_log("{}Queued for encoding.".format(dl_label)))

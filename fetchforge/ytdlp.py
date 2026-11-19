@@ -236,6 +236,14 @@ def _predict_output_stem(title: str, suffix: str = "") -> str:
 # Audio-stream containers yt-dlp may produce when downloading audio-only formats.
 _AUDIO_EXTS = {".webm", ".m4a", ".opus", ".ogg", ".mp3", ".aac", ".wav", ".flac"}
 
+# Combined video+audio containers the audio selector's `b` fallback can land
+# as when a video offers no audio-only format (#141).
+_COMBINED_EXTS = {".mp4", ".mkv", ".webm"}
+
+# Every finished file an audio-mode download may produce. Suffix-exact, so a
+# yt-dlp `.part`/`.ytdl` leftover never matches.
+_AUDIO_MODE_EXTS = _AUDIO_EXTS | _COMBINED_EXTS
+
 
 def _newest_new_file(cache_dir: Path, pre_existing: set, pattern="*.mkv"):
     """The most-recently-modified file matching `pattern` that appeared in
@@ -244,7 +252,7 @@ def _newest_new_file(cache_dir: Path, pre_existing: set, pattern="*.mkv"):
     file already sitting in the shared cache (issue #8). None if nothing new.
 
     `pattern` may be one glob or an iterable of globs: audio downloads can land
-    with any `_AUDIO_EXTS` suffix, which no single glob covers."""
+    with any `_AUDIO_MODE_EXTS` suffix, which no single glob covers."""
     patterns = [pattern] if isinstance(pattern, str) else list(pattern)
     candidates = set()
     for pat in patterns:
@@ -255,10 +263,10 @@ def _newest_new_file(cache_dir: Path, pre_existing: set, pattern="*.mkv"):
 
 def _cache_snapshot_patterns(is_audio: bool) -> list:
     """Every file type yt-dlp may write for this download mode. Audio has many
-    possible suffixes, so the snapshot/fallback must cover all of `_AUDIO_EXTS`
-    rather than only `*.mkv` (issue #92)."""
+    possible suffixes, so the snapshot/fallback must cover all of
+    `_AUDIO_MODE_EXTS` rather than only `*.mkv` (issues #92, #141)."""
     if is_audio:
-        return ["*" + ext for ext in sorted(_AUDIO_EXTS)]
+        return ["*" + ext for ext in sorted(_AUDIO_MODE_EXTS)]
     return ["*.mkv"]
 
 
